@@ -21,7 +21,7 @@ use ratatui::{
 use sqeel_core::{
     AppState, UiProvider,
     highlight::Highlighter,
-    state::{Focus, KeybindingMode, ResultsPane, VimMode},
+    state::{AddConnectionField, Focus, KeybindingMode, ResultsPane, VimMode},
 };
 
 pub struct TuiProvider;
@@ -88,7 +88,34 @@ async fn run_loop(
             let vim_mode = s.vim_mode;
             let show_completions = s.show_completions;
             let show_switcher = s.show_connection_switcher;
+            let show_add = s.show_add_connection;
             drop(s);
+
+            // ── Add connection modal (highest priority) ──────────────────────
+            if show_add {
+                match (key.modifiers, key.code) {
+                    (KeyModifiers::NONE, KeyCode::Esc) => {
+                        state.lock().unwrap().close_add_connection();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Tab) => {
+                        state.lock().unwrap().add_connection_tab();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Enter) => {
+                        let result = state.lock().unwrap().save_new_connection();
+                        if let Err(e) = result {
+                            state.lock().unwrap().set_error(format!("Save failed: {e}"));
+                        }
+                    }
+                    (KeyModifiers::NONE, KeyCode::Backspace) => {
+                        state.lock().unwrap().add_connection_backspace();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char(ch)) => {
+                        state.lock().unwrap().add_connection_type_char(ch);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
 
             // ── Connection switcher modal ────────────────────────────────────
             if show_switcher {
@@ -101,6 +128,9 @@ async fn run_loop(
                     }
                     (KeyModifiers::NONE, KeyCode::Char('k')) => {
                         state.lock().unwrap().switcher_up();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char('n')) => {
+                        state.lock().unwrap().open_add_connection();
                     }
                     (KeyModifiers::NONE, KeyCode::Enter) => {
                         state.lock().unwrap().confirm_connection_switch();
@@ -304,6 +334,11 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor) {
     // Connection switcher modal (top-level overlay)
     if state.show_connection_switcher {
         draw_connection_switcher(f, state, area);
+    }
+
+    // Add connection dialog (above switcher)
+    if state.show_add_connection {
+        draw_add_connection(f, state, area);
     }
 }
 
@@ -549,11 +584,69 @@ fn draw_connection_switcher(f: &mut ratatui::Frame<'_>, state: &AppState, area: 
     f.render_widget(
         List::new(items).block(
             Block::default()
-                .title(" Connections (j/k navigate, Enter select, Esc close) ")
+                .title(" Connections (j/k select, Enter connect, n new, Esc close) ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow)),
         ),
         popup,
+    );
+}
+
+fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect) {
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = 7;
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Add Connection (Tab switch, Enter save, Esc cancel) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let name_style = if state.add_connection_field == AddConnectionField::Name {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let url_style = if state.add_connection_field == AddConnectionField::Url {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    f.render_widget(
+        Paragraph::new(format!("Name : {}_", state.add_connection_name)).style(name_style),
+        rows[0],
+    );
+    f.render_widget(
+        Paragraph::new(format!("URL  : {}_", state.add_connection_url)).style(url_style),
+        rows[1],
+    );
+    f.render_widget(
+        Paragraph::new("Only letters, digits, - and _ allowed in name")
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[2],
     );
 }
 

@@ -22,6 +22,13 @@ pub enum VimMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AddConnectionField {
+    #[default]
+    Name,
+    Url,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
     #[default]
     Editor,
@@ -68,6 +75,11 @@ pub struct AppState {
     pub show_connection_switcher: bool,
     pub connection_switcher_cursor: usize,
     pub pending_reconnect: Option<String>,
+    // Add connection dialog
+    pub show_add_connection: bool,
+    pub add_connection_name: String,
+    pub add_connection_url: String,
+    pub add_connection_field: AddConnectionField,
     // Live query channel — set by the binary when connected
     pub query_tx: Option<tokio::sync::mpsc::Sender<String>>,
 }
@@ -207,6 +219,56 @@ impl AppState {
         }
         self.show_connection_switcher = false;
         url
+    }
+
+    pub fn open_add_connection(&mut self) {
+        self.show_add_connection = true;
+        self.add_connection_name.clear();
+        self.add_connection_url.clear();
+        self.add_connection_field = AddConnectionField::Name;
+    }
+
+    pub fn close_add_connection(&mut self) {
+        self.show_add_connection = false;
+    }
+
+    pub fn add_connection_tab(&mut self) {
+        self.add_connection_field = match self.add_connection_field {
+            AddConnectionField::Name => AddConnectionField::Url,
+            AddConnectionField::Url => AddConnectionField::Name,
+        };
+    }
+
+    pub fn add_connection_type_char(&mut self, ch: char) {
+        match self.add_connection_field {
+            AddConnectionField::Name => self.add_connection_name.push(ch),
+            AddConnectionField::Url => self.add_connection_url.push(ch),
+        }
+    }
+
+    pub fn add_connection_backspace(&mut self) {
+        match self.add_connection_field {
+            AddConnectionField::Name => {
+                self.add_connection_name.pop();
+            }
+            AddConnectionField::Url => {
+                self.add_connection_url.pop();
+            }
+        }
+    }
+
+    /// Validate, persist, and register the new connection. Closes dialog on success.
+    pub fn save_new_connection(&mut self) -> anyhow::Result<()> {
+        let name = self.add_connection_name.trim().to_string();
+        let url = self.add_connection_url.trim().to_string();
+        if name.is_empty() || url.is_empty() {
+            anyhow::bail!("Name and URL are required");
+        }
+        crate::config::save_connection(&name, &url)?;
+        self.available_connections
+            .push(crate::config::ConnectionConfig { name, url });
+        self.show_add_connection = false;
+        Ok(())
     }
 
     /// Try to send a query to the active executor. Returns false if not connected.

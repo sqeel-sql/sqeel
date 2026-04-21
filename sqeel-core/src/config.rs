@@ -52,12 +52,21 @@ pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("sqeel"))
 }
 
+const DEFAULT_CONFIG: &str = r#"[editor]
+# Keybinding mode: "vim" or "emacs"
+keybindings = "vim"
+
+# Path to the SQL LSP binary (sqls recommended: https://github.com/sqls-server/sqls)
+lsp_binary = "sqls"
+"#;
+
 pub fn load_main_config() -> anyhow::Result<MainConfig> {
-    let path = config_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?
-        .join("config.toml");
+    let dir = config_dir().ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?;
+    let path = dir.join("config.toml");
 
     if !path.exists() {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, DEFAULT_CONFIG)?;
         return Ok(MainConfig::default());
     }
 
@@ -91,6 +100,22 @@ pub fn load_connections() -> anyhow::Result<Vec<ConnectionConfig>> {
         }
     }
     Ok(conns)
+}
+
+pub fn save_connection(name: &str, url: &str) -> anyhow::Result<()> {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!("Connection name may only contain letters, digits, - and _");
+    }
+    let conns_dir = config_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?
+        .join("conns");
+    std::fs::create_dir_all(&conns_dir)?;
+    let content = format!("url = {url:?}\n");
+    std::fs::write(conns_dir.join(format!("{name}.toml")), content)?;
+    Ok(())
 }
 
 #[cfg(test)]

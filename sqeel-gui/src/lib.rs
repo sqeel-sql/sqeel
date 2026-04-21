@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use iced::{
     Color, Element, Length, Task, Theme,
-    widget::{button, column, container, row, scrollable, text, text_editor},
+    widget::{button, column, container, row, scrollable, text, text_editor, text_input},
 };
 use sqeel_core::{
     AppState, UiProvider,
@@ -55,6 +55,12 @@ pub enum Message {
     SwitcherUp,
     SwitcherDown,
     ConfirmConnectionSwitch,
+    OpenAddConnection,
+    CloseAddConnection,
+    AddNameChanged(String),
+    AddUrlChanged(String),
+    AddConnectionTabField,
+    SaveNewConnection,
 }
 
 // ── Application ───────────────────────────────────────────────────────────────
@@ -134,6 +140,30 @@ impl SqeelApp {
             Message::ConfirmConnectionSwitch => {
                 self.state.lock().unwrap().confirm_connection_switch();
             }
+            Message::OpenAddConnection => {
+                self.state.lock().unwrap().open_add_connection();
+            }
+            Message::CloseAddConnection => {
+                self.state.lock().unwrap().close_add_connection();
+            }
+            Message::AddNameChanged(s) => {
+                self.state.lock().unwrap().add_connection_name = s;
+            }
+            Message::AddUrlChanged(s) => {
+                self.state.lock().unwrap().add_connection_url = s;
+            }
+            Message::AddConnectionTabField => {
+                self.state.lock().unwrap().add_connection_tab();
+            }
+            Message::SaveNewConnection => {
+                let result = self.state.lock().unwrap().save_new_connection();
+                if let Err(e) = result {
+                    self.state
+                        .lock()
+                        .unwrap()
+                        .set_error(format!("Save failed: {e}"));
+                }
+            }
         }
         Task::none()
     }
@@ -166,6 +196,9 @@ impl SqeelApp {
             .iter()
             .map(|c| (c.name.clone(), c.url.clone()))
             .collect();
+        let show_add = s.show_add_connection;
+        let add_name = s.add_connection_name.clone();
+        let add_url = s.add_connection_url.clone();
         drop(s);
 
         // Schema panel
@@ -316,12 +349,18 @@ impl SqeelApp {
             }
 
             switcher_col = switcher_col.push(
-                button(text("Close").size(12))
-                    .on_press(Message::CloseConnectionSwitcher)
-                    .style(iced::widget::button::danger),
+                row![
+                    button(text("+ New").size(12))
+                        .on_press(Message::OpenAddConnection)
+                        .style(iced::widget::button::secondary),
+                    button(text("Close").size(12))
+                        .on_press(Message::CloseConnectionSwitcher)
+                        .style(iced::widget::button::danger),
+                ]
+                .spacing(8),
             );
 
-            let overlay = container(switcher_col)
+            let switcher_overlay = container(switcher_col)
                 .width(Length::Fixed(480.0))
                 .padding(16)
                 .style(|theme: &Theme| {
@@ -337,9 +376,113 @@ impl SqeelApp {
                     }
                 });
 
+            let stacked = iced::widget::stack![
+                base,
+                container(switcher_overlay)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center),
+            ];
+
+            if show_add {
+                let add_col = column![
+                    text("Add Connection")
+                        .size(14)
+                        .color(Color::from_rgb(0.4, 1.0, 0.4)),
+                    text("Name").size(12),
+                    text_input("my-db", &add_name)
+                        .on_input(Message::AddNameChanged)
+                        .padding(6),
+                    text("URL").size(12),
+                    text_input("mysql://user:pass@host/db", &add_url)
+                        .on_input(Message::AddUrlChanged)
+                        .padding(6),
+                    row![
+                        button(text("Save").size(12))
+                            .on_press(Message::SaveNewConnection)
+                            .style(iced::widget::button::primary),
+                        button(text("Cancel").size(12))
+                            .on_press(Message::CloseAddConnection)
+                            .style(iced::widget::button::danger),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(6);
+
+                let add_overlay = container(add_col)
+                    .width(Length::Fixed(400.0))
+                    .padding(16)
+                    .style(|theme: &Theme| {
+                        let palette = theme.extended_palette();
+                        iced::widget::container::Style {
+                            background: Some(palette.background.strong.color.into()),
+                            border: iced::Border {
+                                color: palette.success.strong.color,
+                                width: 1.0,
+                                radius: 6.0.into(),
+                            },
+                            ..Default::default()
+                        }
+                    });
+
+                iced::widget::stack![
+                    stacked,
+                    container(add_overlay)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center),
+                ]
+                .into()
+            } else {
+                stacked.into()
+            }
+        } else if show_add {
+            // add dialog without switcher (shouldn't normally happen, but handle gracefully)
+            let add_col = column![
+                text("Add Connection")
+                    .size(14)
+                    .color(Color::from_rgb(0.4, 1.0, 0.4)),
+                text("Name").size(12),
+                text_input("my-db", &add_name)
+                    .on_input(Message::AddNameChanged)
+                    .padding(6),
+                text("URL").size(12),
+                text_input("mysql://user:pass@host/db", &add_url)
+                    .on_input(Message::AddUrlChanged)
+                    .padding(6),
+                row![
+                    button(text("Save").size(12))
+                        .on_press(Message::SaveNewConnection)
+                        .style(iced::widget::button::primary),
+                    button(text("Cancel").size(12))
+                        .on_press(Message::CloseAddConnection)
+                        .style(iced::widget::button::danger),
+                ]
+                .spacing(8),
+            ]
+            .spacing(6);
+
+            let add_overlay = container(add_col)
+                .width(Length::Fixed(400.0))
+                .padding(16)
+                .style(|theme: &Theme| {
+                    let palette = theme.extended_palette();
+                    iced::widget::container::Style {
+                        background: Some(palette.background.strong.color.into()),
+                        border: iced::Border {
+                            color: palette.success.strong.color,
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                });
+
             iced::widget::stack![
                 base,
-                container(overlay)
+                container(add_overlay)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .align_x(iced::alignment::Horizontal::Center)
