@@ -25,6 +25,8 @@ pub struct Editor<'a> {
     pub textarea: TextArea<'a>,
     pub vim_mode: VimMode,
     pub keybinding_mode: KeybindingMode,
+    /// Set when the user yanks text; caller should drain this to write to clipboard.
+    pub last_yank: Option<String>,
 }
 
 impl<'a> Editor<'a> {
@@ -34,6 +36,7 @@ impl<'a> Editor<'a> {
             textarea,
             vim_mode: VimMode::Normal,
             keybinding_mode,
+            last_yank: None,
         }
     }
 
@@ -107,6 +110,7 @@ impl<'a> Editor<'a> {
             }
             (KeyModifiers::NONE, KeyCode::Char('v')) => {
                 self.vim_mode = VimMode::Visual;
+                self.textarea.start_selection();
                 true
             }
             (KeyModifiers::NONE, KeyCode::Char('h')) => {
@@ -170,6 +174,17 @@ impl<'a> Editor<'a> {
     fn vim_visual(&mut self, key: KeyEvent) -> bool {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Esc) => {
+                self.textarea.cancel_selection();
+                self.vim_mode = VimMode::Normal;
+                true
+            }
+            (KeyModifiers::NONE, KeyCode::Char('y')) => {
+                self.textarea.copy();
+                let yanked = self.textarea.yank_text();
+                if !yanked.is_empty() {
+                    self.last_yank = Some(yanked);
+                }
+                self.textarea.cancel_selection();
                 self.vim_mode = VimMode::Normal;
                 true
             }

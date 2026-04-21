@@ -1,5 +1,6 @@
 pub mod editor;
 
+use arboard::Clipboard;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -103,6 +104,13 @@ async fn run_loop(
     let mut last_completion_id: Option<i64> = None;
     let mut debug_tick: u32 = 0;
 
+    // Clipboard held alive for the session so the OS clipboard manager sees the content.
+    let mut clipboard = Clipboard::new().ok();
+    // Mouse drag tracking
+    let mut last_draw_areas = DrawAreas::default();
+    let mut mouse_select_start: Option<(u16, u16)> = None;
+    let mut mouse_did_drag = false;
+
     loop {
         // Sync editor content + re-highlight
         let content = editor.content();
@@ -170,7 +178,7 @@ async fn run_loop(
 
         terminal.draw(|f| {
             let s = state.lock().unwrap();
-            draw(f, &s, &editor, debug_scroll);
+            last_draw_areas = draw(f, &s, &editor, debug_scroll);
         })?;
 
         if !event::poll(Duration::from_millis(50))? {
@@ -209,6 +217,33 @@ async fn run_loop(
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         state.lock().unwrap().focus = pane;
+                        mouse_select_start = Some((mouse.column, mouse.row));
+                        mouse_did_drag = false;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        mouse_did_drag = true;
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if mouse_did_drag {
+                            if let Some(start) = mouse_select_start {
+                                let end = (mouse.column, mouse.row);
+                                let s = state.lock().unwrap();
+                                if let Some(text) = extract_mouse_selection(
+                                    start,
+                                    end,
+                                    &last_draw_areas,
+                                    &editor,
+                                    &s,
+                                ) {
+                                    drop(s);
+                                    if let Some(ref mut cb) = clipboard {
+                                        let _ = cb.set_text(text);
+                                    }
+                                }
+                            }
+                        }
+                        mouse_select_start = None;
+                        mouse_did_drag = false;
                     }
                     MouseEventKind::ScrollDown => match pane {
                         Focus::Schema => state.lock().unwrap().schema_cursor_down(),
@@ -285,6 +320,15 @@ async fn run_loop(
                         }
                         (KeyModifiers::NONE, KeyCode::Char('n')) => {
                             state.lock().unwrap().open_add_connection();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('e')) => {
+                            state.lock().unwrap().open_edit_connection();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('d')) => {
+                            let result = state.lock().unwrap().delete_selected_connection();
+                            if let Err(e) = result {
+                                state.lock().unwrap().set_error(format!("Delete failed: {e}"));
+                            }
                         }
                         (KeyModifiers::NONE, KeyCode::Enter) => {
                             state.lock().unwrap().confirm_connection_switch();
@@ -425,6 +469,11 @@ async fn run_loop(
                     }
                     _ if focus == Focus::Editor => {
                         editor.handle_key(key);
+                        if let Some(text) = editor.last_yank.take() {
+                            if let Some(ref mut cb) = clipboard {
+                                let _ = cb.set_text(text);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -472,7 +521,14 @@ fn diag_label(state: &AppState) -> Option<Span<'static>> {
     }
 }
 
-fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor, debug_scroll: u32) {
+#[derive(Default, Clone, Copy)]
+struct DrawAreas {
+    schema: Rect,
+    editor: Rect,
+    results: Option<Rect>,
+}
+
+fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor, debug_scroll: u32) -> DrawAreas {
     let area = f.area();
 
     // Reserve one row at the bottom for the debug bar when enabled
@@ -517,6 +573,12 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor, debug_scr
             .split(outer[1])
     };
 
+    let areas = DrawAreas {
+        schema: outer[0],
+        editor: right_chunks[0],
+        results: if show_results { Some(right_chunks[1]) } else { None },
+    };
+
     draw_editor(f, state, editor, right_chunks[0], editor_focused);
 
     if show_results {
@@ -547,6 +609,107 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor, debug_scr
     if let Some(dbg) = debug_area {
         draw_debug_bar(f, state, editor, dbg, debug_scroll);
     }
+
+    areas
+}
+
+fn extract_mouse_selection(
+    start: (u16, u16),
+    end: (u16, u16),
+    areas: &DrawAreas,
+    editor: &Editor,
+    state: &AppState,
+) -> Option<String> {
+    use ratatui::layout::Position;
+    let start_pos = Position { x: start.0, y: start.1 };
+
+    let (r1, r2) = if start.1 <= end.1 {
+        (start.1, end.1)
+    } else {
+        (end.1, start.1)
+    };
+    let (c1, c2) = if start.0 <= end.0 {
+        (start.0, end.0)
+    } else {
+        (end.0, start.0)
+    };
+
+    if areas.schema.contains(start_pos) {
+        let inner_top = areas.schema.y + 1;
+        let row_start = r1.saturating_sub(inner_top) as usize;
+        let row_end = r2.saturating_sub(inner_top) as usize;
+        let items = state.visible_schema_items();
+        if row_start >= items.len() {
+            return None;
+        }
+        let row_end = row_end.min(items.len() - 1);
+        let text = items[row_start..=row_end]
+            .iter()
+            .map(|i| i.label.trim())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return if text.is_empty() { None } else { Some(text) };
+    }
+
+    if let Some(results_area) = areas.results {
+        if results_area.contains(start_pos) {
+            if let sqeel_core::state::ResultsPane::Results(ref r) = state.results {
+                // border (1) + header row (1) = 2 rows offset
+                let inner_top = results_area.y + 2;
+                let row_start = (r1.saturating_sub(inner_top) as usize)
+                    .saturating_add(state.results_scroll);
+                let row_end = (r2.saturating_sub(inner_top) as usize)
+                    .saturating_add(state.results_scroll);
+                if row_start >= r.rows.len() {
+                    return None;
+                }
+                let row_end = row_end.min(r.rows.len() - 1);
+                let col_start = state.results_col_scroll;
+                let text = r.rows[row_start..=row_end]
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .skip(col_start)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\t")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return if text.is_empty() { None } else { Some(text) };
+            }
+            return None;
+        }
+    }
+
+    // Editor pane
+    let lines = editor.textarea.lines();
+    // line number width: digits in line count + 1 space
+    let lnum_width = lines.len().to_string().len() as u16 + 1;
+    let inner_top = areas.editor.y + 1;
+    let row_start = r1.saturating_sub(inner_top) as usize;
+    let row_end = r2.saturating_sub(inner_top) as usize;
+    if row_start >= lines.len() {
+        return None;
+    }
+    let row_end = row_end.min(lines.len() - 1);
+
+    let text = if row_start == row_end {
+        // Single row: extract column range, accounting for border + line numbers
+        let line = &lines[row_start];
+        let content_x = areas.editor.x + 1 + lnum_width;
+        let col_start = c1.saturating_sub(content_x) as usize;
+        let col_end = (c2.saturating_sub(content_x) as usize + 1).min(line.len());
+        if col_start >= line.len() {
+            line.clone()
+        } else {
+            line[col_start..col_end].to_string()
+        }
+    } else {
+        lines[row_start..=row_end].join("\n")
+    };
+
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn draw_debug_bar(
@@ -879,7 +1042,7 @@ fn draw_connection_switcher(f: &mut ratatui::Frame<'_>, state: &AppState, area: 
     f.render_widget(
         List::new(items).block(
             Block::default()
-                .title(" Connections (j/k select, Enter connect, n new, Esc close) ")
+                .title(" Connections (j/k  Enter connect  n new  e edit  d delete  Esc close) ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow)),
         ),
@@ -944,11 +1107,13 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect) {
                 ("j / k", "Navigate"),
                 ("Enter", "Connect"),
                 ("n", "New connection"),
+                ("e", "Edit connection"),
+                ("d", "Delete connection"),
                 ("Esc", "Close"),
             ],
         ),
         (
-            "Add Connection",
+            "Add / Edit Connection",
             &[
                 ("Tab", "Switch Name / URL field"),
                 ("Enter", "Save"),
@@ -1015,7 +1180,11 @@ fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect)
     f.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(" Add Connection (Tab switch, Enter save, Esc cancel) ")
+        .title(if state.edit_connection_original_name.is_some() {
+            " Edit Connection (Tab switch, Enter save, Esc cancel) "
+        } else {
+            " Add Connection (Tab switch, Enter save, Esc cancel) "
+        })
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
     let inner = block.inner(popup);

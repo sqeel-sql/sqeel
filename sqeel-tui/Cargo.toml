@@ -11,3 +11,4 @@ crossterm = { version = "0.28.1", features = ["event-stream"] }
 tui-textarea = { version = "0.7.0", features = ["search"] }
 tokio = { version = "1.52.1", features = ["full"] }
 lsp-types = "0.97.0"
+arboard = "3"

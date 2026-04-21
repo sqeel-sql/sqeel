@@ -162,6 +162,17 @@ pub fn load_session() -> Option<String> {
     })
 }
 
+pub fn delete_connection(name: &str) -> anyhow::Result<()> {
+    let path = config_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?
+        .join("conns")
+        .join(format!("{name}.toml"));
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 pub fn save_connection(name: &str, url: &str) -> anyhow::Result<()> {
     if !name
         .chars()

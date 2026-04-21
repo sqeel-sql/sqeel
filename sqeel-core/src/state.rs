@@ -77,11 +77,13 @@ pub struct AppState {
     pub show_connection_switcher: bool,
     pub connection_switcher_cursor: usize,
     pub pending_reconnect: Option<String>,
-    // Add connection dialog
+    // Add/edit connection dialog
     pub show_add_connection: bool,
     pub add_connection_name: String,
     pub add_connection_url: String,
     pub add_connection_field: AddConnectionField,
+    /// Original name when editing an existing connection (None when adding new).
+    pub edit_connection_original_name: Option<String>,
     // Help overlay
     pub show_help: bool,
     // Debug mode — enabled via --debug CLI flag
@@ -280,10 +282,27 @@ impl AppState {
         self.add_connection_name.clear();
         self.add_connection_url.clear();
         self.add_connection_field = AddConnectionField::Name;
+        self.edit_connection_original_name = None;
+    }
+
+    pub fn open_edit_connection(&mut self) {
+        let Some(conn) = self
+            .available_connections
+            .get(self.connection_switcher_cursor)
+            .cloned()
+        else {
+            return;
+        };
+        self.show_add_connection = true;
+        self.add_connection_name = conn.name.clone();
+        self.add_connection_url = conn.url.clone();
+        self.add_connection_field = AddConnectionField::Name;
+        self.edit_connection_original_name = Some(conn.name);
     }
 
     pub fn close_add_connection(&mut self) {
         self.show_add_connection = false;
+        self.edit_connection_original_name = None;
     }
 
     pub fn open_help(&mut self) {
@@ -319,17 +338,52 @@ impl AppState {
         }
     }
 
-    /// Validate, persist, and register the new connection. Closes dialog on success.
+    /// Validate, persist, and register the connection. Handles both add and edit.
     pub fn save_new_connection(&mut self) -> anyhow::Result<()> {
         let name = self.add_connection_name.trim().to_string();
         let url = self.add_connection_url.trim().to_string();
         if name.is_empty() || url.is_empty() {
             anyhow::bail!("Name and URL are required");
         }
-        crate::config::save_connection(&name, &url)?;
-        self.available_connections
-            .push(crate::config::ConnectionConfig { name, url });
+        if let Some(ref original) = self.edit_connection_original_name.clone() {
+            // Editing: rename file if name changed, then overwrite
+            if *original != name {
+                crate::config::delete_connection(original)?;
+            }
+            crate::config::save_connection(&name, &url)?;
+            // Update in-memory entry
+            if let Some(entry) = self
+                .available_connections
+                .iter_mut()
+                .find(|c| c.name == *original)
+            {
+                entry.name = name.clone();
+                entry.url = url.clone();
+            }
+        } else {
+            crate::config::save_connection(&name, &url)?;
+            self.available_connections
+                .push(crate::config::ConnectionConfig { name, url });
+        }
         self.show_add_connection = false;
+        self.edit_connection_original_name = None;
+        Ok(())
+    }
+
+    /// Remove the currently highlighted connection from disk and memory.
+    pub fn delete_selected_connection(&mut self) -> anyhow::Result<()> {
+        let Some(conn) = self
+            .available_connections
+            .get(self.connection_switcher_cursor)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        crate::config::delete_connection(&conn.name)?;
+        self.available_connections
+            .remove(self.connection_switcher_cursor);
+        let max = self.available_connections.len().saturating_sub(1);
+        self.connection_switcher_cursor = self.connection_switcher_cursor.min(max);
         Ok(())
     }
 
