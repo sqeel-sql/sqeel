@@ -136,7 +136,7 @@ async fn run_loop(
             let spans = highlighter.highlight(&content);
             let mut s = state.lock().unwrap();
             s.editor_content = content.clone();
-            s.vim_mode = editor.vim_mode;
+            s.vim_mode = editor.vim_mode();
             s.set_highlights(spans);
             if content != last_saved_content {
                 s.autosave();
@@ -402,7 +402,7 @@ async fn run_loop(
                         (KeyModifiers::NONE, KeyCode::Esc) => {
                             state.lock().unwrap().dismiss_completions();
                             if keybinding_mode == KeybindingMode::Vim {
-                                editor.vim_mode = VimMode::Normal;
+                                editor.force_normal();
                             }
                             continue;
                         }
