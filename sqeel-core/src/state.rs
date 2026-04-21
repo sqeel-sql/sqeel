@@ -435,9 +435,12 @@ impl AppState {
 
     /// Auto-save editor content to disk. Creates a scratch file if none is open.
     pub fn autosave(&mut self) {
+        let slug = persistence::sanitize_conn_slug(
+            self.active_connection.as_deref().unwrap_or("default"),
+        );
         let file = match &self.current_file {
             Some(f) => f.clone(),
-            None => match persistence::next_scratch_name() {
+            None => match persistence::next_scratch_name(&slug) {
                 Ok(name) => {
                     self.current_file = Some(name.clone());
                     name
@@ -445,12 +448,15 @@ impl AppState {
                 Err(_) => return,
             },
         };
-        let _ = persistence::save_query(&file, &self.editor_content);
+        let _ = persistence::save_query(&slug, &file, &self.editor_content);
     }
 
     /// Persist a successful query result to disk (errors are never stored).
     pub fn persist_result(&self, query: &str, result: &QueryResult) {
-        let _ = persistence::save_result(query, result);
+        let slug = persistence::sanitize_conn_slug(
+            self.active_connection.as_deref().unwrap_or("default"),
+        );
+        let _ = persistence::save_result(&slug, query, result);
     }
 
     /// Record a query in history (dedup consecutive identical entries, max 100).

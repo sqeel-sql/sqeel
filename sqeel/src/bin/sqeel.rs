@@ -84,6 +84,9 @@ async fn connect_and_spawn(
                     .find(|c| c.url == url)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| conn.url.clone());
+                if s.active_connection.as_deref() != Some(&conn_name) {
+                    s.current_file = None;
+                }
                 s.active_connection = Some(conn_name.clone());
                 s.set_status(format!("Connected: {conn_name}"));
                 if let Some(name) = s
