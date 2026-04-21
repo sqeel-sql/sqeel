@@ -278,17 +278,17 @@ async fn run_loop(
                             "GROUP BY".into(),
                         ]);
                     }
-                    // Pane focus — Alt+h/j/k/l (Ctrl+H/J/K/L are swallowed by terminals)
-                    (KeyModifiers::ALT, KeyCode::Char('h')) => {
+                    // Pane focus
+                    (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
                         state.lock().unwrap().focus = Focus::Schema;
                     }
-                    (KeyModifiers::ALT, KeyCode::Char('l')) => {
+                    (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
                         state.lock().unwrap().focus = Focus::Editor;
                     }
-                    (KeyModifiers::ALT, KeyCode::Char('j')) => {
+                    (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
                         state.lock().unwrap().focus = Focus::Results;
                     }
-                    (KeyModifiers::ALT, KeyCode::Char('k')) => {
+                    (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
                         state.lock().unwrap().focus = Focus::Editor;
                     }
                     _ if focus == Focus::Editor => {
@@ -670,10 +670,10 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect) {
         (
             "Pane Focus",
             &[
-                ("Alt+H / click", "Focus schema"),
-                ("Alt+L / click", "Focus editor"),
-                ("Alt+J / click", "Focus results"),
-                ("Alt+K / click", "Focus editor"),
+                ("Ctrl+H / click", "Focus schema"),
+                ("Ctrl+L / click", "Focus editor"),
+                ("Ctrl+J / click", "Focus results"),
+                ("Ctrl+K / click", "Focus editor"),
             ],
         ),
         (

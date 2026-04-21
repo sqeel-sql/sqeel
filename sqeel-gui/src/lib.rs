@@ -532,10 +532,10 @@ fn build_help_overlay(base: Element<'_, Message>) -> Element<'_, Message> {
         (
             "Pane Focus",
             &[
-                ("Alt+H / click", "Focus schema"),
-                ("Alt+L / click", "Focus editor"),
-                ("Alt+J / click", "Focus results"),
-                ("Alt+K / click", "Focus editor"),
+                ("Ctrl+H / click", "Focus schema"),
+                ("Ctrl+L / click", "Focus editor"),
+                ("Ctrl+J / click", "Focus results"),
+                ("Ctrl+K / click", "Focus editor"),
             ],
         ),
         (
