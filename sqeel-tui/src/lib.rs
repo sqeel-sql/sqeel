@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
-        MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+        KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -39,7 +40,12 @@ impl UiProvider for TuiProvider {
 async fn async_run(state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -49,6 +55,7 @@ async fn async_run(state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;
