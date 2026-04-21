@@ -61,6 +61,8 @@ pub enum Message {
     AddUrlChanged(String),
     AddConnectionTabField,
     SaveNewConnection,
+    OpenHelp,
+    CloseHelp,
 }
 
 // ── Application ───────────────────────────────────────────────────────────────
@@ -164,6 +166,12 @@ impl SqeelApp {
                         .set_error(format!("Save failed: {e}"));
                 }
             }
+            Message::OpenHelp => {
+                self.state.lock().unwrap().open_help();
+            }
+            Message::CloseHelp => {
+                self.state.lock().unwrap().close_help();
+            }
         }
         Task::none()
     }
@@ -199,6 +207,7 @@ impl SqeelApp {
         let show_add = s.show_add_connection;
         let add_name = s.add_connection_name.clone();
         let add_url = s.add_connection_url.clone();
+        let show_help = s.show_help;
         drop(s);
 
         // Schema panel
@@ -258,6 +267,9 @@ impl SqeelApp {
                     .style(iced::widget::button::primary),
                 button(text("⚡ Connections").size(12))
                     .on_press(Message::OpenConnectionSwitcher)
+                    .style(iced::widget::button::secondary),
+                button(text("?").size(12))
+                    .on_press(Message::OpenHelp)
                     .style(iced::widget::button::secondary),
             ]
             .spacing(8)
@@ -324,7 +336,7 @@ impl SqeelApp {
             .height(Length::Fill)
             .into();
 
-        if show_switcher {
+        let under: Element<Message> = if show_switcher {
             let mut switcher_col = column![
                 text("Switch Connection")
                     .size(14)
@@ -491,12 +503,148 @@ impl SqeelApp {
             .into()
         } else {
             base
+        };
+
+        if show_help {
+            build_help_overlay(under)
+        } else {
+            under
         }
     }
 
     fn theme(&self) -> Theme {
         Theme::Dark
     }
+}
+
+fn build_help_overlay(base: Element<'_, Message>) -> Element<'_, Message> {
+    const SECTIONS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Global",
+            &[
+                ("? / .", "Open this help (normal mode)"),
+                ("Ctrl+Enter", "Execute query"),
+                ("Ctrl+W", "Connection switcher"),
+                ("Ctrl+Space", "Trigger completions"),
+                ("q", "Quit (normal mode / schema / results)"),
+            ],
+        ),
+        (
+            "Pane Focus",
+            &[
+                ("Ctrl+H", "Focus schema"),
+                ("Ctrl+L", "Focus editor"),
+                ("Ctrl+J", "Focus results"),
+                ("Ctrl+K", "Focus editor"),
+            ],
+        ),
+        (
+            "Schema Pane",
+            &[
+                ("j / k", "Navigate up / down"),
+                ("Enter / l", "Expand / collapse"),
+            ],
+        ),
+        (
+            "Results Pane",
+            &[("j / k", "Scroll down / up"), ("q / Ctrl+C", "Dismiss")],
+        ),
+        (
+            "Editor — Vim",
+            &[
+                ("i", "Insert mode"),
+                ("Esc", "Normal mode"),
+                ("v", "Visual mode"),
+                ("Ctrl+P / N", "History prev / next"),
+            ],
+        ),
+        (
+            "Editor — Emacs",
+            &[
+                ("Ctrl+B / F", "Cursor left / right"),
+                ("Ctrl+P / N", "Cursor up / down"),
+                ("Ctrl+A / E", "Start / end of line"),
+            ],
+        ),
+        (
+            "Connection Switcher",
+            &[
+                ("j / k", "Navigate"),
+                ("Enter", "Connect"),
+                ("n", "New connection"),
+                ("Esc", "Close"),
+            ],
+        ),
+        (
+            "Add Connection",
+            &[
+                ("Tab", "Switch Name / URL field"),
+                ("Enter", "Save"),
+                ("Esc", "Cancel"),
+            ],
+        ),
+    ];
+
+    let mut help_col = column![
+        row![
+            text("Keybindings")
+                .size(16)
+                .color(Color::from_rgb(0.4, 0.8, 1.0)),
+            button(text("✕").size(12))
+                .on_press(Message::CloseHelp)
+                .style(iced::widget::button::danger),
+        ]
+        .spacing(12)
+        .align_y(iced::alignment::Vertical::Center),
+    ]
+    .spacing(4);
+
+    for (section, items) in SECTIONS {
+        help_col = help_col.push(
+            text(*section)
+                .size(13)
+                .color(Color::from_rgb(0.6, 0.8, 1.0)),
+        );
+        for (key, desc) in *items {
+            help_col = help_col.push(
+                row![
+                    text(*key)
+                        .size(12)
+                        .color(Color::from_rgb(1.0, 0.85, 0.4))
+                        .width(Length::Fixed(160.0)),
+                    text(*desc).size(12),
+                ]
+                .spacing(4),
+            );
+        }
+    }
+
+    let overlay = container(scrollable(help_col))
+        .width(Length::Fixed(480.0))
+        .height(Length::Fixed(520.0))
+        .padding(16)
+        .style(|theme: &Theme| {
+            let palette = theme.extended_palette();
+            iced::widget::container::Style {
+                background: Some(palette.background.strong.color.into()),
+                border: iced::Border {
+                    color: palette.primary.strong.color,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            }
+        });
+
+    iced::widget::stack![
+        base,
+        container(overlay)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center),
+    ]
+    .into()
 }
 
 fn build_results_widget(results: &ResultsPane) -> Element<'static, Message> {

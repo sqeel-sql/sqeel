@@ -89,7 +89,20 @@ async fn run_loop(
             let show_completions = s.show_completions;
             let show_switcher = s.show_connection_switcher;
             let show_add = s.show_add_connection;
+            let show_help = s.show_help;
             drop(s);
+
+            // ── Help overlay ─────────────────────────────────────────────────
+            if show_help {
+                if let (
+                    KeyModifiers::NONE,
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::Char('.'),
+                ) = (key.modifiers, key.code)
+                {
+                    state.lock().unwrap().close_help();
+                }
+                continue;
+            }
 
             // ── Add connection modal (highest priority) ──────────────────────
             if show_add {
@@ -154,6 +167,12 @@ async fn run_loop(
                     if focus != Focus::Editor || vim_mode == VimMode::Normal =>
                 {
                     break;
+                }
+                // Help: ? or .
+                (KeyModifiers::NONE, KeyCode::Char('?' | '.'))
+                    if focus != Focus::Editor || vim_mode == VimMode::Normal =>
+                {
+                    state.lock().unwrap().open_help();
                 }
                 // Open connection switcher: Ctrl+W
                 (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
@@ -339,6 +358,11 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor) {
     // Add connection dialog (above switcher)
     if state.show_add_connection {
         draw_add_connection(f, state, area);
+    }
+
+    // Help overlay (topmost)
+    if state.show_help {
+        draw_help(f, area);
     }
 }
 
@@ -590,6 +614,122 @@ fn draw_connection_switcher(f: &mut ratatui::Frame<'_>, state: &AppState, area: 
         ),
         popup,
     );
+}
+
+fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect) {
+    const SECTIONS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Global",
+            &[
+                ("?  /  .", "Open this help (normal mode)"),
+                ("Ctrl+Enter", "Execute query"),
+                ("Ctrl+W", "Connection switcher"),
+                ("Ctrl+Space", "Trigger completions"),
+                ("q", "Quit (normal mode / schema / results)"),
+            ],
+        ),
+        (
+            "Pane Focus",
+            &[
+                ("Ctrl+H", "Focus schema"),
+                ("Ctrl+L", "Focus editor"),
+                ("Ctrl+J", "Focus results"),
+                ("Ctrl+K", "Focus editor"),
+            ],
+        ),
+        (
+            "Schema Pane",
+            &[
+                ("j / k", "Navigate up / down"),
+                ("Enter / l", "Expand / collapse node"),
+            ],
+        ),
+        (
+            "Results Pane",
+            &[
+                ("j / k", "Scroll down / up"),
+                ("q / Ctrl+C", "Dismiss results"),
+            ],
+        ),
+        (
+            "Editor — Vim",
+            &[
+                ("i", "Insert mode"),
+                ("Esc", "Normal mode"),
+                ("v", "Visual mode"),
+                ("Ctrl+P / Ctrl+N", "History prev / next"),
+            ],
+        ),
+        (
+            "Editor — Emacs",
+            &[
+                ("Ctrl+B / F", "Cursor left / right"),
+                ("Ctrl+P / N", "Cursor / history up / down"),
+                ("Ctrl+A / E", "Start / end of line"),
+            ],
+        ),
+        (
+            "Connection Switcher",
+            &[
+                ("j / k", "Navigate"),
+                ("Enter", "Connect"),
+                ("n", "New connection"),
+                ("Esc", "Close"),
+            ],
+        ),
+        (
+            "Add Connection",
+            &[
+                ("Tab", "Switch Name / URL field"),
+                ("Enter", "Save"),
+                ("Esc", "Cancel"),
+            ],
+        ),
+    ];
+
+    let width = 62.min(area.width.saturating_sub(4));
+    let total_rows: u16 = SECTIONS
+        .iter()
+        .map(|(_, items)| items.len() as u16 + 2)
+        .sum::<u16>()
+        + 1;
+    let height = total_rows.min(area.height.saturating_sub(4));
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Help  (Esc / q / ? to close) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let mut lines: Vec<ratatui::text::Line<'static>> = vec![];
+    for (section, items) in SECTIONS {
+        lines.push(ratatui::text::Line::from(Span::styled(
+            format!(" {section}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (key, desc) in *items {
+            let pad = 20usize.saturating_sub(key.len());
+            lines.push(ratatui::text::Line::from(vec![
+                Span::styled(format!("  {key}"), Style::default().fg(Color::Yellow)),
+                Span::raw(" ".repeat(pad)),
+                Span::raw(*desc),
+            ]));
+        }
+        lines.push(ratatui::text::Line::raw(""));
+    }
+
+    f.render_widget(Paragraph::new(lines).style(Style::default()), inner);
 }
 
 fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect) {

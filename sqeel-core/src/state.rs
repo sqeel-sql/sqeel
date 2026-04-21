@@ -80,6 +80,8 @@ pub struct AppState {
     pub add_connection_name: String,
     pub add_connection_url: String,
     pub add_connection_field: AddConnectionField,
+    // Help overlay
+    pub show_help: bool,
     // Live query channel — set by the binary when connected
     pub query_tx: Option<tokio::sync::mpsc::Sender<String>>,
 }
@@ -230,6 +232,14 @@ impl AppState {
 
     pub fn close_add_connection(&mut self) {
         self.show_add_connection = false;
+    }
+
+    pub fn open_help(&mut self) {
+        self.show_help = true;
+    }
+
+    pub fn close_help(&mut self) {
+        self.show_help = false;
     }
 
     pub fn add_connection_tab(&mut self) {
