@@ -505,8 +505,7 @@ impl<'a> Editor<'a> {
                     self.last_yank = Some(y);
                 }
                 self.textarea.cancel_selection();
-                self.textarea
-                    .move_cursor(CursorMove::Jump(top_row, 0));
+                self.textarea.move_cursor(CursorMove::Jump(top_row, 0));
                 self.mode = Mode::Normal;
                 return true;
             }
@@ -696,8 +695,7 @@ impl<'a> Editor<'a> {
                     self.last_yank = Some(y);
                 }
                 self.textarea.cancel_selection();
-                self.textarea
-                    .move_cursor(CursorMove::Jump(row, col));
+                self.textarea.move_cursor(CursorMove::Jump(row, col));
                 self.mode = Mode::Normal;
                 return true;
             }
@@ -831,8 +829,7 @@ impl<'a> Editor<'a> {
         self.textarea.move_cursor(CursorMove::Jump(top, 0));
         self.textarea.start_selection();
         if bottom + 1 < total_lines {
-            self.textarea
-                .move_cursor(CursorMove::Jump(bottom + 1, 0));
+            self.textarea.move_cursor(CursorMove::Jump(bottom + 1, 0));
         } else {
             self.textarea.move_cursor(CursorMove::Jump(bottom, 0));
             self.textarea.move_cursor(CursorMove::End);
@@ -858,8 +855,7 @@ impl<'a> Editor<'a> {
         } else {
             // Cursor at top: anchor below bottom-end → cursor top-start
             if bottom + 1 < total_lines {
-                self.textarea
-                    .move_cursor(CursorMove::Jump(bottom + 1, 0));
+                self.textarea.move_cursor(CursorMove::Jump(bottom + 1, 0));
             } else {
                 self.textarea.move_cursor(CursorMove::Jump(bottom, 0));
                 self.textarea.move_cursor(CursorMove::End);
@@ -960,7 +956,6 @@ impl<'a> Editor<'a> {
         }
     }
 }
-
 
 /// Return the text inserted between `before` and `after`.
 /// Finds the longest common prefix and suffix; the middle of `after` is the delta.

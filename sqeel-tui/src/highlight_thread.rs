@@ -1,6 +1,6 @@
 use sqeel_core::highlight::{HighlightSpan, Highlighter};
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Runs tree-sitter highlighting on a dedicated thread.
 ///

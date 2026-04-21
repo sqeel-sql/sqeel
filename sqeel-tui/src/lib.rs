@@ -1,5 +1,5 @@
-pub mod editor;
 mod completion_thread;
+pub mod editor;
 mod highlight_thread;
 
 use arboard::Clipboard;
@@ -7,6 +7,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use completion_thread::CompletionThread;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
@@ -16,7 +17,6 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use completion_thread::CompletionThread;
 use editor::Editor;
 use highlight_thread::HighlightThread;
 use ratatui::{

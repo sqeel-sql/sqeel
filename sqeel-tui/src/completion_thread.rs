@@ -1,5 +1,5 @@
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Runs schema completion filtering on a dedicated thread.
 ///
