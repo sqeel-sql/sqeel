@@ -123,13 +123,19 @@ async fn run_loop(
     let mut last_draw_areas = DrawAreas::default();
     let mut mouse_select_start: Option<(u16, u16)> = None;
     let mut mouse_did_drag = false;
+    // Force redraw on first iteration and after every event.
+    let mut event_triggered_redraw = true;
     loop {
+        let mut needs_redraw = event_triggered_redraw;
+        event_triggered_redraw = false;
+
         // Drain pending tab content (set when connection loads or tab switches)
         {
             let pending = state.lock().unwrap().tab_content_pending.take();
             if let Some(content) = pending {
                 editor.set_content(&content);
                 editor_dirty = false;
+                needs_redraw = true;
             }
         }
 
@@ -138,6 +144,9 @@ async fn run_loop(
 
         // Sync editor content + submit to highlight thread when changed.
         let content_changed = editor.take_dirty();
+        if content_changed {
+            needs_redraw = true;
+        }
         let content = if content_changed {
             Some(editor.content())
         } else {
@@ -154,6 +163,7 @@ async fn run_loop(
             // Apply any completed highlight results from the background thread.
             if let Some(spans) = highlight_thread.try_recv() {
                 s.set_highlights(spans);
+                needs_redraw = true;
             }
             if editor_dirty && last_save_time.elapsed() >= Duration::from_millis(1000) {
                 s.autosave();
@@ -204,11 +214,13 @@ async fn run_loop(
         if let Some(schema_items) = completion_thread.try_recv() {
             last_schema_completions = schema_items.clone();
             state.lock().unwrap().set_completions(schema_items);
+            needs_redraw = true;
         }
 
         // Drain LSP events
         if let Some(ref mut client) = lsp {
             while let Ok(event) = client.events.try_recv() {
+                needs_redraw = true;
                 match event {
                     LspEvent::Diagnostics(diags) => {
                         state.lock().unwrap().set_diagnostics(diags);
@@ -229,25 +241,32 @@ async fn run_loop(
             }
         }
 
-        tick = tick.wrapping_add(1);
-        let tick_snap = tick;
-        let cmd_snap = command_input.clone();
-        let schema_search_snap = schema_search.clone();
-        let editor_search_snap = editor_search.clone();
-        let last_editor_search_snap = last_editor_search.clone();
-        terminal.draw(|f| {
-            let s = state.lock().unwrap();
-            last_draw_areas = draw(
-                f,
-                &s,
-                &mut editor,
-                tick_snap,
-                cmd_snap.as_deref(),
-                schema_search_snap.as_deref(),
-                editor_search_snap.as_deref(),
-                last_editor_search_snap.as_deref(),
-            );
-        })?;
+        // Spinner needs periodic redraws while schema is loading.
+        if state.lock().unwrap().schema_loading {
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
+            tick = tick.wrapping_add(1);
+            let tick_snap = tick;
+            let cmd_snap = command_input.clone();
+            let schema_search_snap = schema_search.clone();
+            let editor_search_snap = editor_search.clone();
+            let last_editor_search_snap = last_editor_search.clone();
+            terminal.draw(|f| {
+                let s = state.lock().unwrap();
+                last_draw_areas = draw(
+                    f,
+                    &s,
+                    &mut editor,
+                    tick_snap,
+                    cmd_snap.as_deref(),
+                    schema_search_snap.as_deref(),
+                    editor_search_snap.as_deref(),
+                    last_editor_search_snap.as_deref(),
+                );
+            })?;
+        }
 
         if !event::poll(Duration::from_millis(50))? {
             continue;
@@ -835,6 +854,7 @@ async fn run_loop(
             } // Event::Key
             _ => {} // FocusGained, FocusLost, Paste, Resize — ignore
         } // match event
+        event_triggered_redraw = true;
     }
     Ok(())
 }
