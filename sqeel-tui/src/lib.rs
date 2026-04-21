@@ -1291,17 +1291,17 @@ fn draw_schema(
         .collect();
 
     // When search box has focus (searching), don't highlight the list.
-    // When list has focus, highlight the cursor row.
+    // Focused: same bg as editor cursor line. Unfocused: lighter shade.
     let (highlight_style, selected) = if searching {
         (Style::default(), None)
     } else if focused {
         (
-            Style::default().add_modifier(Modifier::REVERSED),
+            Style::default().bg(Color::Rgb(40, 40, 45)),
             Some(state.schema_cursor),
         )
     } else {
         (
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default().bg(Color::Rgb(30, 32, 48)),
             Some(state.schema_cursor),
         )
     };
