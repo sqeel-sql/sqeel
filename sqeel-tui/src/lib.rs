@@ -1317,7 +1317,7 @@ fn draw_editor(
     state: &AppState,
     editor: &mut Editor,
     area: Rect,
-    _focused: bool,
+    focused: bool,
     editor_search: Option<&str>,
     last_editor_search: Option<&str>,
 ) {
@@ -1353,6 +1353,11 @@ fn draw_editor(
 
     // Pre-render a full-width strip at the cursor line so trailing empty cells
     // also get the highlight background (tui-textarea only styles character cells).
+    let cursor_line_bg = if focused {
+        Color::Rgb(40, 40, 45)
+    } else {
+        Color::Rgb(30, 32, 48)
+    };
     let textarea_area = chunks[1];
     let cursor_screen_row = editor.cursor_screen_row(textarea_area.height);
     if cursor_screen_row < textarea_area.height {
@@ -1363,7 +1368,7 @@ fn draw_editor(
             height: 1,
         };
         f.render_widget(
-            Block::default().style(Style::default().bg(Color::Rgb(40, 40, 45))),
+            Block::default().style(Style::default().bg(cursor_line_bg)),
             strip,
         );
     }
@@ -1373,7 +1378,7 @@ fn draw_editor(
         .set_line_number_style(Style::default().fg(Color::DarkGray));
     editor
         .textarea
-        .set_cursor_line_style(Style::default().bg(Color::Rgb(40, 40, 45)));
+        .set_cursor_line_style(Style::default().bg(cursor_line_bg));
     // In Visual mode tui-textarea's Search boundary (rank 2) overrides Select (rank 1),
     // so syntax highlights would erase the selection color. Clear the pattern instead.
     if state.vim_mode == VimMode::Visual {
