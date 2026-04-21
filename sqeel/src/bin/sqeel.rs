@@ -38,6 +38,11 @@ fn main() -> anyhow::Result<()> {
         .set_available_connections(conns.clone());
 
     let session = load_session_data();
+    {
+        let mut s = state.lock().unwrap();
+        s.focus = session.focus;
+        s.sidebar_visible = session.sidebar_visible;
+    }
     let url = if let Some(url) = args.url {
         Some(url)
     } else {
@@ -45,27 +50,99 @@ fn main() -> anyhow::Result<()> {
         name.and_then(|n| conns.iter().find(|c| c.name == n).map(|c| c.url.clone()))
     };
     let session_schema_cursor = session.schema_cursor;
+    let session_schema_cursor_path = session.schema_cursor_path;
+    let session_schema_expanded_paths = session.schema_expanded_paths;
 
     // Runtime for async setup (initial connect + reconnection watcher).
     // TuiProvider::run creates its own runtime; must not be called from inside one.
     let rt = tokio::runtime::Runtime::new()?;
 
     if let Some(url) = url {
-        rt.block_on(connect_and_spawn(&state, &url, session_schema_cursor));
+        rt.block_on(connect_and_spawn(
+            &state,
+            &url,
+            session_schema_cursor,
+            session_schema_cursor_path,
+            session_schema_expanded_paths,
+        ));
     }
 
     let watcher_state = state.clone();
     rt.spawn(async move {
+        let mut last_written_conn: Option<String> = None;
+        let mut last_written_cursor: usize = 0;
+        let mut last_written_cursor_path: Option<String> = None;
+        let mut last_written_expanded_paths: Vec<String> = Vec::new();
+        let mut last_written_focus = sqeel_core::state::Focus::default();
+        let mut last_written_sidebar = true;
+        let mut dirty = false;
+        let mut pending_conn: Option<String> = None;
+        let mut pending_cursor: usize = 0;
+        let mut pending_cursor_path: Option<String> = None;
+        let mut pending_expanded_paths: Vec<String> = Vec::new();
+        let mut pending_focus = sqeel_core::state::Focus::default();
+        let mut pending_sidebar = true;
+        let mut last_write = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(2))
+            .unwrap_or_else(std::time::Instant::now);
+
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let pending = watcher_state.lock().unwrap().pending_reconnect.take();
-            if let Some(url) = pending {
-                connect_and_spawn(&watcher_state, &url, 0).await;
+            let reconnect = watcher_state.lock().unwrap().pending_reconnect.take();
+            if let Some(url) = reconnect {
+                connect_and_spawn(&watcher_state, &url, 0, None, Vec::new()).await;
+            }
+
+            let s = watcher_state.lock().unwrap();
+            let conn = s.active_connection.clone();
+            let cursor = s.schema_cursor;
+            let cursor_path = s.schema_cursor_path_string();
+            let expanded_paths = s.schema_expanded_paths();
+            let focus = s.focus;
+            let sidebar = s.sidebar_visible;
+            drop(s);
+
+            if conn.is_some()
+                && (conn != last_written_conn
+                    || cursor != last_written_cursor
+                    || cursor_path != last_written_cursor_path
+                    || expanded_paths != last_written_expanded_paths
+                    || focus != last_written_focus
+                    || sidebar != last_written_sidebar)
+            {
+                pending_conn = conn;
+                pending_cursor = cursor;
+                pending_cursor_path = cursor_path;
+                pending_expanded_paths = expanded_paths;
+                pending_focus = focus;
+                pending_sidebar = sidebar;
+                dirty = true;
+            }
+
+            if dirty && last_write.elapsed() >= std::time::Duration::from_millis(1000) {
+                if let Some(ref name) = pending_conn {
+                    let _ = save_session(
+                        name,
+                        pending_cursor,
+                        pending_cursor_path.clone(),
+                        pending_expanded_paths.clone(),
+                        pending_focus,
+                        pending_sidebar,
+                    );
+                }
+                last_written_conn = pending_conn.clone();
+                last_written_cursor = pending_cursor;
+                last_written_cursor_path = pending_cursor_path.clone();
+                last_written_expanded_paths = pending_expanded_paths.clone();
+                last_written_focus = pending_focus;
+                last_written_sidebar = pending_sidebar;
+                dirty = false;
+                last_write = std::time::Instant::now();
             }
         }
     });
 
-    TuiProvider::run(state)?;
+    TuiProvider::run(state.clone())?;
     Ok(())
 }
 
@@ -73,6 +150,8 @@ async fn connect_and_spawn(
     state: &Arc<std::sync::Mutex<AppState>>,
     url: &str,
     session_schema_cursor: usize,
+    session_schema_cursor_path: Option<String>,
+    session_schema_expanded_paths: Vec<String>,
 ) {
     match DbConnection::connect(url).await {
         Ok(conn) => {
@@ -94,10 +173,23 @@ async fn connect_and_spawn(
                     .find(|c| c.url == url)
                     .map(|c| c.name.clone())
                 {
-                    let _ = save_session(&name, s.schema_cursor);
+                    let _ = save_session(
+                        &name,
+                        s.schema_cursor,
+                        s.schema_cursor_path_string(),
+                        s.schema_expanded_paths(),
+                        s.focus,
+                        s.sidebar_visible,
+                    );
                 }
             }
-            spawn_executor(state.clone(), conn, session_schema_cursor);
+            spawn_executor(
+                state.clone(),
+                conn,
+                session_schema_cursor,
+                session_schema_cursor_path,
+                session_schema_expanded_paths,
+            );
         }
         Err(e) => {
             state
@@ -112,17 +204,26 @@ fn spawn_executor(
     state: Arc<std::sync::Mutex<AppState>>,
     conn: DbConnection,
     session_schema_cursor: usize,
+    session_schema_cursor_path: Option<String>,
+    session_schema_expanded_paths: Vec<String>,
 ) {
     let conn = Arc::new(conn);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
     state.lock().unwrap().query_tx = Some(tx);
 
-    // Show cached schema immediately with restored cursor, then refresh in background
+    // Show cached schema immediately with restored expansion + cursor, then refresh in background
     if let Some(cached) = load_schema_cache(&conn.url) {
         let mut s = state.lock().unwrap();
         s.set_schema_nodes(cached);
-        let max = s.visible_schema_items().len().saturating_sub(1);
-        s.schema_cursor = session_schema_cursor.min(max);
+        s.restore_schema_expanded_paths(&session_schema_expanded_paths);
+        let restored = session_schema_cursor_path
+            .as_deref()
+            .map(|p| s.restore_schema_cursor_by_path(p))
+            .unwrap_or(false);
+        if !restored {
+            let max = s.visible_schema_items().len().saturating_sub(1);
+            s.schema_cursor = session_schema_cursor.min(max);
+        }
     }
 
     // Channel: table loader sends (db, table) pairs; column loader consumes them.
@@ -133,6 +234,8 @@ fn spawn_executor(
     let col_conn = conn.clone();
     let col_state = state.clone();
     let col_schema_url = conn.url.clone();
+    let col_session_path = session_schema_cursor_path.clone();
+    let col_session_expanded = session_schema_expanded_paths.clone();
     tokio::spawn(async move {
         while let Some((db_name, table_name)) = col_rx.recv().await {
             let col_nodes = match col_conn.list_columns(&db_name, &table_name).await {
@@ -152,14 +255,27 @@ fn spawn_executor(
                 .unwrap()
                 .set_table_columns(&db_name, &table_name, col_nodes);
         }
-        // Channel drained — all columns loaded. Save final cache + session.
+        // Channel drained — full schema available. Restore expansion + cursor, then save cache.
         let mut s = col_state.lock().unwrap();
         s.schema_loading = false;
+        s.restore_schema_expanded_paths(&col_session_expanded);
+        let restored = col_session_path
+            .as_deref()
+            .map(|p| s.restore_schema_cursor_by_path(p))
+            .unwrap_or(false);
+        if !restored {
+            let max = s.visible_schema_items().len().saturating_sub(1);
+            s.schema_cursor = session_schema_cursor.min(max);
+        }
         let nodes = s.schema_nodes.clone();
         let cursor = s.schema_cursor;
+        let cursor_path = s.schema_cursor_path_string();
+        let expanded_paths = s.schema_expanded_paths();
+        let focus = s.focus;
+        let sidebar_visible = s.sidebar_visible;
         let _ = save_schema_cache(&col_schema_url, &nodes);
         if let Some(ref name) = s.active_connection.clone() {
-            let _ = save_session(name, cursor);
+            let _ = save_session(name, cursor, cursor_path, expanded_paths, focus, sidebar_visible);
         }
     });
 

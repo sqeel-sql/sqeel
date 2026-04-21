@@ -2,7 +2,10 @@ use crate::config::ConnectionConfig;
 use crate::highlight::HighlightSpan;
 use crate::lsp::Diagnostic;
 use crate::persistence;
-use crate::schema::{SchemaNode, SchemaTreeItem, flatten_tree, merge_expansion, toggle_node};
+use crate::schema::{
+    SchemaNode, SchemaTreeItem, collect_expanded_paths, expand_path, find_cursor_by_path,
+    flatten_tree, merge_expansion, path_to_string, restore_expanded_paths, toggle_node,
+};
 use lsp_types::DiagnosticSeverity;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -53,7 +56,7 @@ pub enum AddConnectionField {
     Url,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Focus {
     #[default]
     Editor,
@@ -115,6 +118,7 @@ pub struct AppState {
     pub edit_connection_original_name: Option<String>,
     // Help overlay
     pub show_help: bool,
+    pub sidebar_visible: bool,
     // Debug mode — enabled via --debug CLI flag
     pub debug_mode: bool,
     pub lsp_available: bool,
@@ -127,6 +131,7 @@ impl AppState {
     pub fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             editor_ratio: 1.0,
+            sidebar_visible: true,
             ..Default::default()
         }))
     }
@@ -235,6 +240,36 @@ impl AppState {
 
     pub fn visible_schema_items(&self) -> Vec<SchemaTreeItem> {
         flatten_tree(&self.schema_nodes)
+    }
+
+    /// Returns path strings for every expanded node, e.g. `["mydb", "mydb/users"]`.
+    pub fn schema_expanded_paths(&self) -> Vec<String> {
+        collect_expanded_paths(&self.schema_nodes)
+    }
+
+    /// Expand nodes from a saved list of path strings.
+    pub fn restore_schema_expanded_paths(&mut self, paths: &[String]) {
+        restore_expanded_paths(&mut self.schema_nodes, paths);
+    }
+
+    /// Returns the path string for the currently selected schema item, e.g. `"mydb/users/id"`.
+    pub fn schema_cursor_path_string(&self) -> Option<String> {
+        let items = self.visible_schema_items();
+        let item = items.get(self.schema_cursor)?;
+        Some(path_to_string(&item.node_path, &self.schema_nodes))
+    }
+
+    /// Expands ancestor nodes then moves the cursor to the item matching `path_str`.
+    /// Returns true if found.
+    pub fn restore_schema_cursor_by_path(&mut self, path_str: &str) -> bool {
+        expand_path(&mut self.schema_nodes, path_str);
+        let items = self.visible_schema_items();
+        if let Some(idx) = find_cursor_by_path(&items, &self.schema_nodes, path_str) {
+            self.schema_cursor = idx;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn schema_cursor_down(&mut self) {

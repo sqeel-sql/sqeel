@@ -1,4 +1,4 @@
-use crate::state::KeybindingMode;
+use crate::state::{Focus, KeybindingMode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -43,13 +43,45 @@ struct Session {
     connection: String,
     #[serde(default)]
     schema_cursor: usize,
+    #[serde(default)]
+    schema_cursor_path: Option<String>,
+    #[serde(default)]
+    schema_expanded_paths: Vec<String>,
+    #[serde(default)]
+    focus: Focus,
+    #[serde(default = "default_sidebar_visible")]
+    sidebar_visible: bool,
+}
+
+fn default_sidebar_visible() -> bool {
+    true
 }
 
 /// Data restored from session.toml.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionData {
     pub connection: Option<String>,
+    /// Numeric fallback cursor — used only when `schema_cursor_path` lookup fails.
     pub schema_cursor: usize,
+    /// Preferred cursor: `"db/table/col"` path string for stable restore across schema changes.
+    pub schema_cursor_path: Option<String>,
+    /// Expanded node paths, e.g. `["mydb", "mydb/users"]`.
+    pub schema_expanded_paths: Vec<String>,
+    pub focus: Focus,
+    pub sidebar_visible: bool,
+}
+
+impl Default for SessionData {
+    fn default() -> Self {
+        Self {
+            connection: None,
+            schema_cursor: 0,
+            schema_cursor_path: None,
+            schema_expanded_paths: Vec::new(),
+            focus: Focus::default(),
+            sidebar_visible: true,
+        }
+    }
 }
 
 impl serde::Serialize for KeybindingMode {
@@ -121,13 +153,24 @@ pub fn load_connections() -> anyhow::Result<Vec<ConnectionConfig>> {
     Ok(conns)
 }
 
-/// Save the last-used connection name and schema cursor to session.toml.
-pub fn save_session(name: &str, schema_cursor: usize) -> anyhow::Result<()> {
+/// Save session state to session.toml.
+pub fn save_session(
+    name: &str,
+    schema_cursor: usize,
+    schema_cursor_path: Option<String>,
+    schema_expanded_paths: Vec<String>,
+    focus: Focus,
+    sidebar_visible: bool,
+) -> anyhow::Result<()> {
     let dir = config_dir().ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?;
     std::fs::create_dir_all(&dir)?;
     let content = toml::to_string(&Session {
         connection: name.to_string(),
         schema_cursor,
+        schema_cursor_path,
+        schema_expanded_paths,
+        focus,
+        sidebar_visible,
     })?;
     std::fs::write(dir.join("session.toml"), content)?;
     Ok(())
@@ -151,6 +194,10 @@ pub fn load_session_data() -> SessionData {
             Some(s.connection)
         },
         schema_cursor: s.schema_cursor,
+        schema_cursor_path: s.schema_cursor_path,
+        schema_expanded_paths: s.schema_expanded_paths,
+        focus: s.focus,
+        sidebar_visible: s.sidebar_visible,
     }
 }
 

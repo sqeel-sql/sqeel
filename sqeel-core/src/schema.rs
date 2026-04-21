@@ -184,6 +184,141 @@ pub fn merge_expansion(old: &[SchemaNode], new: &mut [SchemaNode]) {
     }
 }
 
+/// Walk `node_path` indices through the tree and return the joined name string, e.g. `"mydb/users/id"`.
+pub fn path_to_string(path: &[usize], nodes: &[SchemaNode]) -> String {
+    let mut parts = Vec::new();
+    let mut current = nodes;
+    for &idx in path {
+        let Some(node) = current.get(idx) else {
+            break;
+        };
+        parts.push(node.name().to_string());
+        match node {
+            SchemaNode::Database { tables, .. } => current = tables,
+            SchemaNode::Table { columns, .. } => current = columns,
+            SchemaNode::Column { .. } => break,
+        }
+    }
+    parts.join("/")
+}
+
+/// Find the flat-list index of the visible item whose tree path matches `path_str`.
+pub fn find_cursor_by_path(
+    items: &[SchemaTreeItem],
+    nodes: &[SchemaNode],
+    path_str: &str,
+) -> Option<usize> {
+    items
+        .iter()
+        .position(|item| path_to_string(&item.node_path, nodes) == path_str)
+}
+
+/// Expand all ancestor nodes needed so the item at `path_str` becomes visible.
+/// E.g. for `"mydb/users/id"` this expands the `mydb` database and the `users` table.
+pub fn expand_path(nodes: &mut Vec<SchemaNode>, path_str: &str) {
+    let parts: Vec<&str> = path_str.splitn(3, '/').collect();
+    // Need to expand: Database for parts[0] (when parts.len() >= 2),
+    // and Table for parts[1] inside that db (when parts.len() >= 3).
+    if parts.len() < 2 {
+        return;
+    }
+    for node in nodes.iter_mut() {
+        if let SchemaNode::Database {
+            name,
+            expanded,
+            tables,
+        } = node
+        {
+            if name == parts[0] {
+                *expanded = true;
+                if parts.len() >= 3 {
+                    for table in tables.iter_mut() {
+                        if let SchemaNode::Table {
+                            name: tname,
+                            expanded: texpanded,
+                            ..
+                        } = table
+                        {
+                            if tname == parts[1] {
+                                *texpanded = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Collect path strings for every expanded Database/Table node, e.g. `["mydb", "mydb/users"]`.
+pub fn collect_expanded_paths(nodes: &[SchemaNode]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for node in nodes {
+        if let SchemaNode::Database {
+            name,
+            expanded: true,
+            tables,
+        } = node
+        {
+            paths.push(name.clone());
+            for table in tables {
+                if let SchemaNode::Table {
+                    name: tname,
+                    expanded: true,
+                    ..
+                } = table
+                {
+                    paths.push(format!("{name}/{tname}"));
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// Expand the nodes named by each path string (inverse of `collect_expanded_paths`).
+pub fn restore_expanded_paths(nodes: &mut Vec<SchemaNode>, paths: &[String]) {
+    for path in paths {
+        let parts: Vec<&str> = path.splitn(2, '/').collect();
+        match parts.as_slice() {
+            [db_name] => {
+                for node in nodes.iter_mut() {
+                    if let SchemaNode::Database { name, expanded, .. } = node
+                        && name == db_name
+                    {
+                        *expanded = true;
+                        break;
+                    }
+                }
+            }
+            [db_name, table_name] => {
+                for node in nodes.iter_mut() {
+                    if let SchemaNode::Database { name, tables, .. } = node
+                        && name == db_name
+                    {
+                        for table in tables.iter_mut() {
+                            if let SchemaNode::Table {
+                                name: tname,
+                                expanded,
+                                ..
+                            } = table
+                                && tname == table_name
+                            {
+                                *expanded = true;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn toggle_node(nodes: &mut [SchemaNode], path: &[usize]) {
     if path.is_empty() {
         return;
