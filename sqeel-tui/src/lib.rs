@@ -291,7 +291,24 @@ async fn run_loop(
                             mouse_select_start = None;
                             mouse_did_drag = false;
                         } else {
-                            state.lock().unwrap().focus = pane;
+                            let mut s = state.lock().unwrap();
+                            s.focus = pane;
+                            if pane == Focus::Schema && !last_draw_areas.schema_list_filtered {
+                                let la = last_draw_areas.schema_list_area;
+                                if mouse.row >= la.y
+                                    && mouse.column >= la.x
+                                    && mouse.column < la.x + la.width
+                                {
+                                    let rel = (mouse.row - la.y) as usize;
+                                    let idx = rel + last_draw_areas.schema_list_offset;
+                                    let max = s.visible_schema_items().len();
+                                    if idx < max {
+                                        s.schema_cursor = idx;
+                                        s.schema_toggle_current();
+                                    }
+                                }
+                            }
+                            drop(s);
                             mouse_select_start = Some((mouse.column, mouse.row));
                             mouse_did_drag = false;
                         }
@@ -772,6 +789,9 @@ fn diag_label(state: &AppState) -> Option<Span<'static>> {
 #[derive(Default, Clone, Copy)]
 struct DrawAreas {
     schema: Rect,
+    schema_list_area: Rect,
+    schema_list_offset: usize,
+    schema_list_filtered: bool,
     editor: Rect,
     tab_bar: Rect,
     results: Option<Rect>,
@@ -821,7 +841,8 @@ fn draw(
     let results_focused = state.focus == Focus::Results;
 
     // Schema panel
-    draw_schema(f, state, outer[0], schema_focused, tick, schema_search);
+    let (schema_list_area, schema_list_offset, schema_list_filtered) =
+        draw_schema(f, state, outer[0], schema_focused, tick, schema_search);
 
     let show_results = !matches!(state.results, ResultsPane::Empty);
     let editor_pct = (state.editor_ratio * 100.0) as u16;
@@ -851,6 +872,9 @@ fn draw(
     };
     let areas = DrawAreas {
         schema: outer[0],
+        schema_list_area,
+        schema_list_offset,
+        schema_list_filtered,
         editor: right_chunks[0],
         tab_bar,
         results: if show_results {
@@ -1126,7 +1150,7 @@ fn draw_schema(
     focused: bool,
     tick: u32,
     search: Option<&str>,
-) {
+) -> (Rect, usize, bool) {
     const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
     let status = if state.schema_loading {
         SPINNER[(tick as usize) % SPINNER.len()]
@@ -1148,12 +1172,13 @@ fn draw_schema(
         Style::default()
     };
 
-    // Outer block provides only the RIGHT border (no top line)
-    let outer_block = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(border_style);
-    let inner = outer_block.inner(area);
-    f.render_widget(outer_block, area);
+    // Fill pane background
+    f.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(18, 20, 32))),
+        area,
+    );
+
+    let inner = area;
 
     // Search box is always visible (3 rows: border+input+border), list below
     let chunks = Layout::default()
@@ -1203,9 +1228,11 @@ fn draw_schema(
         all_items
     };
 
+    let filtered = !query.is_empty();
+
     if items.is_empty() {
         f.render_widget(
-            Paragraph::new(if !query.is_empty() {
+            Paragraph::new(if filtered {
                 "No matches"
             } else if state.active_connection.is_some() {
                 "Loading..."
@@ -1214,7 +1241,7 @@ fn draw_schema(
             }),
             list_area,
         );
-        return;
+        return (list_area, 0, filtered);
     }
 
     let list_items: Vec<ListItem> = items
@@ -1241,6 +1268,7 @@ fn draw_schema(
     let list = List::new(list_items).highlight_style(highlight_style);
     let mut list_state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, list_area, &mut list_state);
+    (list_area, list_state.offset(), filtered)
 }
 
 fn draw_editor(
@@ -1252,6 +1280,12 @@ fn draw_editor(
     editor_search: Option<&str>,
     last_editor_search: Option<&str>,
 ) {
+    // Fill pane background
+    f.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(22, 22, 28))),
+        area,
+    );
+
     // Show first diagnostic message if any
     let diag_line = state
         .lsp_diagnostics
@@ -1359,16 +1393,23 @@ fn build_tab_title(state: &AppState) -> Line<'_> {
 }
 
 fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool) {
+    // Fill pane background
+    f.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(18, 26, 20))),
+        area,
+    );
+
     match &state.results {
         ResultsPane::Results(r) => {
+            let title_style = if focused {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Green)
+            };
             let block = Block::default()
                 .title(format!("Results ({} rows)", r.rows.len()))
-                .borders(Borders::TOP)
-                .border_style(if focused {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::Green)
-                });
+                .title_style(title_style)
+                .borders(Borders::NONE);
 
             let col_start = state.results_col_scroll;
             let visible_cols: Vec<&String> = r.columns.iter().skip(col_start).collect();
@@ -1418,14 +1459,7 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
             f.render_widget(table, area);
         }
         ResultsPane::Error(e) => {
-            let block = Block::default()
-                .title("Error")
-                .borders(Borders::TOP)
-                .border_style(if focused {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::Red)
-                });
+            let block = Block::default().title("Error").borders(Borders::NONE);
             f.render_widget(
                 Paragraph::new(e.as_str())
                     .style(Style::default().fg(Color::Red))
