@@ -2,6 +2,7 @@ pub mod editor;
 
 use std::sync::{Arc, Mutex};
 use std::io;
+use std::time::Duration;
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -10,49 +11,61 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Terminal,
 };
-use sqeel_core::{AppState, UiProvider, state::{Focus, KeybindingMode, ResultsPane, VimMode}};
+use sqeel_core::{
+    AppState, UiProvider,
+    highlight::Highlighter,
+    state::{Focus, KeybindingMode, ResultsPane, VimMode},
+};
 use editor::Editor;
 
 pub struct TuiProvider;
 
 impl UiProvider for TuiProvider {
     fn run(state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        let keybinding_mode = state.lock().unwrap().keybinding_mode;
-        let result = run_loop(&mut terminal, state, keybinding_mode);
-
-        disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-        terminal.show_cursor()?;
-
-        result
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async_run(state))
     }
 }
 
-fn run_loop(
+async fn async_run(state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let keybinding_mode = state.lock().unwrap().keybinding_mode;
+    let result = run_loop(&mut terminal, state, keybinding_mode).await;
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    result
+}
+
+async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: Arc<Mutex<AppState>>,
     keybinding_mode: KeybindingMode,
 ) -> anyhow::Result<()> {
     let mut editor = Editor::new(keybinding_mode);
+    let mut highlighter = Highlighter::new()?;
 
     loop {
-        // Sync editor content into shared state
+        // Sync editor content + re-highlight
         {
+            let content = editor.content();
+            let spans = highlighter.highlight(&content);
             let mut s = state.lock().unwrap();
-            s.editor_content = editor.content();
+            s.editor_content = content;
             s.vim_mode = editor.vim_mode;
+            s.set_highlights(spans);
         }
 
         terminal.draw(|f| {
@@ -60,64 +73,106 @@ fn run_loop(
             draw(f, &s, &editor);
         })?;
 
-        if let Event::Key(key) = event::read()? {
-            let s = state.lock().unwrap();
-            let focus = s.focus;
-            let vim_mode = s.vim_mode;
-            drop(s);
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                let s = state.lock().unwrap();
+                let focus = s.focus;
+                let vim_mode = s.vim_mode;
+                let show_completions = s.show_completions;
+                drop(s);
 
-            match (key.modifiers, key.code) {
-                // Global quit in vim normal mode
-                (KeyModifiers::NONE, KeyCode::Char('q'))
-                    if focus != Focus::Editor || vim_mode == VimMode::Normal =>
-                {
-                    break;
+                // Dismiss completions on Esc
+                if show_completions && key.code == KeyCode::Esc {
+                    state.lock().unwrap().dismiss_completions();
+                    continue;
                 }
-                // Dismiss results pane
-                (KeyModifiers::CONTROL, KeyCode::Char('c'))
-                | (KeyModifiers::NONE, KeyCode::Char('q'))
-                    if focus == Focus::Results =>
-                {
-                    state.lock().unwrap().dismiss_results();
+
+                match (key.modifiers, key.code) {
+                    // Global quit in vim normal mode or schema/results pane
+                    (KeyModifiers::NONE, KeyCode::Char('q'))
+                        if focus != Focus::Editor || vim_mode == VimMode::Normal =>
+                    {
+                        break;
+                    }
+                    // Dismiss results
+                    (KeyModifiers::CONTROL, KeyCode::Char('c'))
+                    | (KeyModifiers::NONE, KeyCode::Char('q'))
+                        if focus == Focus::Results =>
+                    {
+                        state.lock().unwrap().dismiss_results();
+                    }
+                    // Execute query: Ctrl+Enter
+                    (KeyModifiers::CONTROL, KeyCode::Enter) => {
+                        let content = editor.content();
+                        // M3: actual query execution here
+                        state.lock().unwrap().set_error(
+                            format!("No DB connected. Query was:\n{content}"),
+                        );
+                    }
+                    // Trigger completions: Ctrl+Space (both modes)
+                    (KeyModifiers::CONTROL, KeyCode::Char(' ')) => {
+                        // M2.5: LSP completion request goes here
+                        // For now show placeholder
+                        state.lock().unwrap().set_completions(vec![
+                            "SELECT".into(),
+                            "FROM".into(),
+                            "WHERE".into(),
+                            "JOIN".into(),
+                            "GROUP BY".into(),
+                        ]);
+                    }
+                    // Pane focus
+                    (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
+                        state.lock().unwrap().focus = Focus::Schema;
+                    }
+                    (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
+                        state.lock().unwrap().focus = Focus::Editor;
+                    }
+                    (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+                        state.lock().unwrap().focus = Focus::Results;
+                    }
+                    (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+                        state.lock().unwrap().focus = Focus::Editor;
+                    }
+                    _ if focus == Focus::Editor => {
+                        editor.handle_key(key);
+                        // Dismiss completions on any text input
+                        if show_completions {
+                            state.lock().unwrap().dismiss_completions();
+                        }
+                    }
+                    _ => {}
                 }
-                // Execute query: Ctrl+Enter
-                (KeyModifiers::CONTROL, KeyCode::Enter) => {
-                    let content = editor.content();
-                    // M3: actual query execution goes here
-                    state.lock().unwrap().set_error(format!("No DB connected. Query: {content}"));
-                }
-                // Pane focus — Ctrl+h/l for schema/editor, Ctrl+j/k for editor/results
-                (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
-                    state.lock().unwrap().focus = Focus::Schema;
-                }
-                (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
-                    state.lock().unwrap().focus = Focus::Editor;
-                }
-                (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-                    state.lock().unwrap().focus = Focus::Results;
-                }
-                (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
-                    state.lock().unwrap().focus = Focus::Editor;
-                }
-                // Editor keys — only when editor focused
-                _ if focus == Focus::Editor => {
-                    editor.handle_key(key);
-                }
-                _ => {}
             }
         }
     }
     Ok(())
 }
 
-fn mode_label(state: &'_ AppState) -> Span<'_> {
+fn mode_label(state: &AppState) -> Span<'static> {
     match state.keybinding_mode {
         KeybindingMode::Vim => match state.vim_mode {
             VimMode::Normal => Span::styled(" NORMAL ", Style::default().fg(Color::Blue)),
             VimMode::Insert => Span::styled(" INSERT ", Style::default().fg(Color::Green)),
             VimMode::Visual => Span::styled(" VISUAL ", Style::default().fg(Color::Magenta)),
         },
-        KeybindingMode::Emacs => Span::styled(" EMACS ", Style::default().fg(Color::Cyan)),
+        KeybindingMode::Emacs => Span::styled(" EMACS  ", Style::default().fg(Color::Cyan)),
+    }
+}
+
+fn diag_label(state: &AppState) -> Option<Span<'static>> {
+    let errors = state.lsp_diagnostics.iter().filter(|d| {
+        d.severity == lsp_types::DiagnosticSeverity::ERROR
+    }).count();
+    let warnings = state.lsp_diagnostics.iter().filter(|d| {
+        d.severity == lsp_types::DiagnosticSeverity::WARNING
+    }).count();
+    if errors > 0 {
+        Some(Span::styled(format!(" ✖ {errors}E "), Style::default().fg(Color::Red)))
+    } else if warnings > 0 {
+        Some(Span::styled(format!(" ⚠ {warnings}W "), Style::default().fg(Color::Yellow)))
+    } else {
+        None
     }
 }
 
@@ -134,15 +189,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor) {
     let results_focused = state.focus == Focus::Results;
 
     // Schema panel
-    let schema_block = Block::default()
-        .title("Schema")
-        .borders(Borders::ALL)
-        .border_style(if schema_focused {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        });
-    f.render_widget(schema_block, outer[0]);
+    draw_schema(f, state, outer[0], schema_focused);
 
     let show_results = !matches!(state.results, ResultsPane::Empty);
     let editor_pct = (state.editor_ratio * 100.0) as u16;
@@ -163,48 +210,154 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor) {
             .split(outer[1])
     };
 
-    // Editor panel — use tui-textarea widget
-    let mode = mode_label(state);
-    let editor_block = Block::default()
-        .title(Line::from(vec![
-            Span::raw("Editor "),
-            mode,
-        ]))
+    draw_editor(f, state, editor, right_chunks[0], editor_focused);
+
+    if show_results {
+        draw_results(f, state, right_chunks[1], results_focused);
+    }
+
+    // Completion popup (overlay)
+    if state.show_completions && !state.completions.is_empty() {
+        draw_completions(f, state, right_chunks[0]);
+    }
+}
+
+fn draw_schema(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool) {
+    let block = Block::default()
+        .title("Schema")
         .borders(Borders::ALL)
-        .border_style(if editor_focused {
+        .border_style(if focused {
             Style::default().fg(Color::Yellow)
         } else {
             Style::default()
         });
+
+    if state.schema_tree.is_empty() {
+        f.render_widget(
+            Paragraph::new("No connection").block(block),
+            area,
+        );
+    } else {
+        let items: Vec<ListItem> = state
+            .schema_tree
+            .iter()
+            .map(|s| ListItem::new(s.as_str()))
+            .collect();
+        f.render_widget(List::new(items).block(block), area);
+    }
+}
+
+fn draw_editor(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor, area: Rect, focused: bool) {
+    let mode = mode_label(state);
+    let mut title_spans = vec![Span::raw("Editor "), mode];
+    if let Some(d) = diag_label(state) {
+        title_spans.push(d);
+    }
+
+    // Show first diagnostic message if any
+    let diag_line = state.lsp_diagnostics.first().map(|d| {
+        format!(" {}:{} {}", d.line + 1, d.col + 1, d.message)
+    });
+
+    let editor_block = Block::default()
+        .title(Line::from(title_spans))
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        });
+
+    // Split editor area to leave room for diagnostic line
+    let editor_chunks = if diag_line.is_some() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(100)])
+            .split(area)
+    };
+
     let mut textarea = editor.textarea.clone();
     textarea.set_block(editor_block);
-    f.render_widget(&textarea, right_chunks[0]);
+    f.render_widget(&textarea, editor_chunks[0]);
 
-    // Results panel
-    if show_results {
-        let (title, content, color) = match &state.results {
-            ResultsPane::Results(r) => {
-                let text = format!(
-                    "{}\n{}",
-                    r.columns.join(" | "),
-                    r.rows.iter().map(|row| row.join(" | ")).collect::<Vec<_>>().join("\n")
-                );
-                ("Results", text, Color::Green)
-            }
-            ResultsPane::Error(e) => ("Error", e.clone(), Color::Red),
-            ResultsPane::Empty => unreachable!(),
-        };
-
-        let results_block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(if results_focused {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(color)
-            });
-        f.render_widget(Paragraph::new(content).block(results_block), right_chunks[1]);
+    if let Some(msg) = diag_line {
+        f.render_widget(
+            Paragraph::new(msg).style(Style::default().fg(Color::Red)),
+            editor_chunks[1],
+        );
     }
+}
+
+fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool) {
+    let (title, content, color) = match &state.results {
+        ResultsPane::Results(r) => {
+            let header = r.columns.join(" │ ");
+            let sep = "─".repeat(header.len());
+            let rows = r.rows
+                .iter()
+                .map(|row| row.join(" │ "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (
+                "Results",
+                format!("{header}\n{sep}\n{rows}"),
+                Color::Green,
+            )
+        }
+        ResultsPane::Error(e) => ("Error", e.clone(), Color::Red),
+        ResultsPane::Empty => unreachable!(),
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(color)
+        });
+
+    f.render_widget(Paragraph::new(content).block(block), area);
+}
+
+fn draw_completions(f: &mut ratatui::Frame<'_>, state: &AppState, editor_area: Rect) {
+    let items: Vec<ListItem> = state
+        .completions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let style = if i == 0 {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(s.as_str()).style(style)
+        })
+        .collect();
+
+    let height = (items.len() as u16 + 2).min(10);
+    let popup = Rect {
+        x: editor_area.x + 2,
+        y: editor_area.y + 2,
+        width: 30.min(editor_area.width.saturating_sub(4)),
+        height: height.min(editor_area.height.saturating_sub(4)),
+    };
+
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title("Completions")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        popup,
+    );
 }
 
 #[cfg(test)]
@@ -243,5 +396,30 @@ mod tests {
     fn emacs_editor_mode() {
         let editor = Editor::new(KeybindingMode::Emacs);
         assert_eq!(editor.keybinding_mode, KeybindingMode::Emacs);
+    }
+
+    #[test]
+    fn completions_set_and_dismiss() {
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.set_completions(vec!["SELECT".into(), "FROM".into()]);
+        assert!(s.show_completions);
+        assert_eq!(s.completions.len(), 2);
+        s.dismiss_completions();
+        assert!(!s.show_completions);
+    }
+
+    #[test]
+    fn diagnostics_stored() {
+        use sqeel_core::lsp::Diagnostic;
+        use lsp_types::DiagnosticSeverity;
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.set_diagnostics(vec![Diagnostic {
+            line: 0, col: 5,
+            message: "unexpected token".into(),
+            severity: DiagnosticSeverity::ERROR,
+        }]);
+        assert!(s.has_errors());
     }
 }

@@ -1,4 +1,7 @@
 use std::sync::{Arc, Mutex};
+use crate::lsp::Diagnostic;
+use crate::highlight::HighlightSpan;
+use lsp_types::DiagnosticSeverity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KeybindingMode {
@@ -46,6 +49,10 @@ pub struct AppState {
     pub results: ResultsPane,
     pub schema_tree: Vec<String>,
     pub editor_ratio: f32,
+    pub lsp_diagnostics: Vec<Diagnostic>,
+    pub highlight_spans: Vec<HighlightSpan>,
+    pub completions: Vec<String>,
+    pub show_completions: bool,
 }
 
 impl AppState {
@@ -69,6 +76,27 @@ impl AppState {
     pub fn dismiss_results(&mut self) {
         self.results = ResultsPane::Empty;
         self.editor_ratio = 1.0;
+    }
+
+    pub fn set_diagnostics(&mut self, diags: Vec<Diagnostic>) {
+        self.lsp_diagnostics = diags;
+    }
+
+    pub fn set_highlights(&mut self, spans: Vec<HighlightSpan>) {
+        self.highlight_spans = spans;
+    }
+
+    pub fn set_completions(&mut self, items: Vec<String>) {
+        self.show_completions = !items.is_empty();
+        self.completions = items;
+    }
+
+    pub fn dismiss_completions(&mut self) {
+        self.show_completions = false;
+    }
+
+    pub fn has_errors(&self) -> bool {
+        self.lsp_diagnostics.iter().any(|d| d.severity == DiagnosticSeverity::ERROR)
     }
 }
 

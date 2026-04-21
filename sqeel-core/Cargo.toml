@@ -5,7 +5,12 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+lsp-types = "0.97.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 tokio = { version = "1", features = ["full"] }
+tree-sitter = "0.26.8"
+tree-sitter-sequel = "0.3.11"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
