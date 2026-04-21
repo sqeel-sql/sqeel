@@ -16,8 +16,7 @@ struct Args {
     connection: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let state = AppState::new();
 
@@ -35,13 +34,16 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Build a tokio runtime for async work; iced owns the main thread and its own executor.
+    let rt = tokio::runtime::Runtime::new()?;
+
     if let Some(url) = url {
-        connect_and_spawn(&state, &url).await;
+        rt.block_on(connect_and_spawn(&state, &url));
     }
 
-    // Reconnection watcher for the GUI
+    // Reconnection watcher — lives inside the manual runtime.
     let watcher_state = state.clone();
-    tokio::spawn(async move {
+    rt.spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let pending = watcher_state.lock().unwrap().pending_reconnect.take();
@@ -51,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // iced creates its own executor on the main thread — must not be inside tokio::main.
     GuiProvider::run(state)?;
     Ok(())
 }
