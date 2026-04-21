@@ -1,4 +1,5 @@
 pub mod editor;
+mod completion_thread;
 mod highlight_thread;
 
 use arboard::Clipboard;
@@ -15,6 +16,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use completion_thread::CompletionThread;
 use editor::Editor;
 use highlight_thread::HighlightThread;
 use ratatui::{
@@ -74,6 +76,7 @@ async fn run_loop(
 ) -> anyhow::Result<()> {
     let mut editor = Editor::new(keybinding_mode);
     let highlight_thread = HighlightThread::spawn()?;
+    let completion_thread = CompletionThread::spawn()?;
 
     // Start LSP client if binary is configured and reachable
     let scratch_path = std::env::temp_dir().join("sqeel-scratch.sql");
@@ -107,6 +110,7 @@ async fn run_loop(
     let mut last_save_time = Instant::now();
     let mut doc_version: i32 = 0;
     let mut last_completion_id: Option<i64> = None;
+    let mut last_schema_completions: Vec<String> = Vec::new();
     let mut tick: u32 = 0;
     let mut command_input: Option<String> = None;
     let mut schema_search: Option<String> = None;
@@ -158,8 +162,8 @@ async fn run_loop(
             }
         }
 
-        // Auto-complete: on every content change, update schema completions immediately
-        // and (if LSP is available) request supplemental completions from it.
+        // Auto-complete: on every content change, submit a schema completion query to the
+        // background thread and (if LSP is available) request supplemental completions.
         if let Some(ref content) = content {
             doc_version += 1;
 
@@ -178,10 +182,9 @@ async fn run_loop(
                 state.lock().unwrap().dismiss_completions();
                 last_completion_id = None;
             } else {
-                // Schema completions are available instantly, before the LSP responds.
                 let prefix = word_prefix_at(editor.textarea.lines(), row, col);
-                let schema_items = state.lock().unwrap().schema_identifier_completions(&prefix);
-                state.lock().unwrap().set_completions(schema_items);
+                let identifiers = state.lock().unwrap().schema_identifier_names();
+                completion_thread.submit(prefix, identifiers);
 
                 if let Some(ref mut client) = lsp {
                     let _ = client
@@ -197,6 +200,12 @@ async fn run_loop(
             }
         }
 
+        // Poll schema completion thread results.
+        if let Some(schema_items) = completion_thread.try_recv() {
+            last_schema_completions = schema_items.clone();
+            state.lock().unwrap().set_completions(schema_items);
+        }
+
         // Drain LSP events
         if let Some(ref mut client) = lsp {
             while let Ok(event) = client.events.try_recv() {
@@ -206,15 +215,11 @@ async fn run_loop(
                     }
                     LspEvent::Completion(id, lsp_items) => {
                         if Some(id) == last_completion_id {
-                            let (row, col) = editor.textarea.cursor();
-                            let prefix = word_prefix_at(editor.textarea.lines(), row, col);
-                            let schema_items =
-                                state.lock().unwrap().schema_identifier_completions(&prefix);
                             // LSP results lead; schema identifiers fill in any gaps.
                             let mut merged = lsp_items;
-                            for item in schema_items {
-                                if !merged.contains(&item) {
-                                    merged.push(item);
+                            for item in &last_schema_completions {
+                                if !merged.contains(item) {
+                                    merged.push(item.clone());
                                 }
                             }
                             state.lock().unwrap().set_completions(merged);

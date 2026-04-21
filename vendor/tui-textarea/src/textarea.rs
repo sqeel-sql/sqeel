@@ -1371,7 +1371,7 @@ impl<'a> TextArea<'a> {
     /// assert_eq!(textarea.yank_text(), "aaa\nbbb\nccc");
     /// ```
     pub fn select_all(&mut self) {
-        self.move_cursor(CursorMove::Jump(u16::MAX, u16::MAX));
+        self.move_cursor(CursorMove::Jump(usize::MAX, usize::MAX));
         self.selection_start = Some((0, 0));
     }
 
@@ -1586,7 +1586,20 @@ impl<'a> TextArea<'a> {
         }
     }
 
-    pub(crate) fn line_spans<'b>(&'b self, line: &'b str, row: usize, lnum_len: u8) -> Line<'b> {
+    pub(crate) fn line_spans<'b>(&'b self, line: &'b str, row: usize, lnum_len: u8, col_offset: usize) -> Line<'b> {
+        // When col_offset > 0 the viewport has scrolled past u16::MAX columns.
+        // Clip the line to the visible portion and adjust all byte/char positions.
+        let (line, byte_offset) = if col_offset > 0 {
+            let byte_off = line
+                .char_indices()
+                .nth(col_offset)
+                .map(|(b, _)| b)
+                .unwrap_or(line.len());
+            (&line[byte_off..], byte_off)
+        } else {
+            (line, 0)
+        };
+
         let mut hl = LineHighlighter::new(
             line,
             self.cursor_style,
@@ -1595,12 +1608,15 @@ impl<'a> TextArea<'a> {
             self.select_style,
         );
 
-        if let Some(style) = self.line_number_style {
-            hl.line_number(row, lnum_len, style);
+        // Line numbers are off-screen when col_offset > 0.
+        if col_offset == 0 {
+            if let Some(style) = self.line_number_style {
+                hl.line_number(row, lnum_len, style);
+            }
         }
 
         if row == self.cursor.0 {
-            hl.cursor_line(self.cursor.1, self.cursor_line_style);
+            hl.cursor_line(self.cursor.1.saturating_sub(col_offset), self.cursor_line_style);
         }
 
         #[cfg(feature = "search")]
@@ -1609,7 +1625,13 @@ impl<'a> TextArea<'a> {
         }
 
         if let Some((start, end)) = self.selection_positions() {
-            hl.selection(row, start.row, start.offset, end.row, end.offset);
+            hl.selection(
+                row,
+                start.row,
+                start.offset.saturating_sub(byte_offset),
+                end.row,
+                end.offset.saturating_sub(byte_offset),
+            );
         }
 
         hl.into_spans()

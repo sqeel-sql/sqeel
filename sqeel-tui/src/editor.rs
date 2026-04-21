@@ -131,7 +131,7 @@ impl<'a> Editor<'a> {
 
     pub fn goto_line(&mut self, line: usize) {
         self.textarea
-            .move_cursor_clamped(CursorMove::Jump(clamp_u16(line.saturating_sub(1)), 0));
+            .move_cursor(CursorMove::Jump(line.saturating_sub(1), 0));
     }
 
     pub fn insert_str(&mut self, text: &str) {
@@ -170,7 +170,7 @@ impl<'a> Editor<'a> {
         self.textarea = TextArea::new(lines);
         self.textarea.set_max_histories(0);
         self.textarea
-            .move_cursor_clamped(CursorMove::Jump(clamp_u16(cursor.0), clamp_u16(cursor.1)));
+            .move_cursor(CursorMove::Jump(cursor.0, cursor.1));
         self.content_dirty = true;
     }
 
@@ -506,7 +506,7 @@ impl<'a> Editor<'a> {
                 }
                 self.textarea.cancel_selection();
                 self.textarea
-                    .move_cursor_clamped(CursorMove::Jump(clamp_u16(top_row), 0));
+                    .move_cursor(CursorMove::Jump(top_row, 0));
                 self.mode = Mode::Normal;
                 return true;
             }
@@ -697,7 +697,7 @@ impl<'a> Editor<'a> {
                 }
                 self.textarea.cancel_selection();
                 self.textarea
-                    .move_cursor_clamped(CursorMove::Jump(clamp_u16(row), clamp_u16(col)));
+                    .move_cursor(CursorMove::Jump(row, col));
                 self.mode = Mode::Normal;
                 return true;
             }
@@ -828,13 +828,13 @@ impl<'a> Editor<'a> {
         let bottom = cursor_row.max(anchor_row);
         let total_lines = self.textarea.lines().len();
         self.textarea.cancel_selection();
-        self.textarea.move_cursor_clamped(CursorMove::Jump(clamp_u16(top), 0));
+        self.textarea.move_cursor(CursorMove::Jump(top, 0));
         self.textarea.start_selection();
         if bottom + 1 < total_lines {
             self.textarea
-                .move_cursor_clamped(CursorMove::Jump(clamp_u16(bottom + 1), 0));
+                .move_cursor(CursorMove::Jump(bottom + 1, 0));
         } else {
-            self.textarea.move_cursor_clamped(CursorMove::Jump(clamp_u16(bottom), 0));
+            self.textarea.move_cursor(CursorMove::Jump(bottom, 0));
             self.textarea.move_cursor(CursorMove::End);
         }
     }
@@ -852,20 +852,20 @@ impl<'a> Editor<'a> {
         self.textarea.cancel_selection();
         if cursor_row >= anchor_row {
             // Cursor at bottom: anchor top-start → cursor bottom-start
-            self.textarea.move_cursor_clamped(CursorMove::Jump(clamp_u16(top), 0));
+            self.textarea.move_cursor(CursorMove::Jump(top, 0));
             self.textarea.start_selection();
-            self.textarea.move_cursor_clamped(CursorMove::Jump(clamp_u16(bottom), 0));
+            self.textarea.move_cursor(CursorMove::Jump(bottom, 0));
         } else {
             // Cursor at top: anchor below bottom-end → cursor top-start
             if bottom + 1 < total_lines {
                 self.textarea
-                    .move_cursor_clamped(CursorMove::Jump(clamp_u16(bottom + 1), 0));
+                    .move_cursor(CursorMove::Jump(bottom + 1, 0));
             } else {
-                self.textarea.move_cursor_clamped(CursorMove::Jump(clamp_u16(bottom), 0));
+                self.textarea.move_cursor(CursorMove::Jump(bottom, 0));
                 self.textarea.move_cursor(CursorMove::End);
             }
             self.textarea.start_selection();
-            self.textarea.move_cursor_clamped(CursorMove::Jump(clamp_u16(top), 0));
+            self.textarea.move_cursor(CursorMove::Jump(top, 0));
         }
     }
 
@@ -961,26 +961,6 @@ impl<'a> Editor<'a> {
     }
 }
 
-trait TextAreaExt {
-    fn move_cursor_clamped(&mut self, m: CursorMove);
-}
-
-impl TextAreaExt for TextArea<'_> {
-    fn move_cursor_clamped(&mut self, m: CursorMove) {
-        let m = match m {
-            CursorMove::Jump(row, col) => CursorMove::Jump(
-                row.min(u16::MAX),
-                col.min(u16::MAX),
-            ),
-            other => other,
-        };
-        self.move_cursor(m);
-    }
-}
-
-fn clamp_u16(n: usize) -> u16 {
-    n.min(u16::MAX as usize) as u16
-}
 
 /// Return the text inserted between `before` and `after`.
 /// Finds the longest common prefix and suffix; the middle of `after` is the delta.

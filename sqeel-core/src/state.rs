@@ -240,6 +240,22 @@ impl AppState {
         self.status_message = None;
     }
 
+    /// Collect all identifier names from the schema tree (databases, tables, columns)
+    /// with no filtering — for passing to a background completion thread.
+    pub fn schema_identifier_names(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack: Vec<&SchemaNode> = self.schema_nodes.iter().collect();
+        while let Some(node) = stack.pop() {
+            out.push(node.name().to_owned());
+            match node {
+                SchemaNode::Database { tables, .. } => stack.extend(tables.iter()),
+                SchemaNode::Table { columns, .. } => stack.extend(columns.iter()),
+                SchemaNode::Column { .. } => {}
+            }
+        }
+        out
+    }
+
     /// Collect all identifier names from the schema tree (databases, tables, columns),
     /// filter by case-insensitive prefix, deduplicate, and return sorted.
     pub fn schema_identifier_completions(&self, prefix: &str) -> Vec<String> {

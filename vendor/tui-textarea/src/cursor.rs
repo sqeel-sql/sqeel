@@ -222,7 +222,7 @@ pub enum CursorMove {
     /// textarea.move_cursor(CursorMove::Jump(10,  10));
     /// assert_eq!(textarea.cursor(), (2, 4));
     /// ```
-    Jump(u16, u16),
+    Jump(usize, usize),
     /// Move cursor to keep it within the viewport. For example, when a viewport displays line 8 to line 16:
     ///
     /// - cursor at line 4 is moved to line 8
@@ -353,8 +353,8 @@ impl CursorMove {
                 Some((0, fit_col(col, &lines[0])))
             }
             Jump(row, col) => {
-                let row = cmp::min(*row as usize, lines.len() - 1);
-                let col = fit_col(*col as usize, &lines[row]);
+                let row = cmp::min(*row, lines.len() - 1);
+                let col = fit_col(*col, &lines[row]);
                 Some((row, col))
             }
             InViewport => {
