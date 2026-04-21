@@ -635,6 +635,14 @@ async fn run_loop(
                     (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
                         state.lock().unwrap().open_connection_switcher();
                     }
+                    // Toggle sidebar: Ctrl+\
+                    (KeyModifiers::CONTROL, KeyCode::Char('\\')) => {
+                        let mut s = state.lock().unwrap();
+                        s.sidebar_visible = !s.sidebar_visible;
+                        if !s.sidebar_visible && s.focus == Focus::Schema {
+                            s.focus = Focus::Editor;
+                        }
+                    }
                     // Schema pane navigation
                     (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Schema => {
                         state.lock().unwrap().schema_cursor_down();
@@ -859,7 +867,11 @@ fn draw(
 
     let outer = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(30), Constraint::Percentage(85)])
+        .constraints(if state.sidebar_visible {
+            vec![Constraint::Min(30), Constraint::Percentage(85)]
+        } else {
+            vec![Constraint::Length(0), Constraint::Percentage(100)]
+        })
         .split(main_area);
 
     let schema_focused = state.focus == Focus::Schema;
@@ -867,8 +879,11 @@ fn draw(
     let results_focused = state.focus == Focus::Results;
 
     // Schema panel
-    let (schema_list_area, schema_list_offset, schema_list_filtered) =
-        draw_schema(f, state, outer[0], schema_focused, tick, schema_search);
+    let (schema_list_area, schema_list_offset, schema_list_filtered) = if state.sidebar_visible {
+        draw_schema(f, state, outer[0], schema_focused, tick, schema_search)
+    } else {
+        (Rect::default(), 0, false)
+    };
 
     let show_results = !matches!(state.results, ResultsPane::Empty);
     let editor_pct = (state.editor_ratio * 100.0) as u16;
