@@ -47,20 +47,14 @@ pub struct SessionData {
 
 impl serde::Serialize for KeybindingMode {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            KeybindingMode::Vim => s.serialize_str("vim"),
-            KeybindingMode::Emacs => s.serialize_str("emacs"),
-        }
+        s.serialize_str("vim")
     }
 }
 
 impl<'de> serde::Deserialize<'de> for KeybindingMode {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        match s.to_lowercase().as_str() {
-            "emacs" => Ok(KeybindingMode::Emacs),
-            _ => Ok(KeybindingMode::Vim),
-        }
+        let _ = String::deserialize(d)?;
+        Ok(KeybindingMode::Vim)
     }
 }
 
@@ -69,7 +63,6 @@ pub fn config_dir() -> Option<PathBuf> {
 }
 
 const DEFAULT_CONFIG: &str = r#"[editor]
-# Keybinding mode: "vim" or "emacs"
 keybindings = "vim"
 
 # Path to the SQL LSP binary (sqls recommended: https://github.com/sqls-server/sqls)
@@ -220,19 +213,6 @@ lsp_binary = "sqls"
         )
         .unwrap();
         assert_eq!(config.editor.keybindings, KeybindingMode::Vim);
-    }
-
-    #[test]
-    fn keybinding_mode_deserialize_emacs() {
-        let config: MainConfig = toml::from_str(
-            r#"
-[editor]
-keybindings = "emacs"
-lsp_binary = "sqls"
-"#,
-        )
-        .unwrap();
-        assert_eq!(config.editor.keybindings, KeybindingMode::Emacs);
     }
 
     #[test]

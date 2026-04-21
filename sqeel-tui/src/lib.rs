@@ -109,6 +109,9 @@ async fn run_loop(
     let mut last_completion_id: Option<i64> = None;
     let mut tick: u32 = 0;
     let mut command_input: Option<String> = None;
+    let mut schema_search: Option<String> = None;
+    let mut editor_search: Option<String> = None;
+    let mut last_editor_search: Option<String> = None;
 
     // Clipboard held alive for the session so the OS clipboard manager sees the content.
     let mut clipboard = Clipboard::new().ok();
@@ -194,9 +197,12 @@ async fn run_loop(
         tick = tick.wrapping_add(1);
         let tick_snap = tick;
         let cmd_snap = command_input.clone();
+        let schema_search_snap = schema_search.clone();
+        let editor_search_snap = editor_search.clone();
+        let last_editor_search_snap = last_editor_search.clone();
         terminal.draw(|f| {
             let s = state.lock().unwrap();
-            last_draw_areas = draw(f, &s, &mut editor, tick_snap, cmd_snap.as_deref());
+            last_draw_areas = draw(f, &s, &mut editor, tick_snap, cmd_snap.as_deref(), schema_search_snap.as_deref(), editor_search_snap.as_deref(), last_editor_search_snap.as_deref());
         })?;
 
         if !event::poll(Duration::from_millis(50))? {
@@ -346,6 +352,57 @@ async fn run_loop(
                         (KeyModifiers::NONE, KeyCode::Char(c)) => {
                             if let Some(ref mut cmd) = command_input {
                                 cmd.push(c);
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // ── Schema search input ──────────────────────────────────────────
+                if schema_search.is_some() {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            schema_search = None;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Backspace) => {
+                            if let Some(ref mut q) = schema_search {
+                                q.pop();
+                            }
+                        }
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            // keep filter active, dismiss input box
+                            schema_search = None;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char(c)) => {
+                            if let Some(ref mut q) = schema_search {
+                                q.push(c);
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // ── Editor search input ──────────────────────────────────────────
+                if editor_search.is_some() {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            last_editor_search = editor_search.take();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Backspace) => {
+                            if let Some(ref mut q) = editor_search {
+                                q.pop();
+                            }
+                        }
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            editor.textarea.search_forward(false);
+                            last_editor_search = editor_search.take();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char(c)) => {
+                            if let Some(ref mut q) = editor_search {
+                                q.push(c);
+                                let _ = editor.textarea.set_search_pattern(q.as_str());
                             }
                         }
                         _ => {}
@@ -536,6 +593,10 @@ async fn run_loop(
                     {
                         state.lock().unwrap().schema_toggle_current();
                     }
+                    // Schema search
+                    (KeyModifiers::NONE, KeyCode::Char('/')) if focus == Focus::Schema => {
+                        schema_search = Some(String::new());
+                    }
                     // Results pane navigation
                     (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Results => {
                         state.lock().unwrap().scroll_results_down();
@@ -614,6 +675,26 @@ async fn run_loop(
                             state.lock().unwrap().focus = Focus::Editor;
                         }
                     }
+                    // Editor vim search: / in Normal mode
+                    (KeyModifiers::NONE, KeyCode::Char('/'))
+                        if focus == Focus::Editor && vim_mode == VimMode::Normal =>
+                    {
+                        editor_search = Some(String::new());
+                        last_editor_search = None;
+                        let _ = editor.textarea.set_search_pattern("");
+                    }
+                    // n / N — navigate search matches
+                    (KeyModifiers::NONE, KeyCode::Char('n'))
+                        if focus == Focus::Editor && vim_mode == VimMode::Normal && last_editor_search.is_some() =>
+                    {
+                        editor.textarea.search_forward(false);
+                    }
+                    (KeyModifiers::SHIFT, KeyCode::Char('N'))
+                    | (KeyModifiers::NONE, KeyCode::Char('N'))
+                        if focus == Focus::Editor && vim_mode == VimMode::Normal && last_editor_search.is_some() =>
+                    {
+                        editor.textarea.search_back(false);
+                    }
                     _ if focus == Focus::Editor => {
                         editor.handle_key(key);
                         if let Some(text) = editor.last_yank.take() {
@@ -640,13 +721,10 @@ fn tmux_navigate(direction: char) {
 }
 
 fn mode_label(state: &AppState) -> Span<'static> {
-    match state.keybinding_mode {
-        KeybindingMode::Vim => match state.vim_mode {
-            VimMode::Normal => Span::styled(" NORMAL ", Style::default().fg(Color::Blue)),
-            VimMode::Insert => Span::styled(" INSERT ", Style::default().fg(Color::Green)),
-            VimMode::Visual => Span::styled(" VISUAL ", Style::default().fg(Color::Magenta)),
-        },
-        KeybindingMode::Emacs => Span::styled(" EMACS  ", Style::default().fg(Color::Cyan)),
+    match state.vim_mode {
+        VimMode::Normal => Span::styled(" NORMAL ", Style::default().fg(Color::Blue)),
+        VimMode::Insert => Span::styled(" INSERT ", Style::default().fg(Color::Green)),
+        VimMode::Visual => Span::styled(" VISUAL ", Style::default().fg(Color::Magenta)),
     }
 }
 
@@ -684,7 +762,7 @@ struct DrawAreas {
     results: Option<Rect>,
 }
 
-fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &mut Editor, tick: u32, command_input: Option<&str>) -> DrawAreas {
+fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &mut Editor, tick: u32, command_input: Option<&str>, schema_search: Option<&str>, editor_search: Option<&str>, last_editor_search: Option<&str>) -> DrawAreas {
     let area = f.area();
 
     let lsp_warn = !state.lsp_available;
@@ -714,7 +792,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &mut Editor, tick:
     let results_focused = state.focus == Focus::Results;
 
     // Schema panel
-    draw_schema(f, state, outer[0], schema_focused, tick);
+    draw_schema(f, state, outer[0], schema_focused, tick, schema_search);
 
     let show_results = !matches!(state.results, ResultsPane::Empty);
     let editor_pct = (state.editor_ratio * 100.0) as u16;
@@ -749,7 +827,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &mut Editor, tick:
         results: if show_results { Some(right_chunks[1]) } else { None },
     };
 
-    draw_editor(f, state, editor, right_chunks[0], editor_focused);
+    draw_editor(f, state, editor, right_chunks[0], editor_focused, editor_search, last_editor_search);
 
     if show_results {
         draw_results(f, state, right_chunks[1], results_focused);
@@ -977,7 +1055,7 @@ fn draw_status_bar(
     f.render_widget(Paragraph::new(Span::styled(cursor_str, cursor_style)), cursor_area);
 }
 
-fn draw_schema(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool, tick: u32) {
+fn draw_schema(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool, tick: u32, search: Option<&str>) {
     const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
     let status = if state.schema_loading {
         SPINNER[(tick as usize) % SPINNER.len()]
@@ -986,31 +1064,75 @@ fn draw_schema(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused
     } else {
         ""
     };
-    let title = if status.is_empty() {
-        "Schema".to_string()
+    let title = if state.schema_loading || state.schema_nodes.is_empty() {
+        format!("Explorer {status}").trim_end().to_string()
     } else {
-        format!("Schema {status}")
+        let count = state.schema_nodes.len();
+        format!("Explorer ({count})")
     };
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::TOP | Borders::RIGHT)
-        .border_style(if focused {
+
+    let border_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+
+    // Outer block provides only the RIGHT border (no top line)
+    let outer_block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(border_style);
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
+    // Search box is always visible (3 rows: border+input+border), list below
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(inner);
+
+    let searching = search.is_some();
+    let query = search.unwrap_or("");
+    let input_text = if searching {
+        // show cursor block at end when focused
+        format!("{query}▌")
+    } else {
+        query.to_string()
+    };
+    let search_block = Block::default()
+        .title(title.clone())
+        .title_style(Style::default().add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(if searching {
             Style::default().fg(Color::Yellow)
         } else {
-            Style::default()
+            border_style
         });
+    f.render_widget(Paragraph::new(input_text).block(search_block), chunks[0]);
 
-    let items = state.visible_schema_items();
+    let list_area = chunks[1];
+
+    let all_items = state.visible_schema_items();
+    let items: Vec<_> = if !query.is_empty() {
+        let q = query.to_lowercase();
+        all_items.into_iter().filter(|item| {
+            let label = item.label.to_lowercase();
+            let mut chars = label.chars();
+            q.chars().all(|qc| chars.any(|lc| lc == qc))
+        }).collect()
+    } else {
+        all_items
+    };
 
     if items.is_empty() {
         f.render_widget(
-            Paragraph::new(if state.active_connection.is_some() {
+            Paragraph::new(if !query.is_empty() {
+                "No matches"
+            } else if state.active_connection.is_some() {
                 "Loading..."
             } else {
                 "No connection"
-            })
-            .block(block),
-            area,
+            }),
+            list_area,
         );
         return;
     }
@@ -1020,16 +1142,19 @@ fn draw_schema(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused
         .map(|item| ListItem::new(item.label.as_str()))
         .collect();
 
-    let list = List::new(list_items)
-        .block(block)
-        .highlight_style(if focused {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        });
+    // When search box has focus (searching), don't highlight the list.
+    // When list has focus, highlight the cursor row.
+    let (highlight_style, selected) = if searching {
+        (Style::default(), None)
+    } else if focused {
+        (Style::default().add_modifier(Modifier::REVERSED), Some(state.schema_cursor))
+    } else {
+        (Style::default().add_modifier(Modifier::BOLD), Some(state.schema_cursor))
+    };
 
-    let mut list_state = ListState::default().with_selected(Some(state.schema_cursor));
-    f.render_stateful_widget(list, area, &mut list_state);
+    let list = List::new(list_items).highlight_style(highlight_style);
+    let mut list_state = ListState::default().with_selected(selected);
+    f.render_stateful_widget(list, list_area, &mut list_state);
 }
 
 fn draw_editor(
@@ -1037,55 +1162,38 @@ fn draw_editor(
     state: &AppState,
     editor: &mut Editor,
     area: Rect,
-    focused: bool,
+    _focused: bool,
+    editor_search: Option<&str>,
+    last_editor_search: Option<&str>,
 ) {
-    let mode = mode_label(state);
-    let mut title_spans = vec![Span::raw("Editor "), mode];
-    if let Some(d) = diag_label(state) {
-        title_spans.push(d);
-    }
-
     // Show first diagnostic message if any
     let diag_line = state
         .lsp_diagnostics
         .first()
         .map(|d| format!(" {}:{} {}", d.line + 1, d.col + 1, d.message));
 
-    let editor_block = Block::default()
-        .title(Line::from(title_spans))
-        .borders(Borders::TOP)
-        .border_style(if focused {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        });
+    // Split area: tab bar (1) + textarea + optional search bar (1) + optional diag (1)
+    let mut constraints = vec![Constraint::Length(1), Constraint::Min(1)];
+    if editor_search.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    if diag_line.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
 
-    // Render block manually so we can split the inner area ourselves
-    let inner = editor_block.inner(area);
-    f.render_widget(editor_block, area);
-
-    // Split inner: tab_bar (1) + textarea + optional diag (1)
-    let inner_chunks = if diag_line.is_some() {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .split(inner)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1)])
-            .split(inner)
-    };
-
-    draw_tab_bar(f, state, inner_chunks[0]);
+    f.render_widget(
+        Paragraph::new(build_tab_title(state))
+            .style(Style::default().bg(Color::Rgb(30, 30, 38))),
+        chunks[0],
+    );
 
     // Pre-render a full-width strip at the cursor line so trailing empty cells
     // also get the highlight background (tui-textarea only styles character cells).
-    let textarea_area = inner_chunks[1];
+    let textarea_area = chunks[1];
     let cursor_screen_row = editor.cursor_screen_row(textarea_area.height);
     if cursor_screen_row < textarea_area.height {
         let strip = Rect {
@@ -1102,28 +1210,47 @@ fn draw_editor(
 
     editor.textarea.set_line_number_style(Style::default().fg(Color::DarkGray));
     editor.textarea.set_cursor_line_style(Style::default().bg(Color::Rgb(40, 40, 45)));
-    let _ = editor.textarea.set_search_pattern(
-        r"(?i)\b(select|from|where|insert|into|values|update|set|delete|create|table|drop|alter|add|column|join|inner|outer|left|right|full|cross|on|and|or|not|null|is|in|like|between|order|by|group|having|limit|offset|union|all|distinct|as|case|when|then|else|end|if|exists|primary|foreign|key|references|unique|default|constraint|check|with|view|begin|commit|rollback|transaction|use|show|describe|explain|database|schema|index|procedure|function|returns|return|trigger|true|false)\b",
-    );
-    editor.textarea.set_search_style(
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
-    f.render_widget(&editor.textarea, inner_chunks[1]);
+    // In Visual mode tui-textarea's Search boundary (rank 2) overrides Select (rank 1),
+    // so syntax highlights would erase the selection color. Clear the pattern instead.
+    if state.vim_mode == VimMode::Visual {
+        let _ = editor.textarea.set_search_pattern("");
+    } else if let Some(query) = editor_search.or(last_editor_search) {
+        let pattern = if query.is_empty() { "" } else { query };
+        let _ = editor.textarea.set_search_pattern(pattern);
+        editor.textarea.set_search_style(
+            Style::default().bg(Color::Rgb(80, 60, 20)).fg(Color::White),
+        );
+    } else {
+        let _ = editor.textarea.set_search_pattern(
+            r"(?i)\b(select|from|where|insert|into|values|update|set|delete|create|table|drop|alter|add|column|join|inner|outer|left|right|full|cross|on|and|or|not|null|is|in|like|between|order|by|group|having|limit|offset|union|all|distinct|as|case|when|then|else|end|if|exists|primary|foreign|key|references|unique|default|constraint|check|with|view|begin|commit|rollback|transaction|use|show|describe|explain|database|schema|index|procedure|function|returns|return|trigger|true|false)\b",
+        );
+        editor.textarea.set_search_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    f.render_widget(&editor.textarea, chunks[1]);
+
+    let mut extra_idx = 2usize;
+    if let Some(query) = editor_search {
+        f.render_widget(
+            Paragraph::new(format!("/{query}"))
+                .style(Style::default().fg(Color::Yellow)),
+            chunks[extra_idx],
+        );
+        extra_idx += 1;
+    }
 
     if let Some(msg) = diag_line {
         f.render_widget(
             Paragraph::new(msg).style(Style::default().fg(Color::Red)),
-            inner_chunks[2],
+            chunks[extra_idx],
         );
     }
 }
 
-fn draw_tab_bar(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect) {
-    if state.tabs.is_empty() {
-        return;
-    }
+fn build_tab_title(state: &AppState) -> Line<'_> {
     let mut spans: Vec<Span> = vec![];
     for (i, tab) in state.tabs.iter().enumerate() {
         let active = i == state.active_tab;
@@ -1140,7 +1267,7 @@ fn draw_tab_bar(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect) {
             spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
         }
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    Line::from(spans)
 }
 
 fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool) {
@@ -1349,7 +1476,7 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect) {
             ],
         ),
         (
-            "Schema Pane",
+            "Explorer Pane",
             &[
                 ("j / k", "Navigate up / down"),
                 ("Enter / l", "Expand / collapse node"),
@@ -1378,14 +1505,6 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect) {
                 ("Esc", "Normal mode"),
                 ("v", "Visual mode"),
                 ("Ctrl+P / Ctrl+N", "History prev / next"),
-            ],
-        ),
-        (
-            "Editor — Emacs",
-            &[
-                ("Ctrl+B / F", "Cursor left / right"),
-                ("Ctrl+P / N", "Cursor / history up / down"),
-                ("Ctrl+A / E", "Start / end of line"),
             ],
         ),
         (
@@ -1518,10 +1637,9 @@ fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect)
 
 #[cfg(test)]
 mod tests {
-    use crate::editor::Editor;
     use sqeel_core::{
         AppState,
-        state::{Focus, KeybindingMode, QueryResult},
+        state::{Focus, QueryResult},
     };
 
     #[test]
@@ -1552,12 +1670,6 @@ mod tests {
         assert_eq!(s.focus, Focus::Results);
         s.focus = Focus::Editor;
         assert_eq!(s.focus, Focus::Editor);
-    }
-
-    #[test]
-    fn emacs_editor_mode() {
-        let editor = Editor::new(KeybindingMode::Emacs);
-        assert_eq!(editor.keybinding_mode, KeybindingMode::Emacs);
     }
 
     #[test]

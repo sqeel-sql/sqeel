@@ -28,7 +28,6 @@ impl TabEntry {
 pub enum KeybindingMode {
     #[default]
     Vim,
-    Emacs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

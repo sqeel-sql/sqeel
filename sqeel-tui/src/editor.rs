@@ -2,17 +2,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sqeel_core::state::{KeybindingMode, VimMode};
 use tui_textarea::{CursorMove, Input, Key, Scrolling, TextArea};
 
-macro_rules! inp {
-    ($key:expr) => {
-        Input { key: $key, ctrl: false, alt: false, shift: false }
-    };
-    ($key:expr, ctrl) => {
-        Input { key: $key, ctrl: true, alt: false, shift: false }
-    };
-    ($key:expr, shift) => {
-        Input { key: $key, ctrl: false, alt: false, shift: true }
-    };
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -127,10 +116,7 @@ impl<'a> Editor<'a> {
 
     /// Returns true if the key was consumed by the editor.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
-        match self.keybinding_mode {
-            KeybindingMode::Vim => self.handle_vim(key),
-            KeybindingMode::Emacs => self.handle_emacs(key),
-        }
+        self.handle_vim(key)
     }
 
     fn handle_vim(&mut self, key: KeyEvent) -> bool {
@@ -560,41 +546,6 @@ impl<'a> Editor<'a> {
         }
     }
 
-    fn handle_emacs(&mut self, key: KeyEvent) -> bool {
-        match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
-                self.textarea.input(inp!(Key::Left));
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
-                self.textarea.input(inp!(Key::Right));
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
-                self.textarea.input(inp!(Key::Up));
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
-                self.textarea.input(inp!(Key::Down));
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
-                self.textarea.input(inp!(Key::Home));
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
-                self.textarea.input(inp!(Key::End));
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
-                self.textarea.input(inp!(Key::Delete));
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
-                self.textarea.input(inp!(Key::Backspace));
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
-                self.textarea.input(inp!(Key::End, ctrl));
-            }
-            _ => {
-                self.textarea.input(crossterm_to_input(key));
-            }
-        }
-        true
-    }
 }
 
 /// Return the text inserted between `before` and `after`.
@@ -889,20 +840,6 @@ mod tests {
         // Unknown keys go to pending, not consumed as false
         let consumed = e.handle_key(key(KeyCode::Char('z')));
         assert!(consumed); // now returns true (stored as pending)
-    }
-
-    #[test]
-    fn emacs_mode_passthrough() {
-        let mut e = Editor::new(KeybindingMode::Emacs);
-        let consumed = e.handle_key(key(KeyCode::Char('a')));
-        assert!(consumed);
-    }
-
-    #[test]
-    fn emacs_ctrl_b_consumed() {
-        let mut e = Editor::new(KeybindingMode::Emacs);
-        let consumed = e.handle_key(ctrl_key(KeyCode::Char('b')));
-        assert!(consumed);
     }
 
     #[test]
