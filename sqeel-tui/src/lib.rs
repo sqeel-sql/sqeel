@@ -107,7 +107,7 @@ async fn run_loop(
     let mut last_lsp_content = String::new();
     let mut doc_version: i32 = 0;
     let mut last_completion_id: Option<i64> = None;
-    let mut debug_tick: u32 = 0;
+    let mut tick: u32 = 0;
     let mut command_input: Option<String> = None;
 
     // Clipboard held alive for the session so the OS clipboard manager sees the content.
@@ -191,14 +191,12 @@ async fn run_loop(
             }
         }
 
-        // Advance marquee: one character every ~10 frames (500 ms at 50 ms poll)
-        debug_tick = debug_tick.wrapping_add(1);
-        let debug_scroll = debug_tick / 10;
-
+        tick = tick.wrapping_add(1);
+        let tick_snap = tick;
         let cmd_snap = command_input.clone();
         terminal.draw(|f| {
             let s = state.lock().unwrap();
-            last_draw_areas = draw(f, &s, &mut editor, debug_scroll, cmd_snap.as_deref());
+            last_draw_areas = draw(f, &s, &mut editor, tick_snap, cmd_snap.as_deref());
         })?;
 
         if !event::poll(Duration::from_millis(50))? {
@@ -215,7 +213,7 @@ async fn run_loop(
                 );
                 let editor_ratio = state.lock().unwrap().editor_ratio;
                 let s = state.lock().unwrap();
-                let bottom_rows = s.debug_mode as u16 + (!s.lsp_available) as u16;
+                let bottom_rows = 1 + (!s.lsp_available) as u16;
                 drop(s);
                 let main_height = area.height.saturating_sub(bottom_rows);
                 let editor_height = if show_results {
@@ -686,35 +684,24 @@ struct DrawAreas {
     results: Option<Rect>,
 }
 
-fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &mut Editor, debug_scroll: u32, command_input: Option<&str>) -> DrawAreas {
+fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &mut Editor, tick: u32, command_input: Option<&str>) -> DrawAreas {
     let area = f.area();
 
     let lsp_warn = !state.lsp_available;
 
-    // Reserve rows at the bottom: LSP warning (if needed) then debug bar (if enabled)
-    let (main_area, lsp_warn_area, debug_area) = match (lsp_warn, state.debug_mode) {
-        (true, true) => {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
-                .split(area);
-            (chunks[0], Some(chunks[1]), Some(chunks[2]))
-        }
-        (true, false) => {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
-                .split(area);
-            (chunks[0], Some(chunks[1]), None)
-        }
-        (false, true) => {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
-                .split(area);
-            (chunks[0], None, Some(chunks[1]))
-        }
-        (false, false) => (area, None, None),
+    // Always reserve 1 row for the status bar; optionally 1 more for LSP warning above it.
+    let (main_area, lsp_warn_area, status_area) = if lsp_warn {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+        (chunks[0], Some(chunks[1]), chunks[2])
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        (chunks[0], None, chunks[1])
     };
 
     let outer = Layout::default()
@@ -727,7 +714,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &mut Editor, debug
     let results_focused = state.focus == Focus::Results;
 
     // Schema panel
-    draw_schema(f, state, outer[0], schema_focused, debug_scroll);
+    draw_schema(f, state, outer[0], schema_focused, tick);
 
     let show_results = !matches!(state.results, ResultsPane::Empty);
     let editor_pct = (state.editor_ratio * 100.0) as u16;
@@ -789,7 +776,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &mut Editor, debug
         draw_help(f, area);
     }
 
-    // LSP warning bar (above debug bar)
+    // LSP warning bar (above status bar)
     if let Some(warn_area) = lsp_warn_area {
         let msg = Paragraph::new(Span::styled(
             format!(" ⚠ LSP not available ({})", state.lsp_binary),
@@ -800,19 +787,16 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &mut Editor, debug
         f.render_widget(msg, warn_area);
     }
 
-    // Debug bar (always below everything else)
-    if let Some(dbg) = debug_area {
-        draw_debug_bar(f, state, editor, dbg, debug_scroll);
-    }
+    // Status bar (always at bottom)
+    draw_status_bar(f, state, editor, status_area);
 
-    // Command bar overlays the bottom row when active
+    // Command bar overlays the status row when active
     if let Some(cmd) = command_input {
-        let bar = Rect { x: 0, y: area.height.saturating_sub(1), width: area.width, height: 1 };
-        f.render_widget(Clear, bar);
+        f.render_widget(Clear, status_area);
         f.render_widget(
             Paragraph::new(format!(":{cmd}_"))
                 .style(Style::default().fg(Color::White).bg(Color::Black)),
-            bar,
+            status_area,
         );
     }
 
@@ -918,78 +902,79 @@ fn extract_mouse_selection(
     if text.is_empty() { None } else { Some(text) }
 }
 
-fn draw_debug_bar(
+fn draw_status_bar(
     f: &mut ratatui::Frame<'_>,
     state: &AppState,
     editor: &Editor,
     area: Rect,
-    scroll: u32,
 ) {
-    let focus = format!("{:?}", state.focus);
-    let vim = format!("{:?}", state.vim_mode);
-    let conn = state
-        .active_connection
-        .as_deref()
-        .unwrap_or("none")
-        .to_string();
-    let schema_n = state.schema_nodes.len();
-    let results = match &state.results {
-        sqeel_core::state::ResultsPane::Empty => "empty".into(),
-        sqeel_core::state::ResultsPane::Results(r) => {
-            format!("{}r×{}c", r.rows.len(), r.columns.len())
-        }
-        sqeel_core::state::ResultsPane::Error(_) => "error".into(),
-    };
-    let cursor = {
-        let (row, col) = editor.textarea.cursor();
-        format!("{}:{}", row + 1, col + 1)
-    };
-    let flags = format!(
-        "sw={} add={} hlp={} cmp={}",
-        state.show_connection_switcher as u8,
-        state.show_add_connection as u8,
-        state.show_help as u8,
-        state.show_completions as u8,
-    );
+    let mode = mode_label(state);
+    let mode_width = mode.content.len() as u16;
 
-    const LABEL: &str = " DEBUG ";
-    let label_width = LABEL.len() as u16;
+    let conn = state.active_connection.as_deref().unwrap_or("no connection");
+    let tab_name = state
+        .tabs
+        .get(state.active_tab)
+        .map(|t| t.name.as_str())
+        .unwrap_or("");
+    let center_text = format!(" {conn} › {tab_name} ");
 
-    let info = format!(
-        " focus={focus}  vim={vim}  cursor={cursor}  conn={conn}  schema={schema_n}db  results={results}  {flags}  "
-    );
+    let (row, col) = editor.textarea.cursor();
+    let cursor_str = format!(" {}:{} ", row + 1, col + 1);
+    let cursor_width = cursor_str.len() as u16;
 
-    // Fixed label on the left
-    let label_area = Rect {
-        x: area.x,
+    let diag = diag_label(state);
+    let diag_width = diag.as_ref().map(|s| s.content.len() as u16).unwrap_or(0);
+
+    let right_width = cursor_width + diag_width;
+    let center_width = area.width.saturating_sub(mode_width + right_width);
+
+    // Mode block (left)
+    let mode_area = Rect { x: area.x, y: area.y, width: mode_width.min(area.width), height: 1 };
+    // Center info
+    let center_area = Rect {
+        x: area.x + mode_width,
         y: area.y,
-        width: label_width.min(area.width),
-        height: area.height,
+        width: center_width.min(area.width.saturating_sub(mode_width)),
+        height: 1,
     };
-    // Scrolling info fills the rest
-    let info_area = Rect {
-        x: area.x + label_width.min(area.width),
+    // Right side (diag + cursor)
+    let right_x = area.x + mode_width + center_width;
+    let diag_area = Rect { x: right_x, y: area.y, width: diag_width, height: 1 };
+    let cursor_area = Rect {
+        x: right_x + diag_width,
         y: area.y,
-        width: area.width.saturating_sub(label_width),
-        height: area.height,
+        width: cursor_width.min(area.width.saturating_sub(mode_width + center_width + diag_width)),
+        height: 1,
     };
 
-    let dbg_style = Style::default().fg(Color::Black).bg(Color::Yellow);
-    f.render_widget(
-        Paragraph::new(LABEL).style(dbg_style),
-        label_area,
-    );
+    let bar_bg = Style::default().bg(Color::DarkGray).fg(Color::White);
 
-    let max_offset = (info.len() as u32).saturating_sub(info_area.width as u32);
-    let col = if max_offset == 0 {
-        0
-    } else {
-        (scroll % (max_offset + 1)) as u16
-    };
-    f.render_widget(
-        Paragraph::new(info).style(dbg_style).scroll((0, col)),
-        info_area,
-    );
+    // Mode label (colored fg, same bg as status bar)
+    let mode_style = Style::default()
+        .bg(mode.style.fg.unwrap_or(Color::Blue))
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    f.render_widget(Paragraph::new(Span::styled(mode.content.to_string(), mode_style)), mode_area);
+
+    // Center: connection > tab
+    f.render_widget(Paragraph::new(center_text).style(bar_bg), center_area);
+
+    // Diagnostics
+    if let Some(d) = diag {
+        let diag_style = Style::default()
+            .bg(d.style.fg.unwrap_or(Color::Yellow))
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD);
+        f.render_widget(Paragraph::new(Span::styled(d.content.to_string(), diag_style)), diag_area);
+    }
+
+    // Cursor position (right-aligned, highlighted)
+    let cursor_style = Style::default()
+        .bg(Color::Blue)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    f.render_widget(Paragraph::new(Span::styled(cursor_str, cursor_style)), cursor_area);
 }
 
 fn draw_schema(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool, tick: u32) {
