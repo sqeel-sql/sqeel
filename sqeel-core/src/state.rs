@@ -360,6 +360,11 @@ impl AppState {
         self.schema_cursor = self.schema_cursor.saturating_sub(1);
     }
 
+    pub fn schema_toggle_path(&mut self, path: &[usize]) {
+        toggle_node(&mut self.schema_nodes, path);
+        self.rebuild_schema_cache();
+    }
+
     pub fn schema_toggle_current(&mut self) {
         let path = self
             .schema_items_cache

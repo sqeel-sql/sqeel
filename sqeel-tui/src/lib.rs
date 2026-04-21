@@ -115,9 +115,12 @@ async fn run_loop(
     let mut tick: u32 = 0;
     let mut command_input: Option<String> = None;
     let mut schema_search: Option<String> = None;
+    let mut schema_search_focused = false;
+    let mut schema_search_cursor: usize = 0;
     let mut editor_search: Option<String> = None;
     let mut last_editor_search: Option<String> = None;
 
+    let mut toast: Option<(String, std::time::Instant)> = None;
     // Clipboard held alive for the session so the OS clipboard manager sees the content.
     let mut clipboard = Clipboard::new().ok();
     // Mouse drag tracking
@@ -130,6 +133,14 @@ async fn run_loop(
     loop {
         let mut needs_redraw = event_triggered_redraw;
         event_triggered_redraw = false;
+
+        // Expire toast after 3 seconds.
+        if let Some((_, t)) = &toast {
+            if t.elapsed() >= Duration::from_secs(3) {
+                toast = None;
+                needs_redraw = true;
+            }
+        }
 
         // Detect terminal size changes that don't produce Event::Resize (e.g. fullscreen toggle).
         if let Ok(size) = terminal.size() {
@@ -264,8 +275,11 @@ async fn run_loop(
             let tick_snap = tick;
             let cmd_snap = command_input.clone();
             let schema_search_snap = schema_search.clone();
+            let schema_search_focused_snap = schema_search_focused;
+            let schema_search_cursor_snap = schema_search_cursor;
             let editor_search_snap = editor_search.clone();
             let last_editor_search_snap = last_editor_search.clone();
+            let toast_snap = toast.as_ref().map(|(msg, _)| msg.clone());
             terminal.draw(|f| {
                 let s = state.lock().unwrap();
                 last_draw_areas = draw(
@@ -275,8 +289,11 @@ async fn run_loop(
                     tick_snap,
                     cmd_snap.as_deref(),
                     schema_search_snap.as_deref(),
+                    schema_search_focused_snap,
+                    schema_search_cursor_snap,
                     editor_search_snap.as_deref(),
                     last_editor_search_snap.as_deref(),
+                    toast_snap.as_deref(),
                 );
             })?;
             last_terminal_size = terminal.size()?;
@@ -361,7 +378,7 @@ async fn run_loop(
                         } else {
                             let mut s = state.lock().unwrap();
                             s.focus = pane;
-                            if pane == Focus::Schema && !last_draw_areas.schema_list_filtered {
+                            if pane == Focus::Schema {
                                 let la = last_draw_areas.schema_list_area;
                                 if mouse.row >= la.y
                                     && mouse.column >= la.x
@@ -369,10 +386,46 @@ async fn run_loop(
                                 {
                                     let rel = (mouse.row - la.y) as usize;
                                     let idx = rel + last_draw_areas.schema_list_offset;
-                                    let max = s.visible_schema_items().len();
-                                    if idx < max {
-                                        s.schema_cursor = idx;
-                                        s.schema_toggle_current();
+                                    if last_draw_areas.schema_list_filtered {
+                                        // Recompute filtered list to find node_path.
+                                        let q = schema_search.as_deref().unwrap_or("").to_lowercase();
+                                        let all = s.all_schema_items();
+                                        let matched: std::collections::HashSet<usize> = all
+                                            .iter()
+                                            .enumerate()
+                                            .filter_map(|(i, item)| {
+                                                let name = item.label.trim().to_lowercase();
+                                                let mut chars = name.chars();
+                                                if q.chars().all(|qc| chars.any(|lc| lc == qc)) {
+                                                    Some(i)
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                        let mut needed: std::collections::HashSet<Vec<usize>> =
+                                            std::collections::HashSet::new();
+                                        for &i in &matched {
+                                            let path = &all[i].node_path;
+                                            for len in 1..=path.len() {
+                                                needed.insert(path[..len].to_vec());
+                                            }
+                                        }
+                                        let filtered: Vec<Vec<usize>> = all
+                                            .iter()
+                                            .filter(|item| needed.contains(&item.node_path))
+                                            .map(|item| item.node_path.clone())
+                                            .collect();
+                                        if idx < filtered.len() {
+                                            schema_search_cursor = idx;
+                                            s.schema_toggle_path(&filtered[idx]);
+                                        }
+                                    } else {
+                                        let max = s.visible_schema_items().len();
+                                        if idx < max {
+                                            s.schema_cursor = idx;
+                                            s.schema_toggle_current();
+                                        }
                                     }
                                 }
                             }
@@ -482,7 +535,12 @@ async fn run_loop(
                             } else {
                                 match trimmed {
                                     "q" | "q!" => break,
-                                    _ => {}
+                                    other => {
+                                        toast = Some((
+                                            format!("Unknown command: :{other}"),
+                                            std::time::Instant::now(),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -496,37 +554,44 @@ async fn run_loop(
                     continue;
                 }
 
-                // ── Schema search input ──────────────────────────────────────────
-                if schema_search.is_some() {
+                // ── Schema search box (typing mode) ─────────────────────────────
+                if schema_search_focused {
                     match (key.modifiers, key.code) {
                         (KeyModifiers::NONE, KeyCode::Esc) => {
                             schema_search = None;
+                            schema_search_focused = false;
+                            schema_search_cursor = 0;
                         }
                         (KeyModifiers::NONE, KeyCode::Backspace) => {
                             if let Some(ref mut q) = schema_search {
                                 q.pop();
+                                schema_search_cursor = 0;
                             }
                         }
                         (KeyModifiers::NONE, KeyCode::Enter) => {
-                            // keep filter active, dismiss input box
-                            schema_search = None;
+                            // Keep filter active, switch to list navigation mode.
+                            schema_search_focused = false;
                         }
                         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
                             if let Some(ref mut q) = schema_search {
                                 q.push(c);
+                                schema_search_cursor = 0;
                             }
                         }
-                        // Allow ctrl+hjkl to move focus away from the search box.
+                        // ctrl+hjkl: dismiss search and move focus.
                         (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
                             schema_search = None;
+                            schema_search_focused = false;
                             tmux_navigate('L');
                         }
                         (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
                             schema_search = None;
+                            schema_search_focused = false;
                             state.lock().unwrap().focus = Focus::Editor;
                         }
                         (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
                             schema_search = None;
+                            schema_search_focused = false;
                             if show_results {
                                 state.lock().unwrap().focus = Focus::Results;
                             } else {
@@ -535,7 +600,30 @@ async fn run_loop(
                         }
                         (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
                             schema_search = None;
+                            schema_search_focused = false;
                             state.lock().unwrap().focus = Focus::Editor;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // ── Schema filter navigation (filter active, box unfocused) ───────
+                if schema_search.as_deref().is_some_and(|q| !q.is_empty()) && focus == Focus::Schema {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            schema_search = None;
+                            schema_search_cursor = 0;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
+                            let max = last_draw_areas.schema_list_count.saturating_sub(1);
+                            schema_search_cursor = (schema_search_cursor + 1).min(max);
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
+                            schema_search_cursor = schema_search_cursor.saturating_sub(1);
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('/')) => {
+                            schema_search_focused = true;
                         }
                         _ => {}
                     }
@@ -773,7 +861,11 @@ async fn run_loop(
                     }
                     // Schema search
                     (KeyModifiers::NONE, KeyCode::Char('/')) if focus == Focus::Schema => {
-                        schema_search = Some(String::new());
+                        if schema_search.is_none() {
+                            schema_search = Some(String::new());
+                            schema_search_cursor = 0;
+                        }
+                        schema_search_focused = true;
                     }
                     // Results pane navigation
                     (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Results => {
@@ -945,6 +1037,7 @@ struct DrawAreas {
     schema: Rect,
     schema_list_area: Rect,
     schema_list_offset: usize,
+    schema_list_count: usize,
     schema_list_filtered: bool,
     editor: Rect,
     tab_bar: Rect,
@@ -959,8 +1052,11 @@ fn draw(
     tick: u32,
     command_input: Option<&str>,
     schema_search: Option<&str>,
+    schema_search_focused: bool,
+    schema_search_cursor: usize,
     editor_search: Option<&str>,
     last_editor_search: Option<&str>,
+    toast: Option<&str>,
 ) -> DrawAreas {
     let area = f.area();
 
@@ -999,11 +1095,21 @@ fn draw(
     let results_focused = state.focus == Focus::Results;
 
     // Schema panel
-    let (schema_list_area, schema_list_offset, schema_list_filtered) = if state.sidebar_visible {
-        draw_schema(f, state, outer[0], schema_focused, tick, schema_search)
-    } else {
-        (Rect::default(), 0, false)
-    };
+    let (schema_list_area, schema_list_offset, schema_list_count, schema_list_filtered) =
+        if state.sidebar_visible {
+            draw_schema(
+                f,
+                state,
+                outer[0],
+                schema_focused,
+                tick,
+                schema_search,
+                schema_search_focused,
+                schema_search_cursor,
+            )
+        } else {
+            (Rect::default(), 0, 0, false)
+        };
 
     let show_results = !matches!(state.results, ResultsPane::Empty);
     let editor_pct = (state.editor_ratio * 100.0) as u16;
@@ -1035,6 +1141,7 @@ fn draw(
         schema: outer[0],
         schema_list_area,
         schema_list_offset,
+        schema_list_count,
         schema_list_filtered,
         editor: right_chunks[0],
         tab_bar,
@@ -1101,6 +1208,28 @@ fn draw(
             Paragraph::new(format!(":{cmd}_"))
                 .style(Style::default().fg(Color::White).bg(Color::Black)),
             status_area,
+        );
+    }
+
+    // Toast notification (top-right corner)
+    if let Some(msg) = toast {
+        let width = (msg.len() as u16 + 4).min(area.width);
+        let toast_area = Rect {
+            x: area.width.saturating_sub(width),
+            y: 0,
+            width,
+            height: 3,
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .style(Style::default().bg(Color::Rgb(60, 0, 0)));
+        f.render_widget(Clear, toast_area);
+        f.render_widget(
+            Paragraph::new(msg)
+                .style(Style::default().fg(Color::White).bg(Color::Rgb(60, 0, 0)))
+                .block(block),
+            toast_area,
         );
     }
 
@@ -1311,7 +1440,9 @@ fn draw_schema(
     focused: bool,
     tick: u32,
     search: Option<&str>,
-) -> (Rect, usize, bool) {
+    searching: bool,
+    search_cursor: usize,
+) -> (Rect, usize, usize, bool) {
     const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
     let status = if state.schema_loading {
         SPINNER[(tick as usize) % SPINNER.len()]
@@ -1347,10 +1478,9 @@ fn draw_schema(
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(inner);
 
-    let searching = search.is_some();
     let query = search.unwrap_or("");
+    let has_filter = !query.is_empty();
     let input_text = if searching {
-        // show cursor block at end when focused
         format!("{query}▌")
     } else {
         query.to_string()
@@ -1361,6 +1491,8 @@ fn draw_schema(
         .borders(Borders::ALL)
         .border_style(if searching {
             Style::default().fg(Color::Yellow)
+        } else if has_filter {
+            Style::default().fg(Color::Cyan)
         } else {
             border_style
         });
@@ -1374,12 +1506,12 @@ fn draw_schema(
         height: chunks[1].height,
     };
 
-    let all_items = if query.is_empty() {
-        state.visible_schema_items()
-    } else {
+    let all_items = if has_filter {
         state.all_schema_items()
+    } else {
+        state.visible_schema_items()
     };
-    let items: Vec<&SchemaTreeItem> = if !query.is_empty() {
+    let items: Vec<&SchemaTreeItem> = if has_filter {
         let q = query.to_lowercase();
         // Collect indices of items whose name matches the query.
         let matched: std::collections::HashSet<usize> = all_items
@@ -1411,11 +1543,11 @@ fn draw_schema(
         all_items.iter().collect()
     };
 
-    let filtered = !query.is_empty();
+    let item_count = items.len();
 
     if items.is_empty() {
         f.render_widget(
-            Paragraph::new(if filtered {
+            Paragraph::new(if has_filter {
                 "No matches"
             } else if state.active_connection.is_some() {
                 "Loading..."
@@ -1424,7 +1556,7 @@ fn draw_schema(
             }),
             list_area,
         );
-        return (list_area, 0, filtered);
+        return (list_area, 0, 0, has_filter);
     }
 
     let list_items: Vec<ListItem> = items
@@ -1432,26 +1564,32 @@ fn draw_schema(
         .map(|item| ListItem::new(item.label.as_str()))
         .collect();
 
-    // When search box has focus (searching), don't highlight the list.
-    // Focused: same bg as editor cursor line. Unfocused: lighter shade.
+    // When search box is actively focused, don't highlight the list.
+    // In filter-nav mode (filter active, box not focused) use search_cursor.
+    // Normal mode uses state.schema_cursor.
+    let cursor = if has_filter {
+        search_cursor
+    } else {
+        state.schema_cursor
+    };
     let (highlight_style, selected) = if searching {
         (Style::default(), None)
     } else if focused {
         (
             Style::default().bg(Color::Rgb(40, 40, 45)),
-            Some(state.schema_cursor),
+            Some(cursor),
         )
     } else {
         (
             Style::default().bg(Color::Rgb(30, 32, 48)),
-            Some(state.schema_cursor),
+            Some(cursor),
         )
     };
 
     let list = List::new(list_items).highlight_style(highlight_style);
     let mut list_state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, list_area, &mut list_state);
-    (list_area, list_state.offset(), filtered)
+    (list_area, list_state.offset(), item_count, has_filter)
 }
 
 fn draw_editor(
