@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table},
     Terminal,
 };
 use sqeel_core::{
@@ -93,6 +93,13 @@ async fn run_loop(
                         if focus != Focus::Editor || vim_mode == VimMode::Normal =>
                     {
                         break;
+                    }
+                    // Results pane navigation
+                    (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Results => {
+                        state.lock().unwrap().scroll_results_down();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char('k')) if focus == Focus::Results => {
+                        state.lock().unwrap().scroll_results_up();
                     }
                     // Dismiss results
                     (KeyModifiers::CONTROL, KeyCode::Char('c'))
@@ -294,35 +301,68 @@ fn draw_editor(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor, ar
 }
 
 fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool) {
-    let (title, content, color) = match &state.results {
+    match &state.results {
         ResultsPane::Results(r) => {
-            let header = r.columns.join(" │ ");
-            let sep = "─".repeat(header.len());
-            let rows = r.rows
+            let block = Block::default()
+                .title(format!("Results ({} rows)", r.rows.len()))
+                .borders(Borders::ALL)
+                .border_style(if focused {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Green)
+                });
+
+            let header_cells: Vec<Cell> = r
+                .columns
                 .iter()
-                .map(|row| row.join(" │ "))
-                .collect::<Vec<_>>()
-                .join("\n");
-            (
-                "Results",
-                format!("{header}\n{sep}\n{rows}"),
-                Color::Green,
-            )
+                .map(|c| Cell::from(c.as_str()).style(Style::default().add_modifier(Modifier::BOLD)))
+                .collect();
+            let header = Row::new(header_cells).style(Style::default().fg(Color::Cyan));
+
+            let col_widths: Vec<Constraint> = r
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(i, col)| {
+                    let max_data = r.rows.iter()
+                        .map(|row| row.get(i).map(|s| s.len()).unwrap_or(0))
+                        .max()
+                        .unwrap_or(0);
+                    Constraint::Min((col.len().max(max_data) + 2) as u16)
+                })
+                .collect();
+
+            let visible_rows: Vec<Row> = r
+                .rows
+                .iter()
+                .skip(state.results_scroll)
+                .map(|row| Row::new(row.iter().map(|c| Cell::from(c.as_str())).collect::<Vec<_>>()))
+                .collect();
+
+            let table = Table::new(visible_rows, col_widths)
+                .header(header)
+                .block(block);
+
+            f.render_widget(table, area);
         }
-        ResultsPane::Error(e) => ("Error", e.clone(), Color::Red),
+        ResultsPane::Error(e) => {
+            let block = Block::default()
+                .title("Error")
+                .borders(Borders::ALL)
+                .border_style(if focused {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Red)
+                });
+            f.render_widget(
+                Paragraph::new(e.as_str())
+                    .style(Style::default().fg(Color::Red))
+                    .block(block),
+                area,
+            );
+        }
         ResultsPane::Empty => unreachable!(),
-    };
-
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(if focused {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(color)
-        });
-
-    f.render_widget(Paragraph::new(content).block(block), area);
+    }
 }
 
 fn draw_completions(f: &mut ratatui::Frame<'_>, state: &AppState, editor_area: Rect) {

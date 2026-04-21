@@ -55,6 +55,7 @@ pub struct AppState {
     pub show_completions: bool,
     pub active_connection: Option<String>,
     pub status_message: Option<String>,
+    pub results_scroll: usize,
 }
 
 impl AppState {
@@ -68,16 +69,33 @@ impl AppState {
     pub fn set_results(&mut self, result: QueryResult) {
         self.results = ResultsPane::Results(result);
         self.editor_ratio = 0.5;
+        self.results_scroll = 0;
     }
 
     pub fn set_error(&mut self, msg: String) {
         self.results = ResultsPane::Error(msg);
         self.editor_ratio = 0.5;
+        self.results_scroll = 0;
     }
 
     pub fn dismiss_results(&mut self) {
         self.results = ResultsPane::Empty;
         self.editor_ratio = 1.0;
+        self.results_scroll = 0;
+    }
+
+    pub fn scroll_results_down(&mut self) {
+        let max = match &self.results {
+            ResultsPane::Results(r) => r.rows.len().saturating_sub(1),
+            _ => 0,
+        };
+        if self.results_scroll < max {
+            self.results_scroll += 1;
+        }
+    }
+
+    pub fn scroll_results_up(&mut self) {
+        self.results_scroll = self.results_scroll.saturating_sub(1);
     }
 
     pub fn set_diagnostics(&mut self, diags: Vec<Diagnostic>) {
@@ -144,6 +162,26 @@ mod tests {
         s.set_error("syntax error".into());
         assert_eq!(s.editor_ratio, 0.5);
         assert!(matches!(s.results, ResultsPane::Error(_)));
+    }
+
+    #[test]
+    fn scroll_results_bounds() {
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.set_results(QueryResult {
+            columns: vec!["id".into()],
+            rows: vec![vec!["1".into()], vec!["2".into()], vec!["3".into()]],
+        });
+        assert_eq!(s.results_scroll, 0);
+        s.scroll_results_down();
+        assert_eq!(s.results_scroll, 1);
+        s.scroll_results_down();
+        assert_eq!(s.results_scroll, 2);
+        // Cannot go past last row
+        s.scroll_results_down();
+        assert_eq!(s.results_scroll, 2);
+        s.scroll_results_up();
+        assert_eq!(s.results_scroll, 1);
     }
 
     #[test]
