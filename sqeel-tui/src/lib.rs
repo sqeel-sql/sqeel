@@ -516,6 +516,27 @@ async fn run_loop(
                                 q.push(c);
                             }
                         }
+                        // Allow ctrl+hjkl to move focus away from the search box.
+                        (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
+                            schema_search = None;
+                            tmux_navigate('L');
+                        }
+                        (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
+                            schema_search = None;
+                            state.lock().unwrap().focus = Focus::Editor;
+                        }
+                        (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+                            schema_search = None;
+                            if show_results {
+                                state.lock().unwrap().focus = Focus::Results;
+                            } else {
+                                tmux_navigate('D');
+                            }
+                        }
+                        (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+                            schema_search = None;
+                            state.lock().unwrap().focus = Focus::Editor;
+                        }
                         _ => {}
                     }
                     continue;
