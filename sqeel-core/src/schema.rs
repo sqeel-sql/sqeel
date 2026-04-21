@@ -1,5 +1,5 @@
 /// Schema tree node for the schema browser panel.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SchemaNode {
     Database {
         name: String,

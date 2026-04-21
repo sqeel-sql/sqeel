@@ -5,6 +5,7 @@ use sqeel_core::{
     AppState, UiProvider,
     config::{load_connections, load_last_connection, save_last_connection},
     db::DbConnection,
+    persistence::{load_schema_cache, save_schema_cache},
 };
 use sqeel_tui::TuiProvider;
 
@@ -91,12 +92,20 @@ fn spawn_executor(state: Arc<std::sync::Mutex<AppState>>, conn: DbConnection) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
     state.lock().unwrap().query_tx = Some(tx);
 
-    // Load schema in background immediately after connecting
+    // Show cached schema immediately, then refresh in background
+    if let Some(cached) = load_schema_cache(&conn.url) {
+        state.lock().unwrap().set_schema_nodes(cached);
+    }
+
     let schema_conn = conn.clone();
     let schema_state = state.clone();
+    let schema_url = conn.url.clone();
     tokio::spawn(async move {
         match schema_conn.load_schema().await {
-            Ok(nodes) => schema_state.lock().unwrap().set_schema_nodes(nodes),
+            Ok(nodes) => {
+                let _ = save_schema_cache(&schema_url, &nodes);
+                schema_state.lock().unwrap().set_schema_nodes(nodes);
+            }
             Err(e) => schema_state
                 .lock()
                 .unwrap()
