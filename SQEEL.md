@@ -233,7 +233,7 @@ GitHub Actions runs on every push and PR to `sqeel/sqeel`.
 - [x] SQL file persistence: auto-save every buffer to `~/.local/share/sqeel/queries/`; new buffers get generated name (`scratch_001.sql`)
 - [x] Result history persistence: last 10 successful results saved as JSON in `~/.local/share/sqeel/results/`; errors excluded; oldest deleted when limit exceeded
 - [x] Query history in `AppState` (max 100, dedup consecutive); TUI: `Ctrl+P`/`Ctrl+N` to recall/navigate
-- [ ] Multiple DB connections selectable in UI (future)
+- [x] Multiple DB connections selectable in UI — TUI: `Ctrl+W` modal; GUI: Connections button overlay
 - [x] Tests: config parse/load, export CSV/JSON correctness, file auto-save round-trip, result history rotation, query history navigation
 
 ## DB Support Priority
