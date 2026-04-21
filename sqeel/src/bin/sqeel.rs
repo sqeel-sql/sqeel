@@ -16,19 +16,16 @@ struct Args {
     connection: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let state = AppState::new();
 
-    // Load all named connections into state for the switcher
     let conns = load_connections().unwrap_or_default();
     state
         .lock()
         .unwrap()
         .set_available_connections(conns.clone());
 
-    // Resolve initial connection URL
     let url = if let Some(url) = args.url {
         Some(url)
     } else if let Some(name) = args.connection {
@@ -37,13 +34,16 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Runtime for async setup (initial connect + reconnection watcher).
+    // TuiProvider::run creates its own runtime; must not be called from inside one.
+    let rt = tokio::runtime::Runtime::new()?;
+
     if let Some(url) = url {
-        connect_and_spawn(&state, &url).await;
+        rt.block_on(connect_and_spawn(&state, &url));
     }
 
-    // Spawn reconnection watcher — polls pending_reconnect every 100ms
     let watcher_state = state.clone();
-    tokio::spawn(async move {
+    rt.spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let pending = watcher_state.lock().unwrap().pending_reconnect.take();
