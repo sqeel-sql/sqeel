@@ -1109,7 +1109,13 @@ fn draw_schema(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused
         });
     f.render_widget(Paragraph::new(input_text).block(search_block), chunks[0]);
 
-    let list_area = chunks[1];
+    // Inset 1 char left+right to align with search box inner content
+    let list_area = Rect {
+        x: chunks[1].x + 1,
+        y: chunks[1].y,
+        width: chunks[1].width.saturating_sub(2),
+        height: chunks[1].height,
+    };
 
     let all_items = state.visible_schema_items();
     let items: Vec<_> = if !query.is_empty() {
