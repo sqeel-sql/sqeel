@@ -53,6 +53,7 @@ impl DbConnection {
             return Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
+                col_widths: vec![],
             });
         }
 
@@ -74,6 +75,7 @@ impl DbConnection {
         Ok(QueryResult {
             columns,
             rows: result_rows,
+            col_widths: vec![],
         })
     }
 

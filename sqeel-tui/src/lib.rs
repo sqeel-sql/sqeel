@@ -1573,19 +1573,10 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
             let header = Row::new(header_cells).style(Style::default().fg(Color::Cyan));
 
             let col_widths: Vec<Constraint> = r
-                .columns
+                .col_widths
                 .iter()
-                .enumerate()
                 .skip(col_start)
-                .map(|(i, col)| {
-                    let max_data = r
-                        .rows
-                        .iter()
-                        .map(|row| row.get(i).map(|s| s.len()).unwrap_or(0))
-                        .max()
-                        .unwrap_or(0);
-                    Constraint::Min((col.len().max(max_data) + 2) as u16)
-                })
+                .map(|&w| Constraint::Min(w))
                 .collect();
 
             let visible_rows: Vec<Row> = r
@@ -1950,6 +1941,7 @@ mod tests {
         s.set_results(QueryResult {
             columns: vec!["col".into()],
             rows: vec![vec!["val".into()]],
+            col_widths: vec![],
         });
         assert_eq!(s.editor_ratio, 0.5);
     }

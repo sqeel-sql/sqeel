@@ -234,7 +234,9 @@ pub fn list_results() -> anyhow::Result<Vec<String>> {
 pub fn load_result(name: &str) -> anyhow::Result<QueryResult> {
     let dir = results_dir().ok_or_else(|| anyhow::anyhow!("cannot determine data dir"))?;
     let content = std::fs::read_to_string(dir.join(name))?;
-    Ok(serde_json::from_str(&content)?)
+    let mut result: QueryResult = serde_json::from_str(&content)?;
+    result.compute_col_widths();
+    Ok(result)
 }
 
 /// Export a QueryResult to CSV string.
@@ -313,6 +315,7 @@ mod tests {
         let result = QueryResult {
             columns: vec!["id".into()],
             rows: vec![vec!["1".into()]],
+            col_widths: vec![],
         };
         // Save 11 results — oldest should be evicted
         for i in 0..11u64 {
@@ -333,6 +336,7 @@ mod tests {
         let result = QueryResult {
             columns: vec!["col".into()],
             rows: vec![vec!["val".into()]],
+            col_widths: vec![],
         };
         let json = serde_json::to_string(&result).unwrap();
         let loaded: QueryResult = serde_json::from_str(&json).unwrap();
@@ -363,6 +367,7 @@ mod tests {
                 vec!["1".into(), "Alice".into()],
                 vec!["2".into(), "Bob".into()],
             ],
+            col_widths: vec![],
         };
         let csv = export_csv(&result);
         assert_eq!(csv, "id,name\n1,Alice\n2,Bob\n");
@@ -373,6 +378,7 @@ mod tests {
         let result = QueryResult {
             columns: vec!["val".into()],
             rows: vec![vec!["hello, world".into()], vec!["say \"hi\"".into()]],
+            col_widths: vec![],
         };
         let csv = export_csv(&result);
         assert!(csv.contains("\"hello, world\""));
@@ -384,6 +390,7 @@ mod tests {
         let result = QueryResult {
             columns: vec!["x".into()],
             rows: vec![vec!["42".into()]],
+            col_widths: vec![],
         };
         let json = export_json(&result).unwrap();
         let loaded: QueryResult = serde_json::from_str(&json).unwrap();

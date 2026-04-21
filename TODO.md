@@ -16,7 +16,7 @@
       `schema_cursor_advance(n)` once rather than spin `schema_cursor_down` N
       times.
 
-- [ ] **Cache column widths on QueryResult** (`sqeel-tui/src/lib.rs:1540-1554`)
+- [x] **Cache column widths on QueryResult** (`sqeel-tui/src/lib.rs:1540-1554`)
       Column-width scan is O(rows×cols) on every frame. Compute widths once when
       `QueryResult` is assigned, store on struct.
 

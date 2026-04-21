@@ -69,6 +69,27 @@ pub enum Focus {
 pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    #[serde(skip)]
+    pub col_widths: Vec<u16>,
+}
+
+impl QueryResult {
+    pub fn compute_col_widths(&mut self) {
+        self.col_widths = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| {
+                let max_data = self
+                    .rows
+                    .iter()
+                    .map(|row| row.get(i).map(|s| s.len()).unwrap_or(0))
+                    .max()
+                    .unwrap_or(0);
+                (col.len().max(max_data) + 2) as u16
+            })
+            .collect();
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -143,7 +164,8 @@ impl AppState {
         self.schema_items_cache = flatten_tree(&self.schema_nodes);
     }
 
-    pub fn set_results(&mut self, result: QueryResult) {
+    pub fn set_results(&mut self, mut result: QueryResult) {
+        result.compute_col_widths();
         self.results = ResultsPane::Results(result);
         self.editor_ratio = 0.5;
         self.results_scroll = 0;
@@ -763,6 +785,7 @@ mod tests {
         s.set_results(QueryResult {
             columns: vec!["id".into()],
             rows: vec![vec!["1".into()]],
+            col_widths: vec![],
         });
         assert_eq!(s.editor_ratio, 0.5);
         assert!(matches!(s.results, ResultsPane::Results(_)));
@@ -784,6 +807,7 @@ mod tests {
         s.set_results(QueryResult {
             columns: vec!["id".into()],
             rows: vec![vec!["1".into()], vec!["2".into()], vec!["3".into()]],
+            col_widths: vec![],
         });
         assert_eq!(s.results_scroll, 0);
         s.scroll_results_down();
