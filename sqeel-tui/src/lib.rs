@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+        MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -36,7 +39,7 @@ impl UiProvider for TuiProvider {
 async fn async_run(state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -44,7 +47,11 @@ async fn async_run(state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
     let result = run_loop(&mut terminal, state, keybinding_mode).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -80,190 +87,222 @@ async fn run_loop(
             draw(f, &s, &editor);
         })?;
 
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-        {
-            let s = state.lock().unwrap();
-            let focus = s.focus;
-            let vim_mode = s.vim_mode;
-            let show_completions = s.show_completions;
-            let show_switcher = s.show_connection_switcher;
-            let show_add = s.show_add_connection;
-            let show_help = s.show_help;
-            drop(s);
+        if !event::poll(Duration::from_millis(50))? {
+            continue;
+        }
 
-            // ── Help overlay ─────────────────────────────────────────────────
-            if show_help {
-                if let (
-                    KeyModifiers::NONE,
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::Char('.'),
-                ) = (key.modifiers, key.code)
-                {
-                    state.lock().unwrap().close_help();
+        match event::read()? {
+            Event::Mouse(mouse) => {
+                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                    let area = terminal.size()?;
+                    let schema_width = area.width * 15 / 100;
+                    let show_results = !matches!(
+                        state.lock().unwrap().results,
+                        sqeel_core::state::ResultsPane::Empty
+                    );
+                    let editor_ratio = state.lock().unwrap().editor_ratio;
+                    let right_height = area.height;
+                    let editor_height = if show_results {
+                        (right_height as f32 * editor_ratio) as u16
+                    } else {
+                        right_height
+                    };
+
+                    let mut s = state.lock().unwrap();
+                    if mouse.column < schema_width {
+                        s.focus = Focus::Schema;
+                    } else if show_results && mouse.row >= editor_height {
+                        s.focus = Focus::Results;
+                    } else {
+                        s.focus = Focus::Editor;
+                    }
                 }
-                continue;
             }
+            Event::Key(key) => {
+                let s = state.lock().unwrap();
+                let focus = s.focus;
+                let vim_mode = s.vim_mode;
+                let show_completions = s.show_completions;
+                let show_switcher = s.show_connection_switcher;
+                let show_add = s.show_add_connection;
+                let show_help = s.show_help;
+                drop(s);
 
-            // ── Add connection modal (highest priority) ──────────────────────
-            if show_add {
+                // ── Help overlay ─────────────────────────────────────────────────
+                if show_help {
+                    if let (
+                        KeyModifiers::NONE,
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::Char('.'),
+                    ) = (key.modifiers, key.code)
+                    {
+                        state.lock().unwrap().close_help();
+                    }
+                    continue;
+                }
+
+                // ── Add connection modal (highest priority) ──────────────────────
+                if show_add {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            state.lock().unwrap().close_add_connection();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Tab) => {
+                            state.lock().unwrap().add_connection_tab();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            let result = state.lock().unwrap().save_new_connection();
+                            if let Err(e) = result {
+                                state.lock().unwrap().set_error(format!("Save failed: {e}"));
+                            }
+                        }
+                        (KeyModifiers::NONE, KeyCode::Backspace) => {
+                            state.lock().unwrap().add_connection_backspace();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char(ch)) => {
+                            state.lock().unwrap().add_connection_type_char(ch);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // ── Connection switcher modal ────────────────────────────────────
+                if show_switcher {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            state.lock().unwrap().close_connection_switcher();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('j')) => {
+                            state.lock().unwrap().switcher_down();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('k')) => {
+                            state.lock().unwrap().switcher_up();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('n')) => {
+                            state.lock().unwrap().open_add_connection();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            state.lock().unwrap().confirm_connection_switch();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // ── Normal key handling ──────────────────────────────────────────
+
+                // Dismiss completions on Esc
+                if show_completions && key.code == KeyCode::Esc {
+                    state.lock().unwrap().dismiss_completions();
+                    continue;
+                }
+
                 match (key.modifiers, key.code) {
-                    (KeyModifiers::NONE, KeyCode::Esc) => {
-                        state.lock().unwrap().close_add_connection();
+                    // Global quit in vim normal mode or schema/results pane
+                    (KeyModifiers::NONE, KeyCode::Char('q'))
+                        if focus != Focus::Editor || vim_mode == VimMode::Normal =>
+                    {
+                        break;
                     }
-                    (KeyModifiers::NONE, KeyCode::Tab) => {
-                        state.lock().unwrap().add_connection_tab();
+                    // Help: ? or .
+                    (KeyModifiers::NONE, KeyCode::Char('?' | '.'))
+                        if focus != Focus::Editor || vim_mode == VimMode::Normal =>
+                    {
+                        state.lock().unwrap().open_help();
                     }
-                    (KeyModifiers::NONE, KeyCode::Enter) => {
-                        let result = state.lock().unwrap().save_new_connection();
-                        if let Err(e) = result {
-                            state.lock().unwrap().set_error(format!("Save failed: {e}"));
+                    // Open connection switcher: Ctrl+W
+                    (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
+                        state.lock().unwrap().open_connection_switcher();
+                    }
+                    // Schema pane navigation
+                    (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Schema => {
+                        state.lock().unwrap().schema_cursor_down();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char('k')) if focus == Focus::Schema => {
+                        state.lock().unwrap().schema_cursor_up();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Enter | KeyCode::Char('l'))
+                        if focus == Focus::Schema =>
+                    {
+                        state.lock().unwrap().schema_toggle_current();
+                    }
+                    // Results pane navigation
+                    (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Results => {
+                        state.lock().unwrap().scroll_results_down();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char('k')) if focus == Focus::Results => {
+                        state.lock().unwrap().scroll_results_up();
+                    }
+                    // Dismiss results
+                    (KeyModifiers::CONTROL, KeyCode::Char('c'))
+                    | (KeyModifiers::NONE, KeyCode::Char('q'))
+                        if focus == Focus::Results =>
+                    {
+                        state.lock().unwrap().dismiss_results();
+                    }
+                    // Execute query: Ctrl+Enter
+                    (KeyModifiers::CONTROL, KeyCode::Enter) => {
+                        let content = editor.content();
+                        let sent = state.lock().unwrap().send_query(content.clone());
+                        if !sent {
+                            let mut s = state.lock().unwrap();
+                            s.push_history(&content);
+                            s.set_error(
+                                "No DB connected. Use --url / --connection or Ctrl+W to switch."
+                                    .into(),
+                            );
                         }
                     }
-                    (KeyModifiers::NONE, KeyCode::Backspace) => {
-                        state.lock().unwrap().add_connection_backspace();
+                    // History navigation: Ctrl+P (prev) / Ctrl+N (next)
+                    (KeyModifiers::CONTROL, KeyCode::Char('p')) if focus == Focus::Editor => {
+                        let recalled = state.lock().unwrap().history_prev().map(|s| s.to_owned());
+                        if let Some(q) = recalled {
+                            editor.set_content(&q);
+                        }
                     }
-                    (KeyModifiers::NONE, KeyCode::Char(ch)) => {
-                        state.lock().unwrap().add_connection_type_char(ch);
+                    (KeyModifiers::CONTROL, KeyCode::Char('n')) if focus == Focus::Editor => {
+                        let recalled = state.lock().unwrap().history_next().map(|s| s.to_owned());
+                        if let Some(q) = recalled {
+                            editor.set_content(&q);
+                        } else {
+                            editor.set_content("");
+                        }
+                    }
+                    // Trigger completions: Ctrl+Space (both modes)
+                    (KeyModifiers::CONTROL, KeyCode::Char(' ')) => {
+                        state.lock().unwrap().set_completions(vec![
+                            "SELECT".into(),
+                            "FROM".into(),
+                            "WHERE".into(),
+                            "JOIN".into(),
+                            "GROUP BY".into(),
+                        ]);
+                    }
+                    // Pane focus — Alt+h/j/k/l (Ctrl+H/J/K/L are swallowed by terminals)
+                    (KeyModifiers::ALT, KeyCode::Char('h')) => {
+                        state.lock().unwrap().focus = Focus::Schema;
+                    }
+                    (KeyModifiers::ALT, KeyCode::Char('l')) => {
+                        state.lock().unwrap().focus = Focus::Editor;
+                    }
+                    (KeyModifiers::ALT, KeyCode::Char('j')) => {
+                        state.lock().unwrap().focus = Focus::Results;
+                    }
+                    (KeyModifiers::ALT, KeyCode::Char('k')) => {
+                        state.lock().unwrap().focus = Focus::Editor;
+                    }
+                    _ if focus == Focus::Editor => {
+                        editor.handle_key(key);
+                        // Dismiss completions on any text input
+                        if show_completions {
+                            state.lock().unwrap().dismiss_completions();
+                        }
                     }
                     _ => {}
                 }
-                continue;
-            }
-
-            // ── Connection switcher modal ────────────────────────────────────
-            if show_switcher {
-                match (key.modifiers, key.code) {
-                    (KeyModifiers::NONE, KeyCode::Esc) => {
-                        state.lock().unwrap().close_connection_switcher();
-                    }
-                    (KeyModifiers::NONE, KeyCode::Char('j')) => {
-                        state.lock().unwrap().switcher_down();
-                    }
-                    (KeyModifiers::NONE, KeyCode::Char('k')) => {
-                        state.lock().unwrap().switcher_up();
-                    }
-                    (KeyModifiers::NONE, KeyCode::Char('n')) => {
-                        state.lock().unwrap().open_add_connection();
-                    }
-                    (KeyModifiers::NONE, KeyCode::Enter) => {
-                        state.lock().unwrap().confirm_connection_switch();
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
-            // ── Normal key handling ──────────────────────────────────────────
-
-            // Dismiss completions on Esc
-            if show_completions && key.code == KeyCode::Esc {
-                state.lock().unwrap().dismiss_completions();
-                continue;
-            }
-
-            match (key.modifiers, key.code) {
-                // Global quit in vim normal mode or schema/results pane
-                (KeyModifiers::NONE, KeyCode::Char('q'))
-                    if focus != Focus::Editor || vim_mode == VimMode::Normal =>
-                {
-                    break;
-                }
-                // Help: ? or .
-                (KeyModifiers::NONE, KeyCode::Char('?' | '.'))
-                    if focus != Focus::Editor || vim_mode == VimMode::Normal =>
-                {
-                    state.lock().unwrap().open_help();
-                }
-                // Open connection switcher: Ctrl+W
-                (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
-                    state.lock().unwrap().open_connection_switcher();
-                }
-                // Schema pane navigation
-                (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Schema => {
-                    state.lock().unwrap().schema_cursor_down();
-                }
-                (KeyModifiers::NONE, KeyCode::Char('k')) if focus == Focus::Schema => {
-                    state.lock().unwrap().schema_cursor_up();
-                }
-                (KeyModifiers::NONE, KeyCode::Enter | KeyCode::Char('l'))
-                    if focus == Focus::Schema =>
-                {
-                    state.lock().unwrap().schema_toggle_current();
-                }
-                // Results pane navigation
-                (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Results => {
-                    state.lock().unwrap().scroll_results_down();
-                }
-                (KeyModifiers::NONE, KeyCode::Char('k')) if focus == Focus::Results => {
-                    state.lock().unwrap().scroll_results_up();
-                }
-                // Dismiss results
-                (KeyModifiers::CONTROL, KeyCode::Char('c'))
-                | (KeyModifiers::NONE, KeyCode::Char('q'))
-                    if focus == Focus::Results =>
-                {
-                    state.lock().unwrap().dismiss_results();
-                }
-                // Execute query: Ctrl+Enter
-                (KeyModifiers::CONTROL, KeyCode::Enter) => {
-                    let content = editor.content();
-                    let sent = state.lock().unwrap().send_query(content.clone());
-                    if !sent {
-                        let mut s = state.lock().unwrap();
-                        s.push_history(&content);
-                        s.set_error(
-                            "No DB connected. Use --url / --connection or Ctrl+W to switch.".into(),
-                        );
-                    }
-                }
-                // History navigation: Ctrl+P (prev) / Ctrl+N (next)
-                (KeyModifiers::CONTROL, KeyCode::Char('p')) if focus == Focus::Editor => {
-                    let recalled = state.lock().unwrap().history_prev().map(|s| s.to_owned());
-                    if let Some(q) = recalled {
-                        editor.set_content(&q);
-                    }
-                }
-                (KeyModifiers::CONTROL, KeyCode::Char('n')) if focus == Focus::Editor => {
-                    let recalled = state.lock().unwrap().history_next().map(|s| s.to_owned());
-                    if let Some(q) = recalled {
-                        editor.set_content(&q);
-                    } else {
-                        editor.set_content("");
-                    }
-                }
-                // Trigger completions: Ctrl+Space (both modes)
-                (KeyModifiers::CONTROL, KeyCode::Char(' ')) => {
-                    state.lock().unwrap().set_completions(vec![
-                        "SELECT".into(),
-                        "FROM".into(),
-                        "WHERE".into(),
-                        "JOIN".into(),
-                        "GROUP BY".into(),
-                    ]);
-                }
-                // Pane focus
-                (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
-                    state.lock().unwrap().focus = Focus::Schema;
-                }
-                (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
-                    state.lock().unwrap().focus = Focus::Editor;
-                }
-                (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-                    state.lock().unwrap().focus = Focus::Results;
-                }
-                (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
-                    state.lock().unwrap().focus = Focus::Editor;
-                }
-                _ if focus == Focus::Editor => {
-                    editor.handle_key(key);
-                    // Dismiss completions on any text input
-                    if show_completions {
-                        state.lock().unwrap().dismiss_completions();
-                    }
-                }
-                _ => {}
-            }
-        }
+            } // Event::Key
+            _ => {} // FocusGained, FocusLost, Paste, Resize — ignore
+        } // match event
     }
     Ok(())
 }
@@ -631,10 +670,10 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect) {
         (
             "Pane Focus",
             &[
-                ("Ctrl+H", "Focus schema"),
-                ("Ctrl+L", "Focus editor"),
-                ("Ctrl+J", "Focus results"),
-                ("Ctrl+K", "Focus editor"),
+                ("Alt+H / click", "Focus schema"),
+                ("Alt+L / click", "Focus editor"),
+                ("Alt+J / click", "Focus results"),
+                ("Alt+K / click", "Focus editor"),
             ],
         ),
         (

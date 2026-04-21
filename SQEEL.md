@@ -32,8 +32,8 @@ Configured in `config.toml`. Mouse always enabled in both modes.
 
 ### Vim mode (default)
 - Normal/insert/visual modes in editor
-- `Ctrl+h/l` — left/right pane focus
-- `Ctrl+j/k` — editor/results focus
+- `Alt+h/l` — left/right pane focus (click also works)
+- `Alt+j/k` — editor/results focus (click also works)
 - `+/-` or mouse drag — resize splits
 - `<leader>r` or `Ctrl+Enter` — execute query
 
