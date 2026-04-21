@@ -1379,6 +1379,13 @@ fn draw_editor(
     editor
         .textarea
         .set_cursor_line_style(Style::default().bg(cursor_line_bg));
+    editor.textarea.set_cursor_style(if !focused {
+        Style::default() // invisible when out of focus
+    } else if state.vim_mode == VimMode::Insert {
+        Style::default().add_modifier(Modifier::UNDERLINED) // thin bar
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED) // block
+    });
     // In Visual mode tui-textarea's Search boundary (rank 2) overrides Select (rank 1),
     // so syntax highlights would erase the selection color. Clear the pattern instead.
     if state.vim_mode == VimMode::Visual {
