@@ -613,7 +613,7 @@ impl<'a> Editor<'a> {
                     let content = self.textarea.yank_text();
                     let text = content.trim_matches('\n').to_string();
                     self.textarea.move_cursor(CursorMove::End);
-                    self.mutate(|t| t.insert_str(&format!("\n{text}")));
+                    self.mutate(|t| t.insert_str(format!("\n{text}")));
                     self.textarea.move_cursor(CursorMove::Head);
                 } else {
                     self.mutate(|t| t.paste());
@@ -634,7 +634,7 @@ impl<'a> Editor<'a> {
                     let content = self.textarea.yank_text();
                     let text = content.trim_matches('\n').to_string();
                     self.textarea.move_cursor(CursorMove::Head);
-                    self.mutate(|t| t.insert_str(&format!("{text}\n")));
+                    self.mutate(|t| t.insert_str(format!("{text}\n")));
                     self.textarea.move_cursor(CursorMove::Up);
                 } else {
                     self.textarea.move_cursor(CursorMove::Back);

@@ -188,7 +188,7 @@ async fn run_loop(
 
                 if let Some(ref mut client) = lsp {
                     let _ = client
-                        .change_document(scratch_uri.clone(), doc_version, &content)
+                        .change_document(scratch_uri.clone(), doc_version, content)
                         .await;
                     if let Ok(id) = client
                         .request_completion(scratch_uri.clone(), row as u32, col as u32)

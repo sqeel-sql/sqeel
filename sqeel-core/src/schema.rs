@@ -228,8 +228,7 @@ pub fn expand_path(nodes: &mut Vec<SchemaNode>, path_str: &str) {
             expanded,
             tables,
         } = node
-        {
-            if name == parts[0] {
+            && name == parts[0] {
                 *expanded = true;
                 if parts.len() >= 3 {
                     for table in tables.iter_mut() {
@@ -238,17 +237,14 @@ pub fn expand_path(nodes: &mut Vec<SchemaNode>, path_str: &str) {
                             expanded: texpanded,
                             ..
                         } = table
-                        {
-                            if tname == parts[1] {
+                            && tname == parts[1] {
                                 *texpanded = true;
                                 break;
                             }
-                        }
                     }
                 }
                 break;
             }
-        }
     }
 }
 
