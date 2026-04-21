@@ -12,6 +12,12 @@ pub struct MainConfig {
 pub struct EditorConfig {
     pub keybindings: KeybindingMode,
     pub lsp_binary: String,
+    #[serde(default = "default_mouse_scroll_lines")]
+    pub mouse_scroll_lines: usize,
+}
+
+fn default_mouse_scroll_lines() -> usize {
+    3
 }
 
 impl Default for EditorConfig {
@@ -19,6 +25,7 @@ impl Default for EditorConfig {
         Self {
             keybindings: KeybindingMode::Vim,
             lsp_binary: "sqls".into(),
+            mouse_scroll_lines: default_mouse_scroll_lines(),
         }
     }
 }
@@ -67,6 +74,9 @@ keybindings = "vim"
 
 # Path to the SQL LSP binary (sqls recommended: https://github.com/sqls-server/sqls)
 lsp_binary = "sqls"
+
+# Number of lines to scroll per mouse wheel tick (applies to all panes)
+mouse_scroll_lines = 3
 "#;
 
 pub fn load_main_config() -> anyhow::Result<MainConfig> {

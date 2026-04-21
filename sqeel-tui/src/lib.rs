@@ -89,10 +89,9 @@ async fn run_loop(
     let scratch_uri: lsp_types::Uri = scratch_uri_str
         .parse()
         .unwrap_or_else(|_| "file:///tmp/sqeel-scratch.sql".parse().unwrap());
-    let lsp_binary = load_main_config()
-        .ok()
-        .map(|c| c.editor.lsp_binary)
-        .unwrap_or_else(|| "sqls".into());
+    let main_config = load_main_config().ok().unwrap_or_default();
+    let lsp_binary = main_config.editor.lsp_binary.clone();
+    let mouse_scroll_lines = main_config.editor.mouse_scroll_lines;
     let mut lsp: Option<LspClient> = LspClient::start(&lsp_binary, None).await.ok();
     if let Some(ref mut client) = lsp {
         let _ = client.open_document(scratch_uri.clone(), "").await;
@@ -332,16 +331,44 @@ async fn run_loop(
                         mouse_select_start = None;
                         mouse_did_drag = false;
                     }
-                    MouseEventKind::ScrollDown => match pane {
-                        Focus::Schema => state.lock().unwrap().schema_cursor_down(),
-                        Focus::Results => state.lock().unwrap().scroll_results_down(),
-                        Focus::Editor => editor.scroll_down(3),
-                    },
-                    MouseEventKind::ScrollUp => match pane {
-                        Focus::Schema => state.lock().unwrap().schema_cursor_up(),
-                        Focus::Results => state.lock().unwrap().scroll_results_up(),
-                        Focus::Editor => editor.scroll_up(3),
-                    },
+                    MouseEventKind::ScrollDown => {
+                        let mut s = state.lock().unwrap();
+                        match pane {
+                            Focus::Schema => {
+                                for _ in 0..mouse_scroll_lines {
+                                    s.schema_cursor_down();
+                                }
+                            }
+                            Focus::Results => {
+                                for _ in 0..mouse_scroll_lines {
+                                    s.scroll_results_down();
+                                }
+                            }
+                            Focus::Editor => {
+                                drop(s);
+                                editor.scroll_down(mouse_scroll_lines as i16);
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        let mut s = state.lock().unwrap();
+                        match pane {
+                            Focus::Schema => {
+                                for _ in 0..mouse_scroll_lines {
+                                    s.schema_cursor_up();
+                                }
+                            }
+                            Focus::Results => {
+                                for _ in 0..mouse_scroll_lines {
+                                    s.scroll_results_up();
+                                }
+                            }
+                            Focus::Editor => {
+                                drop(s);
+                                editor.scroll_up(mouse_scroll_lines as i16);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
