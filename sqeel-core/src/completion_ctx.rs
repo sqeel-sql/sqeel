@@ -286,9 +286,7 @@ mod tests {
     fn qualified_on_alias() {
         assert_eq!(
             parse("select u."),
-            CompletionCtx::Qualified {
-                parent: "u".into()
-            }
+            CompletionCtx::Qualified { parent: "u".into() }
         );
     }
 

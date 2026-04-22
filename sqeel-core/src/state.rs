@@ -1,5 +1,6 @@
 use crate::completion_ctx::CompletionCtx;
 use crate::config::ConnectionConfig;
+use crate::ddl::DdlEffect;
 use crate::highlight::HighlightSpan;
 use crate::lsp::Diagnostic;
 use crate::persistence;
@@ -850,8 +851,7 @@ impl AppState {
                         }
                     }
                 } else {
-                    let wanted: HashSet<String> =
-                        tables.iter().map(|t| t.to_lowercase()).collect();
+                    let wanted: HashSet<String> = tables.iter().map(|t| t.to_lowercase()).collect();
                     for node in &self.schema_nodes {
                         if let SchemaNode::Database { tables: ts, .. } = node {
                             for t in ts {
@@ -933,7 +933,9 @@ impl AppState {
                     .iter()
                     .flat_map(|n| match n {
                         SchemaNode::Database {
-                            name: db, tables: ts, ..
+                            name: db,
+                            tables: ts,
+                            ..
                         } => ts
                             .iter()
                             .filter_map(|t| match t {
@@ -1182,6 +1184,80 @@ impl AppState {
         }
     }
 
+    /// Fire refresh requests to pick up schema changes caused by a DDL
+    /// statement. Granularity matches the DDL scope: a `DROP DATABASE`
+    /// reloads the db list; `CREATE TABLE mydb.foo` reloads just `mydb`'s
+    /// tables; `ALTER TABLE foo` refreshes that table's columns.
+    /// Unqualified statements fan out across every known database.
+    pub fn invalidate_for_ddl(&mut self, effect: &DdlEffect) {
+        match effect {
+            DdlEffect::Databases => {
+                self.request_schema_load(SchemaLoadRequest::Databases);
+            }
+            DdlEffect::Tables { db: Some(db) } => {
+                self.request_schema_load(SchemaLoadRequest::Tables { db: db.clone() });
+            }
+            DdlEffect::Tables { db: None } => {
+                // Unknown which database — refresh the db list, plus tables
+                // for every database whose table cache we've populated this
+                // session (don't preemptively fetch previously-untouched dbs).
+                self.request_schema_load(SchemaLoadRequest::Databases);
+                let dbs: Vec<String> = self
+                    .schema_nodes
+                    .iter()
+                    .filter_map(|n| match n {
+                        SchemaNode::Database {
+                            name,
+                            tables_loaded_at: Some(_),
+                            ..
+                        } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                for db in dbs {
+                    self.request_schema_load(SchemaLoadRequest::Tables { db });
+                }
+            }
+            DdlEffect::Columns {
+                db: Some(db),
+                table,
+            } => {
+                self.request_schema_load(SchemaLoadRequest::Columns {
+                    db: db.clone(),
+                    table: table.clone(),
+                });
+            }
+            DdlEffect::Columns { db: None, table } => {
+                let reqs: Vec<SchemaLoadRequest> = self
+                    .schema_nodes
+                    .iter()
+                    .flat_map(|n| match n {
+                        SchemaNode::Database {
+                            name: db, tables, ..
+                        } => tables
+                            .iter()
+                            .filter_map(|t| match t {
+                                SchemaNode::Table { name, .. }
+                                    if name.eq_ignore_ascii_case(table) =>
+                                {
+                                    Some(SchemaLoadRequest::Columns {
+                                        db: db.clone(),
+                                        table: name.clone(),
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                        _ => vec![],
+                    })
+                    .collect();
+                for req in reqs {
+                    self.request_schema_load(req);
+                }
+            }
+        }
+    }
+
     /// Fire refresh requests for any cached schema state that has gone past
     /// its TTL. Called periodically from the TUI tick. Cheap enough to run
     /// every second — walks the tree once, only sends for stale + not
@@ -1207,9 +1283,7 @@ impl AppState {
                 ..
             } = node
             {
-                if tables_loaded_at.is_some()
-                    && !crate::schema::is_fresh(*tables_loaded_at, ttl)
-                {
+                if tables_loaded_at.is_some() && !crate::schema::is_fresh(*tables_loaded_at, ttl) {
                     reqs.push(SchemaLoadRequest::Tables { db: db.clone() });
                 }
                 for t in tables {
@@ -2261,9 +2335,7 @@ mod tests {
         let mut s = state.lock().unwrap();
         s.schema_load_tx = Some(tx);
 
-        let req = SchemaLoadRequest::Tables {
-            db: "foo".into(),
-        };
+        let req = SchemaLoadRequest::Tables { db: "foo".into() };
         s.request_schema_load(req.clone());
         s.request_schema_load(req.clone());
         s.request_schema_load(req.clone());
@@ -2347,6 +2419,132 @@ mod tests {
 
         s.refresh_stale_schema();
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn invalidate_for_ddl_databases_fires_databases_load() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SchemaLoadRequest>();
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.schema_load_tx = Some(tx);
+
+        s.invalidate_for_ddl(&DdlEffect::Databases);
+        assert_eq!(rx.try_recv().unwrap(), SchemaLoadRequest::Databases);
+    }
+
+    #[test]
+    fn invalidate_for_ddl_tables_qualified() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SchemaLoadRequest>();
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.schema_load_tx = Some(tx);
+
+        s.invalidate_for_ddl(&DdlEffect::Tables {
+            db: Some("deepci_maindb".into()),
+        });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SchemaLoadRequest::Tables {
+                db: "deepci_maindb".into()
+            }
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn invalidate_for_ddl_tables_unqualified_fans_out() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SchemaLoadRequest>();
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.schema_load_tx = Some(tx);
+        s.set_schema_nodes(sample_schema());
+
+        s.invalidate_for_ddl(&DdlEffect::Tables { db: None });
+
+        let mut got = Vec::new();
+        while let Ok(req) = rx.try_recv() {
+            got.push(req);
+        }
+        // Databases reload, plus Tables for every db with a loaded cache.
+        // `analytics` has tables_loaded_at=None so it must NOT be fetched.
+        assert!(got.contains(&SchemaLoadRequest::Databases));
+        assert!(got.contains(&SchemaLoadRequest::Tables {
+            db: "deepci_maindb".into()
+        }));
+        assert!(!got.contains(&SchemaLoadRequest::Tables {
+            db: "analytics".into()
+        }));
+    }
+
+    #[test]
+    fn invalidate_for_ddl_columns_qualified() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SchemaLoadRequest>();
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.schema_load_tx = Some(tx);
+
+        s.invalidate_for_ddl(&DdlEffect::Columns {
+            db: Some("mydb".into()),
+            table: "users".into(),
+        });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SchemaLoadRequest::Columns {
+                db: "mydb".into(),
+                table: "users".into()
+            }
+        );
+    }
+
+    #[test]
+    fn invalidate_for_ddl_columns_unqualified_fans_across_dbs() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SchemaLoadRequest>();
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.schema_load_tx = Some(tx);
+        // Two databases, both containing a `users` table.
+        s.set_schema_nodes(vec![
+            SchemaNode::Database {
+                name: "db1".into(),
+                expanded: false,
+                tables_loaded_at: Some(Instant::now()),
+                tables: vec![SchemaNode::Table {
+                    name: "users".into(),
+                    expanded: false,
+                    columns_loaded_at: None,
+                    columns: vec![],
+                }],
+            },
+            SchemaNode::Database {
+                name: "db2".into(),
+                expanded: false,
+                tables_loaded_at: Some(Instant::now()),
+                tables: vec![SchemaNode::Table {
+                    name: "users".into(),
+                    expanded: false,
+                    columns_loaded_at: None,
+                    columns: vec![],
+                }],
+            },
+        ]);
+
+        s.invalidate_for_ddl(&DdlEffect::Columns {
+            db: None,
+            table: "users".into(),
+        });
+
+        let mut got = Vec::new();
+        while let Ok(req) = rx.try_recv() {
+            got.push(req);
+        }
+        assert!(got.contains(&SchemaLoadRequest::Columns {
+            db: "db1".into(),
+            table: "users".into()
+        }));
+        assert!(got.contains(&SchemaLoadRequest::Columns {
+            db: "db2".into(),
+            table: "users".into()
+        }));
     }
 
     #[test]

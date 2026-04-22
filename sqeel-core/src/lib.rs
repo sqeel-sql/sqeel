@@ -1,6 +1,7 @@
 pub mod completion_ctx;
 pub mod config;
 pub mod db;
+pub mod ddl;
 pub mod highlight;
 pub mod lsp;
 pub mod persistence;

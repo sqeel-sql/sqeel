@@ -5,6 +5,7 @@ use sqeel_core::{
     AppState, UiProvider,
     config::{load_connections, load_main_config, load_session_data, save_session},
     db::DbConnection,
+    ddl::parse_ddl,
     persistence::{
         evict_old_results, load_result_for, load_schema_cache, sanitize_conn_slug,
         save_schema_cache,
@@ -419,6 +420,9 @@ fn spawn_executor(
                             if let Some(tab) = s.result_tabs.get_mut(tab_idx) {
                                 tab.saved_filename = filename;
                             }
+                            if let Some(effect) = parse_ddl(&query) {
+                                s.invalidate_for_ddl(&effect);
+                            }
                         }
                         Err(e) => {
                             s.finish_result_tab(tab_idx, ResultsPane::Error(e.to_string()));
@@ -451,6 +455,9 @@ fn spawn_executor(
                                     s.finish_result_tab(tab_idx, ResultsPane::Results(r));
                                     if let Some(tab) = s.result_tabs.get_mut(tab_idx) {
                                         tab.saved_filename = filename;
+                                    }
+                                    if let Some(effect) = parse_ddl(&query) {
+                                        s.invalidate_for_ddl(&effect);
                                     }
                                 }
                                 Err(e) => {
