@@ -329,7 +329,7 @@ async fn run_loop(
     let mut editor_search: Option<TextInput> = None;
     let mut last_editor_search: Option<String> = None;
 
-    let mut toasts: Vec<(String, std::time::Instant)> = Vec::new();
+    let mut toasts: Vec<(String, ToastKind, std::time::Instant)> = Vec::new();
     let mut last_esc_at: Option<std::time::Instant> = None;
     // Leader-key chord state. Set when the leader is pressed in an eligible
     // context; cleared when the next key resolves the chord or it times out.
@@ -353,7 +353,7 @@ async fn run_loop(
 
         // Expire toasts after 5 seconds each.
         let before = toasts.len();
-        toasts.retain(|(_, t)| t.elapsed() < Duration::from_millis(5000));
+        toasts.retain(|(_, _, t)| t.elapsed() < Duration::from_millis(5000));
         if toasts.len() != before {
             needs_redraw = true;
         }
@@ -521,7 +521,10 @@ async fn run_loop(
             let last_editor_search_snap = last_editor_search.clone();
             let editor_search_text_snap: Option<String> =
                 editor_search_snap.as_ref().map(|t| t.text.clone());
-            let toast_snap: Vec<String> = toasts.iter().map(|(msg, _)| msg.clone()).collect();
+            let toast_snap: Vec<(String, ToastKind)> = toasts
+                .iter()
+                .map(|(msg, kind, _)| (msg.clone(), *kind))
+                .collect();
             terminal.draw(|f| {
                 let s = state.lock().unwrap();
                 last_draw_areas = draw(
@@ -734,6 +737,11 @@ async fn run_loop(
                                 if let Some(ref mut cb) = clipboard {
                                     let _ = cb.set_text(text);
                                 }
+                                toasts.push((
+                                    "Selection copied to clipboard".to_string(),
+                                    ToastKind::Info,
+                                    std::time::Instant::now(),
+                                ));
                             }
                         } else if !mouse_did_drag && mouse_drag_pane == Some(Focus::Results) {
                             let x = mouse.column;
@@ -753,6 +761,12 @@ async fn run_loop(
                                 if let Some(ref mut cb) = clipboard {
                                     let _ = cb.set_text(text);
                                 }
+                                let label = if is_double { "Row" } else { "Column" };
+                                toasts.push((
+                                    format!("{label} copied to clipboard"),
+                                    ToastKind::Info,
+                                    std::time::Instant::now(),
+                                ));
                             }
                             last_click = if is_double {
                                 None
@@ -961,6 +975,7 @@ async fn run_loop(
                                     other => {
                                         toasts.push((
                                             format!("Unknown command: :{other}"),
+                                            ToastKind::Error,
                                             std::time::Instant::now(),
                                         ));
                                     }
@@ -988,6 +1003,7 @@ async fn run_loop(
                             if let Err(e) = s.rename_active_tab(&name_str) {
                                 toasts.push((
                                     format!("Rename failed: {e}"),
+                                    ToastKind::Error,
                                     std::time::Instant::now(),
                                 ));
                             }
@@ -1011,6 +1027,7 @@ async fn run_loop(
                             if let Err(e) = s.delete_active_tab() {
                                 toasts.push((
                                     format!("Delete failed: {e}"),
+                                    ToastKind::Error,
                                     std::time::Instant::now(),
                                 ));
                             }
@@ -1542,10 +1559,15 @@ async fn run_loop(
                     }
                     _ if focus == Focus::Editor => {
                         editor.handle_key(key);
-                        if let Some(text) = editor.last_yank.take()
-                            && let Some(ref mut cb) = clipboard
-                        {
-                            let _ = cb.set_text(text);
+                        if let Some(text) = editor.last_yank.take() {
+                            if let Some(ref mut cb) = clipboard {
+                                let _ = cb.set_text(text);
+                            }
+                            toasts.push((
+                                "Yanked to clipboard".to_string(),
+                                ToastKind::Info,
+                                std::time::Instant::now(),
+                            ));
                         }
                     }
                     _ => {}
@@ -1694,6 +1716,12 @@ fn cursor_byte_offset(lines: &[String], cursor: (usize, usize)) -> usize {
 /// Desired terminal cursor shape after a draw. The TUI uses a thin vertical bar
 /// for any text-input context (insert mode, dialogs, schema search) and a thick
 /// block for editor normal mode, so cursors look consistent across the app.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToastKind {
+    Error,
+    Info,
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum CursorShape {
     #[default]
@@ -1730,7 +1758,7 @@ fn draw(
     editor_search: Option<&TextInput>,
     editor_search_text: Option<&str>,
     last_editor_search: Option<&str>,
-    toasts: &[String],
+    toasts: &[(String, ToastKind)],
 ) -> DrawAreas {
     let area = f.area();
 
@@ -1922,8 +1950,13 @@ fn draw(
     // Each toast is a 3-row block: 1 row top padding, 1 row message, 1 row bottom
     // padding; message is inset by 1 column on the left and right.
     let mut y_off: u16 = 0;
-    let toast_bg = Style::default().fg(Color::White).bg(Color::Rgb(180, 0, 0));
-    for msg in toasts {
+    for (msg, kind) in toasts {
+        let style = match kind {
+            ToastKind::Error => Style::default().fg(Color::White).bg(Color::Rgb(180, 0, 0)),
+            ToastKind::Info => Style::default()
+                .fg(Color::White)
+                .bg(Color::Rgb(30, 90, 170)),
+        };
         let width = (msg.len() as u16 + 4).min(area.width);
         let height = 3u16.min(area.height.saturating_sub(y_off));
         if height == 0 {
@@ -1936,8 +1969,7 @@ fn draw(
             height,
         };
         f.render_widget(Clear, toast_area);
-        // Paint background for the whole block (top+bottom padding rows).
-        f.render_widget(Block::default().style(toast_bg), toast_area);
+        f.render_widget(Block::default().style(style), toast_area);
         if height >= 2 {
             let msg_area = Rect {
                 x: toast_area.x + 2,
@@ -1945,7 +1977,7 @@ fn draw(
                 width: toast_area.width.saturating_sub(4),
                 height: 1,
             };
-            f.render_widget(Paragraph::new(msg.as_str()).style(toast_bg), msg_area);
+            f.render_widget(Paragraph::new(msg.as_str()).style(style), msg_area);
         }
         y_off = y_off.saturating_add(height).saturating_add(1);
     }
