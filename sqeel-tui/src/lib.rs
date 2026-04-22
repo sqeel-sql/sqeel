@@ -910,16 +910,6 @@ async fn run_loop(
                     leader_pending_at = None;
                     if !expired && key.modifiers == KeyModifiers::NONE {
                         match key.code {
-                            KeyCode::Char('e') => {
-                                let mut s = state.lock().unwrap();
-                                s.sidebar_visible = !s.sidebar_visible;
-                                if !s.sidebar_visible && s.focus == Focus::Schema {
-                                    s.focus = Focus::Editor;
-                                } else if s.sidebar_visible {
-                                    s.focus = Focus::Schema;
-                                }
-                                continue;
-                            }
                             KeyCode::Char('c') => {
                                 state.lock().unwrap().open_connection_switcher();
                                 continue;
@@ -1835,17 +1825,13 @@ fn draw(
 
     let outer_raw = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(if state.sidebar_visible {
-            vec![
-                Constraint::Min(30),
-                Constraint::Length(1),
-                Constraint::Percentage(85),
-            ]
-        } else {
-            vec![Constraint::Length(0), Constraint::Percentage(100)]
-        })
+        .constraints(vec![
+            Constraint::Min(30),
+            Constraint::Length(1),
+            Constraint::Percentage(85),
+        ])
         .split(main_area);
-    let outer: Vec<Rect> = if state.sidebar_visible {
+    let outer: Vec<Rect> = {
         let sep = outer_raw[1];
         f.render_widget(
             Block::default()
@@ -1854,8 +1840,6 @@ fn draw(
             sep,
         );
         vec![outer_raw[0], outer_raw[2]]
-    } else {
-        vec![outer_raw[0], outer_raw[1]]
     };
 
     let schema_focused = state.focus == Focus::Schema;
@@ -1869,11 +1853,7 @@ fn draw(
         schema_list_count,
         schema_list_filtered,
         schema_search_cursor,
-    ) = if state.sidebar_visible {
-        draw_schema(f, state, outer[0], schema_focused, tick, schema_search)
-    } else {
-        (Rect::default(), 0, 0, false, None)
-    };
+    ) = draw_schema(f, state, outer[0], schema_focused, tick, schema_search);
 
     let show_results = state.has_results();
     let editor_pct = (state.editor_ratio * 100.0) as u16;
@@ -3482,7 +3462,6 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
         (
             "Leader (default Space — config: editor.leader_key)",
             &[
-                ("<leader> e", "Toggle schema sidebar"),
                 ("<leader> c", "Connection switcher"),
                 ("<leader> n", "New scratch tab"),
                 ("<leader> r", "Rename current tab"),

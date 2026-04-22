@@ -240,7 +240,6 @@ pub struct AppState {
     // Help overlay
     pub show_help: bool,
     pub help_scroll: u16,
-    pub sidebar_visible: bool,
     // Debug mode — enabled via --debug CLI flag
     pub debug_mode: bool,
     pub lsp_available: bool,
@@ -261,7 +260,6 @@ impl AppState {
     pub fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             editor_ratio: 1.0,
-            sidebar_visible: false,
             stop_on_error: true,
             ..Default::default()
         }))

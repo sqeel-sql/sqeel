@@ -95,8 +95,6 @@ struct Session {
     schema_expanded_paths: Vec<String>,
     #[serde(default)]
     focus: Focus,
-    #[serde(default = "default_sidebar_visible")]
-    sidebar_visible: bool,
     #[serde(default)]
     schema_search: Option<String>,
     #[serde(default)]
@@ -107,10 +105,6 @@ struct Session {
     result_tabs: Vec<SavedResultRef>,
     #[serde(default)]
     active_result_tab: usize,
-}
-
-fn default_sidebar_visible() -> bool {
-    false
 }
 
 /// Data restored from session.toml.
@@ -124,7 +118,6 @@ pub struct SessionData {
     /// Expanded node paths, e.g. `["mydb", "mydb/users"]`.
     pub schema_expanded_paths: Vec<String>,
     pub focus: Focus,
-    pub sidebar_visible: bool,
     pub schema_search: Option<String>,
     /// Per-tab editor cursor positions, keyed by tab name.
     pub tab_cursors: Vec<TabCursor>,
@@ -159,7 +152,7 @@ lsp_binary = "sqls"
 # Number of lines to scroll per mouse wheel tick (applies to all panes)
 mouse_scroll_lines = 3
 
-# Leader key for chord shortcuts (e.g. <leader>e toggles the schema sidebar).
+# Leader key for chord shortcuts (e.g. <leader>c opens the connection switcher).
 # Use a single character; " " for Space.
 leader_key = " "
 
@@ -217,7 +210,6 @@ pub fn save_session(
     schema_cursor_path: Option<String>,
     schema_expanded_paths: Vec<String>,
     focus: Focus,
-    sidebar_visible: bool,
     schema_search: Option<String>,
     tab_cursors: Vec<TabCursor>,
     active_tab: usize,
@@ -232,7 +224,6 @@ pub fn save_session(
         schema_cursor_path,
         schema_expanded_paths,
         focus,
-        sidebar_visible,
         schema_search,
         tab_cursors,
         active_tab,
@@ -264,7 +255,6 @@ pub fn load_session_data() -> SessionData {
         schema_cursor_path: s.schema_cursor_path,
         schema_expanded_paths: s.schema_expanded_paths,
         focus: s.focus,
-        sidebar_visible: s.sidebar_visible,
         schema_search: s.schema_search,
         tab_cursors: s.tab_cursors,
         active_tab: s.active_tab,

@@ -67,7 +67,7 @@ lsp_binary = "sqls"
 # Lines scrolled per mouse wheel tick (all panes)
 mouse_scroll_lines = 3
 
-# Leader key for chord shortcuts (e.g. <leader>e toggles the schema sidebar).
+# Leader key for chord shortcuts (e.g. <leader>c opens the connection switcher).
 # Single character; " " for Space.
 leader_key = " "
 
@@ -107,7 +107,6 @@ Press `?` in normal mode to open the help overlay.
 
 | Key                | Action                       |
 | ------------------ | ---------------------------- |
-| `<leader>e`        | Toggle schema sidebar        |
 | `<leader>c`        | Connection switcher          |
 | `<leader>n`        | New scratch tab              |
 | `<leader>r`        | Rename current tab           |

@@ -47,7 +47,6 @@ fn main() -> anyhow::Result<()> {
     {
         let mut s = state.lock().unwrap();
         s.focus = session.focus;
-        s.sidebar_visible = session.sidebar_visible;
         s.schema_search_query = session.schema_search.clone();
         let conn_for_results = args
             .connection
@@ -119,7 +118,6 @@ fn main() -> anyhow::Result<()> {
         let mut last_written_cursor_path: Option<String> = None;
         let mut last_written_expanded_paths: Vec<String> = Vec::new();
         let mut last_written_focus = sqeel_core::state::Focus::default();
-        let mut last_written_sidebar = true;
         let mut last_written_search: Option<String> = None;
         let mut last_written_tab_cursors: Vec<sqeel_core::config::TabCursor> = Vec::new();
         let mut last_written_active_tab: usize = 0;
@@ -131,7 +129,6 @@ fn main() -> anyhow::Result<()> {
         let mut pending_cursor_path: Option<String> = None;
         let mut pending_expanded_paths: Vec<String> = Vec::new();
         let mut pending_focus = sqeel_core::state::Focus::default();
-        let mut pending_sidebar = true;
         let mut pending_search: Option<String> = None;
         let mut pending_tab_cursors: Vec<sqeel_core::config::TabCursor> = Vec::new();
         let mut pending_active_tab: usize = 0;
@@ -154,7 +151,6 @@ fn main() -> anyhow::Result<()> {
             let cursor_path = s.schema_cursor_path_string();
             let expanded_paths = s.schema_expanded_paths();
             let focus = s.focus;
-            let sidebar = s.sidebar_visible;
             let search = s.schema_search_query.clone();
             let loading = s.schema_loading;
             let tab_cursors: Vec<sqeel_core::config::TabCursor> = s
@@ -184,7 +180,6 @@ fn main() -> anyhow::Result<()> {
                     || cursor_path != last_written_cursor_path
                     || expanded_paths != last_written_expanded_paths
                     || focus != last_written_focus
-                    || sidebar != last_written_sidebar
                     || search != last_written_search
                     || tab_cursors != last_written_tab_cursors
                     || active_tab != last_written_active_tab
@@ -196,7 +191,6 @@ fn main() -> anyhow::Result<()> {
                 pending_cursor_path = cursor_path;
                 pending_expanded_paths = expanded_paths;
                 pending_focus = focus;
-                pending_sidebar = sidebar;
                 pending_search = search;
                 pending_tab_cursors = tab_cursors;
                 pending_active_tab = active_tab;
@@ -213,7 +207,6 @@ fn main() -> anyhow::Result<()> {
                         pending_cursor_path.clone(),
                         pending_expanded_paths.clone(),
                         pending_focus,
-                        pending_sidebar,
                         pending_search.clone(),
                         pending_tab_cursors.clone(),
                         pending_active_tab,
@@ -226,7 +219,6 @@ fn main() -> anyhow::Result<()> {
                 last_written_cursor_path = pending_cursor_path.clone();
                 last_written_expanded_paths = pending_expanded_paths.clone();
                 last_written_focus = pending_focus;
-                last_written_sidebar = pending_sidebar;
                 last_written_search = pending_search.clone();
                 last_written_tab_cursors = pending_tab_cursors.clone();
                 last_written_active_tab = pending_active_tab;
@@ -402,7 +394,6 @@ fn spawn_executor(
         let cursor_path = s.schema_cursor_path_string();
         let expanded_paths = s.schema_expanded_paths();
         let focus = s.focus;
-        let sidebar_visible = s.sidebar_visible;
         let search_query = s.schema_search_query.clone();
         let tab_cursors: Vec<sqeel_core::config::TabCursor> = s
             .tab_cursor_snapshot()
@@ -424,7 +415,6 @@ fn spawn_executor(
                 cursor_path,
                 expanded_paths,
                 focus,
-                sidebar_visible,
                 search_query,
                 tab_cursors,
                 active_tab,
