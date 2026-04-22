@@ -414,12 +414,13 @@ fn spawn_executor(
         const COLUMN_CONCURRENCY: usize = 8;
         let table_sem = Arc::new(tokio::sync::Semaphore::new(TABLE_LIST_CONCURRENCY));
         let column_sem = Arc::new(tokio::sync::Semaphore::new(COLUMN_CONCURRENCY));
-        let mut table_set: tokio::task::JoinSet<(String, anyhow::Result<Vec<String>>)> =
+        let mut table_set: tokio::task::JoinSet<(Arc<str>, anyhow::Result<Vec<String>>)> =
             tokio::task::JoinSet::new();
-        for db_name in &db_names {
+        let db_names_arc: Vec<Arc<str>> = db_names.iter().map(|n| Arc::<str>::from(n.as_str())).collect();
+        for db in &db_names_arc {
             let permit = table_sem.clone().acquire_owned().await.unwrap();
             let conn = schema_conn.clone();
-            let db = db_name.clone();
+            let db = Arc::clone(db);
             table_set.spawn(async move {
                 let _permit = permit;
                 let r = conn.list_tables(&db).await;
@@ -454,7 +455,7 @@ fn spawn_executor(
                 let permit = column_sem.clone().acquire_owned().await.unwrap();
                 let conn = schema_conn.clone();
                 let state = schema_state.clone();
-                let db = db_name.clone();
+                let db = Arc::clone(&db_name);
                 column_set.spawn(async move {
                     let _permit = permit;
                     let col_nodes = match conn.list_columns(&db, &table_name).await {
