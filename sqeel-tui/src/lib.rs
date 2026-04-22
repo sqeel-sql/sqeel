@@ -336,6 +336,9 @@ async fn run_loop(
     let mut leader_pending_at: Option<std::time::Instant> = None;
     // Clipboard held alive for the session so the OS clipboard manager sees the content.
     let mut clipboard = Clipboard::new().ok();
+    // Tracks an unfinished `y` in the results pane so a follow-up `y` within
+    // 500ms yanks the whole row (vim `yy`).
+    let mut pending_results_y: Option<std::time::Instant> = None;
     // Mouse drag tracking
     let mut last_draw_areas = DrawAreas::default();
     let mut mouse_drag_pane: Option<Focus> = None;
@@ -1403,15 +1406,24 @@ async fn run_loop(
                         state.lock().unwrap().results_cursor_left();
                     }
                     (KeyModifiers::NONE, KeyCode::Char('y')) if focus == Focus::Results => {
-                        let yanked = state.lock().unwrap().results_cursor_yank();
-                        if let Some((text, label)) = yanked
-                            && let Ok(mut cb) = Clipboard::new()
-                        {
-                            let _ = cb.set_text(text);
-                            state
-                                .lock()
-                                .unwrap()
-                                .set_status(format!("{label} yanked to clipboard"));
+                        let now = std::time::Instant::now();
+                        let is_yy = pending_results_y
+                            .is_some_and(|t| now.duration_since(t).as_millis() < 500);
+                        let yanked = if is_yy {
+                            state.lock().unwrap().results_cursor_yank_row()
+                        } else {
+                            state.lock().unwrap().results_cursor_yank()
+                        };
+                        pending_results_y = if is_yy { None } else { Some(now) };
+                        if let Some((text, label)) = yanked {
+                            if let Some(ref mut cb) = clipboard {
+                                let _ = cb.set_text(text);
+                            }
+                            toasts.push((
+                                format!("{label} copied to clipboard"),
+                                ToastKind::Info,
+                                now,
+                            ));
                         }
                     }
                     // On error tab: Enter jumps editor cursor to the reported line:col

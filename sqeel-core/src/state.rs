@@ -617,6 +617,22 @@ impl AppState {
         });
     }
 
+    /// Yank the entire row under the cursor as tab-separated values. Returns
+    /// `None` when the active tab isn't a Results pane or has no row selected.
+    pub fn results_cursor_yank_row(&self) -> Option<(String, &'static str)> {
+        let tab = self.active_result()?;
+        let ResultsPane::Results(r) = &tab.kind else {
+            return None;
+        };
+        let row_idx = match tab.cursor {
+            ResultsCursor::Cell { row, .. } => row,
+            ResultsCursor::Header(_) | ResultsCursor::Query => 0,
+            _ => return None,
+        };
+        let row = r.rows.get(row_idx)?;
+        Some((row.join("\t"), "Row"))
+    }
+
     /// Return the text currently under the results cursor + a short label used
     /// in the toast ("Query", "Column", "Value", "Line").
     pub fn results_cursor_yank(&self) -> Option<(String, &'static str)> {
