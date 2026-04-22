@@ -419,6 +419,7 @@ async fn run_loop(
                                             .collect();
                                         if idx < filtered.len() {
                                             schema_search_cursor = idx;
+                                            schema_search_focused = false;
                                             let path_str = sqeel_core::schema::path_to_string(
                                                 &filtered[idx],
                                                 &s.schema_nodes,
