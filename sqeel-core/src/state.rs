@@ -151,6 +151,8 @@ pub struct AppState {
     pub lsp_binary: String,
     // Live query channel — set by the binary when connected
     pub query_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    /// Schema sidebar search query — persisted to session so it survives app restart.
+    pub schema_search_query: Option<String>,
 }
 
 impl AppState {

@@ -114,7 +114,7 @@ async fn run_loop(
     let mut last_schema_completions: Vec<String> = Vec::new();
     let mut tick: u32 = 0;
     let mut command_input: Option<String> = None;
-    let mut schema_search: Option<String> = None;
+    let mut schema_search: Option<String> = state.lock().unwrap().schema_search_query.clone();
     let mut schema_search_focused = false;
     let mut schema_search_cursor: usize = 0;
     let mut editor_search: Option<String> = None;
@@ -134,9 +134,9 @@ async fn run_loop(
         let mut needs_redraw = event_triggered_redraw;
         event_triggered_redraw = false;
 
-        // Expire toast after 3 seconds.
+        // Expire toast after 5 seconds.
         if let Some((_, t)) = &toast {
-            if t.elapsed() >= Duration::from_secs(3) {
+            if t.elapsed() >= Duration::from_millis(5000) {
                 toast = None;
                 needs_redraw = true;
             }
@@ -177,6 +177,7 @@ async fn run_loop(
         {
             let mut s = state.lock().unwrap();
             s.vim_mode = editor.vim_mode();
+            s.schema_search_query = schema_search.clone();
             if let Some(ref c) = content {
                 s.editor_content = c.clone();
                 editor_dirty = true;
@@ -1213,22 +1214,17 @@ fn draw(
 
     // Toast notification (top-right corner)
     if let Some(msg) = toast {
-        let width = (msg.len() as u16 + 4).min(area.width);
+        let width = (msg.len() as u16 + 2).min(area.width);
         let toast_area = Rect {
             x: area.width.saturating_sub(width),
             y: 0,
             width,
-            height: 3,
+            height: 1,
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red))
-            .style(Style::default().bg(Color::Rgb(60, 0, 0)));
         f.render_widget(Clear, toast_area);
         f.render_widget(
-            Paragraph::new(msg)
-                .style(Style::default().fg(Color::White).bg(Color::Rgb(60, 0, 0)))
-                .block(block),
+            Paragraph::new(format!(" {msg}"))
+                .style(Style::default().fg(Color::White).bg(Color::Rgb(180, 0, 0))),
             toast_area,
         );
     }

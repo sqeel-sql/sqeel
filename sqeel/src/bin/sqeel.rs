@@ -42,6 +42,7 @@ fn main() -> anyhow::Result<()> {
         let mut s = state.lock().unwrap();
         s.focus = session.focus;
         s.sidebar_visible = session.sidebar_visible;
+        s.schema_search_query = session.schema_search.clone();
     }
     let url = if let Some(url) = args.url {
         Some(url)
@@ -75,6 +76,7 @@ fn main() -> anyhow::Result<()> {
         let mut last_written_expanded_paths: Vec<String> = Vec::new();
         let mut last_written_focus = sqeel_core::state::Focus::default();
         let mut last_written_sidebar = true;
+        let mut last_written_search: Option<String> = None;
         let mut dirty = false;
         let mut pending_conn: Option<String> = None;
         let mut pending_cursor: usize = 0;
@@ -82,6 +84,7 @@ fn main() -> anyhow::Result<()> {
         let mut pending_expanded_paths: Vec<String> = Vec::new();
         let mut pending_focus = sqeel_core::state::Focus::default();
         let mut pending_sidebar = true;
+        let mut pending_search: Option<String> = None;
         let mut last_write = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(2))
             .unwrap_or_else(std::time::Instant::now);
@@ -100,6 +103,7 @@ fn main() -> anyhow::Result<()> {
             let expanded_paths = s.schema_expanded_paths();
             let focus = s.focus;
             let sidebar = s.sidebar_visible;
+            let search = s.schema_search_query.clone();
             drop(s);
 
             if conn.is_some()
@@ -108,7 +112,8 @@ fn main() -> anyhow::Result<()> {
                     || cursor_path != last_written_cursor_path
                     || expanded_paths != last_written_expanded_paths
                     || focus != last_written_focus
-                    || sidebar != last_written_sidebar)
+                    || sidebar != last_written_sidebar
+                    || search != last_written_search)
             {
                 pending_conn = conn;
                 pending_cursor = cursor;
@@ -116,6 +121,7 @@ fn main() -> anyhow::Result<()> {
                 pending_expanded_paths = expanded_paths;
                 pending_focus = focus;
                 pending_sidebar = sidebar;
+                pending_search = search;
                 dirty = true;
             }
 
@@ -128,6 +134,7 @@ fn main() -> anyhow::Result<()> {
                         pending_expanded_paths.clone(),
                         pending_focus,
                         pending_sidebar,
+                        pending_search.clone(),
                     );
                 }
                 last_written_conn = pending_conn.clone();
@@ -136,6 +143,7 @@ fn main() -> anyhow::Result<()> {
                 last_written_expanded_paths = pending_expanded_paths.clone();
                 last_written_focus = pending_focus;
                 last_written_sidebar = pending_sidebar;
+                last_written_search = pending_search.clone();
                 dirty = false;
                 last_write = std::time::Instant::now();
             }
@@ -180,6 +188,7 @@ async fn connect_and_spawn(
                         s.schema_expanded_paths(),
                         s.focus,
                         s.sidebar_visible,
+                        s.schema_search_query.clone(),
                     );
                 }
             }
@@ -273,6 +282,7 @@ fn spawn_executor(
         let expanded_paths = s.schema_expanded_paths();
         let focus = s.focus;
         let sidebar_visible = s.sidebar_visible;
+        let search_query = s.schema_search_query.clone();
         let _ = save_schema_cache(&col_schema_url, &nodes);
         if let Some(ref name) = s.active_connection.clone() {
             let _ = save_session(
@@ -282,6 +292,7 @@ fn spawn_executor(
                 expanded_paths,
                 focus,
                 sidebar_visible,
+                search_query,
             );
         }
     });

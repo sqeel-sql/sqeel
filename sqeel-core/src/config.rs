@@ -51,6 +51,8 @@ struct Session {
     focus: Focus,
     #[serde(default = "default_sidebar_visible")]
     sidebar_visible: bool,
+    #[serde(default)]
+    schema_search: Option<String>,
 }
 
 fn default_sidebar_visible() -> bool {
@@ -69,6 +71,7 @@ pub struct SessionData {
     pub schema_expanded_paths: Vec<String>,
     pub focus: Focus,
     pub sidebar_visible: bool,
+    pub schema_search: Option<String>,
 }
 
 impl Default for SessionData {
@@ -80,6 +83,7 @@ impl Default for SessionData {
             schema_expanded_paths: Vec::new(),
             focus: Focus::default(),
             sidebar_visible: true,
+            schema_search: None,
         }
     }
 }
@@ -161,6 +165,7 @@ pub fn save_session(
     schema_expanded_paths: Vec<String>,
     focus: Focus,
     sidebar_visible: bool,
+    schema_search: Option<String>,
 ) -> anyhow::Result<()> {
     let dir = config_dir().ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?;
     std::fs::create_dir_all(&dir)?;
@@ -171,6 +176,7 @@ pub fn save_session(
         schema_expanded_paths,
         focus,
         sidebar_visible,
+        schema_search,
     })?;
     std::fs::write(dir.join("session.toml"), content)?;
     Ok(())
@@ -198,6 +204,7 @@ pub fn load_session_data() -> SessionData {
         schema_expanded_paths: s.schema_expanded_paths,
         focus: s.focus,
         sidebar_visible: s.sidebar_visible,
+        schema_search: s.schema_search,
     }
 }
 
