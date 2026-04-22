@@ -62,6 +62,9 @@ enum Pending {
     },
     /// `r` pressed — waiting for the replacement char.
     Replace,
+    /// Visual mode + `i` or `a` pressed — waiting for the text-object
+    /// character to extend the selection over.
+    VisualTextObj { inner: bool },
 }
 
 // ─── Operator / Motion / TextObject ────────────────────────────────────────
@@ -356,7 +359,10 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
         && !input.alt
         && !matches!(
             ed.vim.pending,
-            Pending::Replace | Pending::Find { .. } | Pending::OpFind { .. }
+            Pending::Replace
+                | Pending::Find { .. }
+                | Pending::OpFind { .. }
+                | Pending::VisualTextObj { .. }
         )
         && (d != '0' || ed.vim.count > 0)
     {
@@ -379,6 +385,9 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
         Pending::Op { op, count1 } => return handle_after_op(ed, input, op, count1),
         Pending::OpTextObj { op, count1, inner } => {
             return handle_text_object(ed, input, op, count1, inner);
+        }
+        Pending::VisualTextObj { inner } => {
+            return handle_visual_text_obj(ed, input, inner);
         }
         Pending::None => {}
     }
@@ -428,6 +437,13 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
         && let Some(op) = visual_operator(&input)
     {
         apply_visual_operator(ed, op);
+        return true;
+    }
+
+    // Visual mode: `i` / `a` start a text-object extension.
+    if ed.vim.is_visual() && !input.ctrl && matches!(input.key, Key::Char('i') | Key::Char('a')) {
+        let inner = matches!(input.key, Key::Char('i'));
+        ed.vim.pending = Pending::VisualTextObj { inner };
         return true;
     }
 
@@ -1080,6 +1096,58 @@ fn handle_text_object(
         });
     }
     true
+}
+
+fn handle_visual_text_obj(ed: &mut Editor<'_>, input: Input, inner: bool) -> bool {
+    let Key::Char(ch) = input.key else {
+        return true;
+    };
+    let obj = match ch {
+        'w' => TextObject::Word { big: false },
+        'W' => TextObject::Word { big: true },
+        '"' | '\'' | '`' => TextObject::Quote(ch),
+        '(' | ')' | 'b' => TextObject::Bracket('('),
+        '[' | ']' => TextObject::Bracket('['),
+        '{' | '}' | 'B' => TextObject::Bracket('{'),
+        '<' | '>' => TextObject::Bracket('<'),
+        'p' => TextObject::Paragraph,
+        _ => return true,
+    };
+    let Some((start, end, kind)) = text_object_range(ed, obj, inner) else {
+        return true;
+    };
+    // Build a visual selection spanning start..end. `end` is exclusive,
+    // so the cursor (last included cell) is one position before end.
+    ed.textarea.cancel_selection();
+    match kind {
+        MotionKind::Linewise => {
+            ed.vim.visual_line_anchor = start.0;
+            ed.vim.mode = Mode::VisualLine;
+            ed.textarea.move_cursor(CursorMove::Jump(end.0, 0));
+            refresh_visual_line_selection(ed);
+        }
+        _ => {
+            ed.vim.mode = Mode::Visual;
+            ed.textarea.move_cursor(CursorMove::Jump(start.0, start.1));
+            ed.textarea.start_selection();
+            let (er, ec) = retreat_one(ed, end);
+            ed.textarea.move_cursor(CursorMove::Jump(er, ec));
+        }
+    }
+    true
+}
+
+/// Move `pos` back by one character, clamped to (0, 0).
+fn retreat_one(ed: &Editor<'_>, pos: (usize, usize)) -> (usize, usize) {
+    let (r, c) = pos;
+    if c > 0 {
+        (r, c - 1)
+    } else if r > 0 {
+        let prev_len = ed.textarea.lines()[r - 1].len();
+        (r - 1, prev_len)
+    } else {
+        (0, 0)
+    }
 }
 
 fn op_is_change(op: Operator) -> bool {
@@ -2386,6 +2454,50 @@ mod tests {
         run_keys(&mut e, "j");
         run_keys(&mut e, "yy");
         assert_eq!(e.last_yank.as_deref(), Some("bbb\n"));
+    }
+
+    #[test]
+    fn visual_select_inner_word() {
+        let mut e = editor_with("hello world");
+        e.textarea.move_cursor(CursorMove::Jump(0, 2));
+        run_keys(&mut e, "viw");
+        assert_eq!(e.vim_mode(), VimMode::Visual);
+        run_keys(&mut e, "y");
+        assert_eq!(e.last_yank.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn visual_select_inner_quote() {
+        let mut e = editor_with("foo \"bar\" baz");
+        e.textarea.move_cursor(CursorMove::Jump(0, 6));
+        run_keys(&mut e, "vi\"");
+        run_keys(&mut e, "y");
+        assert_eq!(e.last_yank.as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn visual_select_inner_paren() {
+        let mut e = editor_with("fn(a, b)");
+        e.textarea.move_cursor(CursorMove::Jump(0, 4));
+        run_keys(&mut e, "vi(");
+        run_keys(&mut e, "y");
+        assert_eq!(e.last_yank.as_deref(), Some("a, b"));
+    }
+
+    #[test]
+    fn visual_select_outer_brace() {
+        let mut e = editor_with("{x}");
+        e.textarea.move_cursor(CursorMove::Jump(0, 1));
+        run_keys(&mut e, "va{");
+        run_keys(&mut e, "y");
+        assert_eq!(e.last_yank.as_deref(), Some("{x}"));
+    }
+
+    #[test]
+    fn caw_changes_word_with_trailing_space() {
+        let mut e = editor_with("hello world");
+        run_keys(&mut e, "cawfoo<Esc>");
+        assert_eq!(e.textarea.lines()[0], "fooworld");
     }
 
     #[test]
