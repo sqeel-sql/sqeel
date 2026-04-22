@@ -1,0 +1,582 @@
+//! Editor wrapper around `tui_textarea::TextArea`.
+//!
+//! This file owns the public Editor API — construction, content access,
+//! mouse and goto helpers, the (buffer-level) undo stack, and insert-mode
+//! session bookkeeping. All vim-specific keyboard handling lives in
+//! [`vim`] and communicates with Editor through a small internal API
+//! exposed via `pub(super)` fields and helper methods.
+
+pub mod vim;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
+use sqeel_core::state::{KeybindingMode, VimMode};
+use tui_textarea::{CursorMove, Input, Key, TextArea};
+
+use vim::VimState;
+
+pub struct Editor<'a> {
+    pub textarea: TextArea<'a>,
+    pub keybinding_mode: KeybindingMode,
+    /// Set when the user yanks/cuts; caller drains this to write to OS clipboard.
+    pub last_yank: Option<String>,
+    /// All vim-specific state (mode, pending operator, count, dot-repeat, ...).
+    pub(super) vim: VimState,
+    /// Undo history: each entry is (lines, cursor) before the edit.
+    pub(super) undo_stack: Vec<(Vec<String>, (usize, usize))>,
+    /// Redo history: entries pushed when undoing.
+    pub(super) redo_stack: Vec<(Vec<String>, (usize, usize))>,
+    /// Set whenever the buffer content changes; cleared by `take_dirty`.
+    pub(super) content_dirty: bool,
+}
+
+impl<'a> Editor<'a> {
+    pub fn new(keybinding_mode: KeybindingMode) -> Self {
+        let mut textarea = TextArea::default();
+        textarea.set_max_histories(0);
+        Self {
+            textarea,
+            keybinding_mode,
+            last_yank: None,
+            vim: VimState::default(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            content_dirty: false,
+        }
+    }
+
+    /// Calls `f` on the textarea and marks the content dirty.
+    pub(super) fn mutate<R>(&mut self, f: impl FnOnce(&mut TextArea<'a>) -> R) -> R {
+        self.content_dirty = true;
+        f(&mut self.textarea)
+    }
+
+    /// Returns true if content changed since the last call, then clears the flag.
+    pub fn take_dirty(&mut self) -> bool {
+        let dirty = self.content_dirty;
+        self.content_dirty = false;
+        dirty
+    }
+
+    /// Returns the cursor's row within the visible textarea (0-based), updating
+    /// the stored viewport top so subsequent calls remain accurate.
+    pub fn cursor_screen_row(&mut self, height: u16) -> u16 {
+        let cursor = self.textarea.cursor().0;
+        let top = self.textarea.viewport_top_row();
+        cursor.saturating_sub(top).min(height as usize - 1) as u16
+    }
+
+    /// Returns the cursor's screen position `(x, y)` for `area` (the textarea
+    /// rect). Accounts for line-number gutter and viewport scroll. Returns
+    /// `None` if the cursor is outside the visible viewport.
+    pub fn cursor_screen_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let (row, col) = self.textarea.cursor();
+        let top_row = self.textarea.viewport_top_row();
+        let top_col = self.textarea.viewport_top_col();
+        if row < top_row || col < top_col {
+            return None;
+        }
+        let lnum_width = self.textarea.lines().len().to_string().len() as u16 + 2;
+        let dy = (row - top_row) as u16;
+        let dx = (col - top_col) as u16;
+        if dy >= area.height || dx + lnum_width >= area.width {
+            return None;
+        }
+        Some((area.x + lnum_width + dx, area.y + dy))
+    }
+
+    pub fn vim_mode(&self) -> VimMode {
+        self.vim.public_mode()
+    }
+
+    /// Force back to normal mode (used when dismissing completions etc.)
+    pub fn force_normal(&mut self) {
+        self.textarea.cancel_selection();
+        self.vim.force_normal();
+    }
+
+    pub fn content(&self) -> String {
+        let mut s = self.textarea.lines().join("\n");
+        s.push('\n');
+        s
+    }
+
+    pub fn set_content(&mut self, text: &str) {
+        let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+        while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        let carried_yank = self.textarea.yank_text();
+        self.textarea = TextArea::new(lines);
+        self.textarea.set_max_histories(0);
+        if !carried_yank.is_empty() {
+            self.textarea.set_yank_text(carried_yank);
+        }
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.content_dirty = true;
+    }
+
+    /// Install `text` as the pending yank buffer so the next `p`/`P` pastes
+    /// it. Linewise is inferred from a trailing newline, matching how `yy`/`dd`
+    /// shape their payload.
+    pub fn seed_yank(&mut self, text: String) {
+        self.vim.yank_linewise = text.ends_with('\n');
+        self.textarea.set_yank_text(text);
+    }
+
+    pub fn scroll_down(&mut self, rows: i16) {
+        for _ in 0..rows {
+            self.textarea.move_cursor(CursorMove::Down);
+        }
+    }
+
+    pub fn scroll_up(&mut self, rows: i16) {
+        for _ in 0..rows {
+            self.textarea.move_cursor(CursorMove::Up);
+        }
+    }
+
+    pub fn goto_line(&mut self, line: usize) {
+        self.textarea
+            .move_cursor(CursorMove::Jump(line.saturating_sub(1), 0));
+    }
+
+    /// Translate a terminal mouse position into a (row, col) inside the document.
+    /// `area` is the outer editor rect: 1-row tab bar at top (flush), then the
+    /// textarea with 1 cell of horizontal pane padding on each side.
+    fn mouse_to_doc_pos(&self, area: Rect, col: u16, row: u16) -> (usize, usize) {
+        let lines = self.textarea.lines();
+        let inner_top = area.y.saturating_add(1); // tab bar row
+        let lnum_width = lines.len().to_string().len() as u16 + 2;
+        let content_x = area.x.saturating_add(1).saturating_add(lnum_width);
+        let rel_row = row.saturating_sub(inner_top) as usize;
+        let top = self.textarea.viewport_top_row();
+        let doc_row = (top + rel_row).min(lines.len().saturating_sub(1));
+        let rel_col = col.saturating_sub(content_x) as usize;
+        let line_len = lines.get(doc_row).map(|l| l.len()).unwrap_or(0);
+        (doc_row, rel_col.min(line_len))
+    }
+
+    /// Jump the cursor to the given 1-based line/column, clamped to the document.
+    pub fn jump_to(&mut self, line: usize, col: usize) {
+        let r = line.saturating_sub(1);
+        let max_row = self.textarea.lines().len().saturating_sub(1);
+        let r = r.min(max_row);
+        let line_len = self.textarea.lines()[r].chars().count();
+        let c = col.saturating_sub(1).min(line_len);
+        self.textarea.move_cursor(CursorMove::Jump(r, c));
+    }
+
+    /// Jump cursor to the terminal-space mouse position; exits Visual modes if active.
+    pub fn mouse_click(&mut self, area: Rect, col: u16, row: u16) {
+        if self.vim.is_visual() {
+            self.textarea.cancel_selection();
+            self.vim.force_normal();
+        }
+        let (r, c) = self.mouse_to_doc_pos(area, col, row);
+        self.textarea.move_cursor(CursorMove::Jump(r, c));
+    }
+
+    /// Begin a mouse-drag selection: anchor at current cursor and enter Visual mode.
+    pub fn mouse_begin_drag(&mut self) {
+        if !self.vim.is_visual_char() {
+            self.textarea.cancel_selection();
+            self.textarea.start_selection();
+            self.vim.enter_visual();
+        }
+    }
+
+    /// Extend an in-progress mouse drag to the given terminal-space position.
+    pub fn mouse_extend_drag(&mut self, area: Rect, col: u16, row: u16) {
+        let (r, c) = self.mouse_to_doc_pos(area, col, row);
+        self.textarea.move_cursor(CursorMove::Jump(r, c));
+    }
+
+    pub fn insert_str(&mut self, text: &str) {
+        self.mutate(|t| t.insert_str(text));
+    }
+
+    pub fn accept_completion(&mut self, completion: &str) {
+        let (row, col) = self.textarea.cursor();
+        let line = self.textarea.lines()[row].clone();
+        let before = &line[..col.min(line.len())];
+        let prefix_len = before
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .count();
+        for _ in 0..prefix_len {
+            self.mutate(|t| t.delete_char());
+        }
+        self.mutate(|t| t.insert_str(completion));
+    }
+
+    pub(super) fn snapshot(&self) -> (Vec<String>, (usize, usize)) {
+        (self.textarea.lines().to_vec(), self.textarea.cursor())
+    }
+
+    pub(super) fn push_undo(&mut self) {
+        let snap = self.snapshot();
+        if self.undo_stack.len() >= 200 {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(snap);
+        self.redo_stack.clear();
+    }
+
+    pub(super) fn restore(&mut self, lines: Vec<String>, cursor: (usize, usize)) {
+        self.textarea = TextArea::new(lines);
+        self.textarea.set_max_histories(0);
+        self.textarea
+            .move_cursor(CursorMove::Jump(cursor.0, cursor.1));
+        self.content_dirty = true;
+    }
+
+    /// Returns true if the key was consumed by the editor.
+    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        let input = crossterm_to_input(key);
+        if input.key == Key::Null {
+            return false;
+        }
+        vim::step(self, input)
+    }
+}
+
+pub(super) fn crossterm_to_input(key: KeyEvent) -> Input {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let k = match key.code {
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::Esc => Key::Esc,
+        _ => Key::Null,
+    };
+    Input {
+        key: k,
+        ctrl,
+        alt,
+        shift,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyEvent;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    fn shift_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn vim_normal_to_insert() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+    }
+
+    #[test]
+    fn vim_insert_to_normal() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.handle_key(key(KeyCode::Char('i')));
+        e.handle_key(key(KeyCode::Esc));
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+    }
+
+    #[test]
+    fn vim_normal_to_visual() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.handle_key(key(KeyCode::Char('v')));
+        assert_eq!(e.vim_mode(), VimMode::Visual);
+    }
+
+    #[test]
+    fn vim_visual_to_normal() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.handle_key(key(KeyCode::Char('v')));
+        e.handle_key(key(KeyCode::Esc));
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+    }
+
+    #[test]
+    fn vim_shift_i_moves_to_first_non_whitespace() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("   hello");
+        e.textarea.move_cursor(CursorMove::End);
+        e.handle_key(shift_key(KeyCode::Char('I')));
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+        assert_eq!(e.textarea.cursor(), (0, 3));
+    }
+
+    #[test]
+    fn vim_shift_a_moves_to_end_and_insert() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        e.handle_key(shift_key(KeyCode::Char('A')));
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+        assert_eq!(e.textarea.cursor().1, 5);
+    }
+
+    #[test]
+    fn count_10j_moves_down_10() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content(
+            (0..20)
+                .map(|i| format!("line{i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_str(),
+        );
+        for d in "10".chars() {
+            e.handle_key(key(KeyCode::Char(d)));
+        }
+        e.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(e.textarea.cursor().0, 10);
+    }
+
+    #[test]
+    fn count_o_repeats_insert_on_esc() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        for d in "3".chars() {
+            e.handle_key(key(KeyCode::Char(d)));
+        }
+        e.handle_key(key(KeyCode::Char('o')));
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+        for c in "world".chars() {
+            e.handle_key(key(KeyCode::Char(c)));
+        }
+        e.handle_key(key(KeyCode::Esc));
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+        assert_eq!(e.textarea.lines().len(), 4);
+        assert!(e.textarea.lines().iter().skip(1).all(|l| l == "world"));
+    }
+
+    #[test]
+    fn count_i_repeats_text_on_esc() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("");
+        for d in "3".chars() {
+            e.handle_key(key(KeyCode::Char(d)));
+        }
+        e.handle_key(key(KeyCode::Char('i')));
+        for c in "ab".chars() {
+            e.handle_key(key(KeyCode::Char(c)));
+        }
+        e.handle_key(key(KeyCode::Esc));
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+        assert_eq!(e.textarea.lines()[0], "ababab");
+    }
+
+    #[test]
+    fn vim_shift_o_opens_line_above() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        e.handle_key(shift_key(KeyCode::Char('O')));
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+        assert_eq!(e.textarea.cursor(), (0, 0));
+        assert_eq!(e.textarea.lines().len(), 2);
+    }
+
+    #[test]
+    fn vim_gg_goes_to_top() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("a\nb\nc");
+        e.textarea.move_cursor(CursorMove::Bottom);
+        e.handle_key(key(KeyCode::Char('g')));
+        e.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(e.textarea.cursor().0, 0);
+    }
+
+    #[test]
+    fn vim_shift_g_goes_to_bottom() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("a\nb\nc");
+        e.handle_key(shift_key(KeyCode::Char('G')));
+        assert_eq!(e.textarea.cursor().0, 2);
+    }
+
+    #[test]
+    fn vim_dd_deletes_line() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("first\nsecond");
+        e.handle_key(key(KeyCode::Char('d')));
+        e.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(e.textarea.lines().len(), 1);
+        assert_eq!(e.textarea.lines()[0], "second");
+    }
+
+    #[test]
+    fn vim_dw_deletes_word() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello world");
+        e.handle_key(key(KeyCode::Char('d')));
+        e.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+        assert!(!e.textarea.lines()[0].starts_with("hello"));
+    }
+
+    #[test]
+    fn vim_yy_yanks_line() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello\nworld");
+        e.handle_key(key(KeyCode::Char('y')));
+        e.handle_key(key(KeyCode::Char('y')));
+        assert!(e.last_yank.as_deref().unwrap_or("").starts_with("hello"));
+    }
+
+    #[test]
+    fn vim_yy_does_not_move_cursor() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("first\nsecond\nthird");
+        e.textarea.move_cursor(CursorMove::Down);
+        let before = e.textarea.cursor();
+        e.handle_key(key(KeyCode::Char('y')));
+        e.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(e.textarea.cursor(), before);
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+    }
+
+    #[test]
+    fn vim_yw_yanks_word() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello world");
+        e.handle_key(key(KeyCode::Char('y')));
+        e.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+        assert!(e.last_yank.is_some());
+    }
+
+    #[test]
+    fn vim_cc_changes_line() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello\nworld");
+        e.handle_key(key(KeyCode::Char('c')));
+        e.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+    }
+
+    #[test]
+    fn vim_u_undoes_insert_session_as_chunk() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        e.handle_key(key(KeyCode::Char('i')));
+        e.handle_key(key(KeyCode::Enter));
+        e.handle_key(key(KeyCode::Enter));
+        e.handle_key(key(KeyCode::Esc));
+        assert_eq!(e.textarea.lines().len(), 3);
+        e.handle_key(key(KeyCode::Char('u')));
+        assert_eq!(e.textarea.lines().len(), 1);
+        assert_eq!(e.textarea.lines()[0], "hello");
+    }
+
+    #[test]
+    fn vim_undo_redo_roundtrip() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        e.handle_key(key(KeyCode::Char('i')));
+        for c in "world".chars() {
+            e.handle_key(key(KeyCode::Char(c)));
+        }
+        e.handle_key(key(KeyCode::Esc));
+        let after = e.textarea.lines()[0].clone();
+        e.handle_key(key(KeyCode::Char('u')));
+        assert_eq!(e.textarea.lines()[0], "hello");
+        e.handle_key(ctrl_key(KeyCode::Char('r')));
+        assert_eq!(e.textarea.lines()[0], after);
+    }
+
+    #[test]
+    fn vim_u_undoes_dd() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("first\nsecond");
+        e.handle_key(key(KeyCode::Char('d')));
+        e.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(e.textarea.lines().len(), 1);
+        e.handle_key(key(KeyCode::Char('u')));
+        assert_eq!(e.textarea.lines().len(), 2);
+        assert_eq!(e.textarea.lines()[0], "first");
+    }
+
+    #[test]
+    fn vim_ctrl_r_redoes() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        e.handle_key(ctrl_key(KeyCode::Char('r')));
+    }
+
+    #[test]
+    fn vim_r_replaces_char() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        e.handle_key(key(KeyCode::Char('r')));
+        e.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(e.textarea.lines()[0].chars().next(), Some('x'));
+    }
+
+    #[test]
+    fn vim_tilde_toggles_case() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        e.handle_key(key(KeyCode::Char('~')));
+        assert_eq!(e.textarea.lines()[0].chars().next(), Some('H'));
+    }
+
+    #[test]
+    fn vim_visual_d_cuts() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        e.handle_key(key(KeyCode::Char('v')));
+        e.handle_key(key(KeyCode::Char('l')));
+        e.handle_key(key(KeyCode::Char('l')));
+        e.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+        assert!(e.last_yank.is_some());
+    }
+
+    #[test]
+    fn vim_visual_c_enters_insert() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        e.handle_key(key(KeyCode::Char('v')));
+        e.handle_key(key(KeyCode::Char('l')));
+        e.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+    }
+
+    #[test]
+    fn vim_normal_unknown_key_consumed() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        // Unknown keys are consumed (swallowed) rather than returning false.
+        let consumed = e.handle_key(key(KeyCode::Char('z')));
+        assert!(consumed);
+    }
+
+    #[test]
+    fn force_normal_clears_operator() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.handle_key(key(KeyCode::Char('d')));
+        e.force_normal();
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+    }
+}
