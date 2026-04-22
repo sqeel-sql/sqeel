@@ -489,23 +489,20 @@ async fn run_loop(
                 let before = &line[..col.min(line.len())];
                 before.chars().next_back()
             });
-            let hard_suppress =
-                matches!(char_left, Some(';')) || char_left.is_none();
+            let hard_suppress = matches!(char_left, Some(';')) || char_left.is_none();
 
             let prefix = word_prefix_at(editor.textarea.lines(), row, col);
             let byte_offset = row_col_to_byte(editor.textarea.lines(), row, col);
             let ctx = completion_ctx::parse_context(content, byte_offset);
 
             let whitespace_left = matches!(char_left, Some(c) if c.is_whitespace());
-            let suppress = hard_suppress
-                || (whitespace_left && matches!(ctx, CompletionCtx::Any));
+            let suppress = hard_suppress || (whitespace_left && matches!(ctx, CompletionCtx::Any));
 
             if suppress {
                 state.lock().unwrap().dismiss_completions();
                 last_completion_id = None;
                 last_completion_ctx = None;
             } else {
-
                 // Context-scoped pool (unfiltered) fed to the prefix-filter
                 // thread; empty prefix returns the full sorted pool.
                 let (pool, _) = {
