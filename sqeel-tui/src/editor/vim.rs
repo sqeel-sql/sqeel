@@ -82,15 +82,9 @@
 //!
 //! ## Known substrate / divergence notes
 //!
-//! - TODO: `w` vs `W` and `e` vs `E` currently share tui-textarea's
-//!   word motion (`WordForward` / `WordEnd` / `WordBack`). True
-//!   big-word (whitespace-delimited) semantics need a custom motion
-//!   pass that treats any run of non-whitespace as a single token.
-//! - TODO: insert-mode shortcuts — `Ctrl-w` (delete word back),
-//!   `Ctrl-u` (delete to line start), `Ctrl-t` / `Ctrl-d` (indent /
-//!   un-indent), `Ctrl-o` (one-shot normal command),
-//!   `Ctrl-r <reg>` (paste register). Needs the `RegisterBank` from
-//!   P3 to be useful.
+//! - TODO: insert-mode indent helpers — `Ctrl-t` / `Ctrl-d` (increase /
+//!   decrease indent on current line) and `Ctrl-r <reg>` (paste from a
+//!   register). `Ctrl-r` needs the `RegisterBank` from P3 to be useful.
 //! - TODO: `/` and `?` search prompts still live in `sqeel-tui/src/lib.rs`.
 //!   The plan calls for moving them into the editor (so the editor owns
 //!   `last_search_pattern` rather than the TUI loop). Safe to defer.
@@ -280,6 +274,9 @@ pub struct VimState {
     pub(super) yank_linewise: bool,
     /// Set while replaying `.` / last-change so we don't re-record it.
     replaying: bool,
+    /// Entered Normal from Insert via `Ctrl-o`; after the next complete
+    /// normal-mode command we return to Insert.
+    one_shot_normal: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -338,10 +335,23 @@ impl VimState {
 // ─── Entry point ───────────────────────────────────────────────────────────
 
 pub fn step(ed: &mut Editor<'_>, input: Input) -> bool {
-    match ed.vim.mode {
+    let was_insert = ed.vim.mode == Mode::Insert;
+    let consumed = match ed.vim.mode {
         Mode::Insert => step_insert(ed, input),
         _ => step_normal(ed, input),
+    };
+    // Ctrl-o in insert mode queues a single normal-mode command; once
+    // that command finishes (pending cleared, not in operator / visual),
+    // drop back to insert without replaying the insert session.
+    if !was_insert
+        && ed.vim.one_shot_normal
+        && ed.vim.mode == Mode::Normal
+        && matches!(ed.vim.pending, Pending::None)
+    {
+        ed.vim.one_shot_normal = false;
+        ed.vim.mode = Mode::Insert;
     }
+    consumed
 }
 
 // ─── Insert mode ───────────────────────────────────────────────────────────
@@ -358,6 +368,33 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
         }
         return true;
     }
+
+    // Ctrl-prefixed insert-mode shortcuts.
+    if input.ctrl {
+        match input.key {
+            Key::Char('w') => {
+                ed.mutate(|t| t.delete_word());
+                return true;
+            }
+            Key::Char('u') => {
+                ed.mutate(|t| t.delete_line_by_head());
+                return true;
+            }
+            Key::Char('h') => {
+                ed.mutate(|t| t.delete_char());
+                return true;
+            }
+            Key::Char('o') => {
+                // One-shot normal: leave insert mode for the next full
+                // normal-mode command, then come back.
+                ed.vim.one_shot_normal = true;
+                ed.vim.mode = Mode::Normal;
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     if ed.textarea.input(input) {
         ed.content_dirty = true;
     }
@@ -717,20 +754,32 @@ fn apply_motion_cursor(ed: &mut Editor<'_>, motion: &Motion, count: usize) {
                 ed.textarea.move_cursor(CursorMove::Down);
             }
         }
-        Motion::WordFwd | Motion::BigWordFwd => {
+        Motion::WordFwd => {
             for _ in 0..count {
                 ed.textarea.move_cursor(CursorMove::WordForward);
             }
         }
-        Motion::WordBack | Motion::BigWordBack => {
+        Motion::WordBack => {
             for _ in 0..count {
                 ed.textarea.move_cursor(CursorMove::WordBack);
             }
         }
-        Motion::WordEnd | Motion::BigWordEnd => {
+        Motion::WordEnd => {
             for _ in 0..count {
                 ed.textarea.move_cursor(CursorMove::WordEnd);
             }
+        }
+        Motion::BigWordFwd => {
+            let (r, c) = big_word_fwd(ed, count);
+            ed.textarea.move_cursor(CursorMove::Jump(r, c));
+        }
+        Motion::BigWordBack => {
+            let (r, c) = big_word_back(ed, count);
+            ed.textarea.move_cursor(CursorMove::Jump(r, c));
+        }
+        Motion::BigWordEnd => {
+            let (r, c) = big_word_end(ed, count);
+            ed.textarea.move_cursor(CursorMove::Jump(r, c));
         }
         Motion::LineStart => ed.textarea.move_cursor(CursorMove::Head),
         Motion::FirstNonBlank => move_first_non_whitespace(ed),
@@ -785,6 +834,134 @@ fn apply_motion_cursor(ed: &mut Editor<'_>, motion: &Motion, count: usize) {
             }
         }
     }
+}
+
+/// True when `(row, col)` lands on whitespace — including the synthetic
+/// "newline" position that sits at `col == chars().count()` for any row
+/// that is followed by another row.
+fn is_ws_at(lines: &[String], row: usize, col: usize) -> bool {
+    let Some(line) = lines.get(row) else {
+        return true;
+    };
+    let len = line.chars().count();
+    // End of line always counts as whitespace for traversal — either it's
+    // a literal newline (more rows follow) or the end of the buffer (so
+    // motions stop there). Either way we don't want WORD traversal to
+    // grab the sentinel position as part of a WORD.
+    if col >= len {
+        return true;
+    }
+    line.chars()
+        .nth(col)
+        .map(char::is_whitespace)
+        .unwrap_or(true)
+}
+
+/// Advance one character forward, crossing into the next row when we
+/// pass end of the current one. Returns false when we hit end-of-buffer.
+fn step_forward(lines: &[String], row: &mut usize, col: &mut usize) -> bool {
+    let len = lines[*row].chars().count();
+    if *col < len {
+        *col += 1;
+        true
+    } else if *row + 1 < lines.len() {
+        *row += 1;
+        *col = 0;
+        true
+    } else {
+        false
+    }
+}
+
+/// Step one character backward, wrapping to the previous row's trailing
+/// "newline" position. Returns false at (0, 0).
+fn step_back(lines: &[String], row: &mut usize, col: &mut usize) -> bool {
+    if *col > 0 {
+        *col -= 1;
+        true
+    } else if *row > 0 {
+        *row -= 1;
+        *col = lines[*row].chars().count();
+        true
+    } else {
+        false
+    }
+}
+
+/// `W` — WORD forward. A WORD is a maximal run of non-whitespace chars
+/// (so `foo-bar` is one WORD, unlike `w` which stops at the `-`).
+fn big_word_fwd(ed: &Editor<'_>, count: usize) -> (usize, usize) {
+    let lines = ed.textarea.lines();
+    let (mut row, mut col) = ed.textarea.cursor();
+    for _ in 0..count.max(1) {
+        while !is_ws_at(lines, row, col) {
+            if !step_forward(lines, &mut row, &mut col) {
+                return (row, col);
+            }
+        }
+        while is_ws_at(lines, row, col) {
+            if !step_forward(lines, &mut row, &mut col) {
+                return (row, col);
+            }
+        }
+    }
+    (row, col)
+}
+
+/// `B` — WORD back.
+fn big_word_back(ed: &Editor<'_>, count: usize) -> (usize, usize) {
+    let lines = ed.textarea.lines();
+    let (mut row, mut col) = ed.textarea.cursor();
+    for _ in 0..count.max(1) {
+        if !step_back(lines, &mut row, &mut col) {
+            return (row, col);
+        }
+        while is_ws_at(lines, row, col) {
+            if !step_back(lines, &mut row, &mut col) {
+                return (row, col);
+            }
+        }
+        loop {
+            let (mut tr, mut tc) = (row, col);
+            if !step_back(lines, &mut tr, &mut tc) {
+                break;
+            }
+            if is_ws_at(lines, tr, tc) {
+                break;
+            }
+            row = tr;
+            col = tc;
+        }
+    }
+    (row, col)
+}
+
+/// `E` — WORD end.
+fn big_word_end(ed: &Editor<'_>, count: usize) -> (usize, usize) {
+    let lines = ed.textarea.lines();
+    let (mut row, mut col) = ed.textarea.cursor();
+    for _ in 0..count.max(1) {
+        if !step_forward(lines, &mut row, &mut col) {
+            return (row, col);
+        }
+        while is_ws_at(lines, row, col) {
+            if !step_forward(lines, &mut row, &mut col) {
+                return (row, col);
+            }
+        }
+        loop {
+            let (mut tr, mut tc) = (row, col);
+            if !step_forward(lines, &mut tr, &mut tc) {
+                return (row, col);
+            }
+            if is_ws_at(lines, tr, tc) {
+                break;
+            }
+            row = tr;
+            col = tc;
+        }
+    }
+    (row, col)
 }
 
 fn move_first_non_whitespace(ed: &mut Editor<'_>) {
@@ -2977,6 +3154,90 @@ mod tests {
     }
 
     // ─── Scrolling ────────────────────────────────────────────────────────
+
+    // ─── WORD motions (W/B/E) ─────────────────────────────────────────────
+
+    #[test]
+    fn big_w_skips_hyphens() {
+        // `w` stops at `-`; `W` treats the whole `foo-bar` as one WORD.
+        let mut e = editor_with("foo-bar baz");
+        run_keys(&mut e, "W");
+        assert_eq!(e.textarea.cursor().1, 8);
+    }
+
+    #[test]
+    fn big_w_crosses_lines() {
+        let mut e = editor_with("foo-bar\nbaz-qux");
+        run_keys(&mut e, "W");
+        assert_eq!(e.textarea.cursor(), (1, 0));
+    }
+
+    #[test]
+    fn big_b_skips_hyphens() {
+        let mut e = editor_with("foo-bar baz");
+        e.textarea.move_cursor(CursorMove::Jump(0, 9));
+        run_keys(&mut e, "B");
+        assert_eq!(e.textarea.cursor().1, 8);
+        run_keys(&mut e, "B");
+        assert_eq!(e.textarea.cursor().1, 0);
+    }
+
+    #[test]
+    fn big_e_jumps_to_big_word_end() {
+        let mut e = editor_with("foo-bar baz");
+        run_keys(&mut e, "E");
+        assert_eq!(e.textarea.cursor().1, 6);
+        run_keys(&mut e, "E");
+        assert_eq!(e.textarea.cursor().1, 10);
+    }
+
+    #[test]
+    fn dw_with_big_word_variant() {
+        // `dW` uses the WORD motion, so `foo-bar` deletes as a unit.
+        let mut e = editor_with("foo-bar baz");
+        run_keys(&mut e, "dW");
+        assert_eq!(e.textarea.lines()[0], "baz");
+    }
+
+    // ─── Insert-mode Ctrl shortcuts ──────────────────────────────────────
+
+    #[test]
+    fn insert_ctrl_w_deletes_word_back() {
+        let mut e = editor_with("");
+        run_keys(&mut e, "i");
+        for c in "hello world".chars() {
+            e.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        run_keys(&mut e, "<C-w>");
+        assert_eq!(e.textarea.lines()[0], "hello ");
+    }
+
+    #[test]
+    fn insert_ctrl_u_deletes_to_line_start() {
+        let mut e = editor_with("");
+        run_keys(&mut e, "i");
+        for c in "hello world".chars() {
+            e.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        run_keys(&mut e, "<C-u>");
+        assert_eq!(e.textarea.lines()[0], "");
+    }
+
+    #[test]
+    fn insert_ctrl_o_runs_one_normal_command() {
+        let mut e = editor_with("hello world");
+        // Enter insert, then Ctrl-o dw (delete a word while in insert).
+        run_keys(&mut e, "A");
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+        // Move cursor back to start of "hello" for the Ctrl-o dw.
+        e.textarea.move_cursor(CursorMove::Jump(0, 0));
+        run_keys(&mut e, "<C-o>");
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+        run_keys(&mut e, "dw");
+        // After the command completes, back in insert.
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+        assert_eq!(e.textarea.lines()[0], "world");
+    }
 
     #[test]
     fn ctrl_scroll_keys_do_not_panic() {
