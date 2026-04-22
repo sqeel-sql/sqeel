@@ -423,7 +423,7 @@ fn spawn_executor(
             let db = Arc::clone(db);
             table_set.spawn(async move {
                 let _permit = permit;
-                let r = conn.list_tables(&db).await;
+                let r = retry_once(|| conn.list_tables(&db)).await;
                 (db, r)
             });
         }
@@ -458,7 +458,8 @@ fn spawn_executor(
                 let db = Arc::clone(&db_name);
                 column_set.spawn(async move {
                     let _permit = permit;
-                    let col_nodes = match conn.list_columns(&db, &table_name).await {
+                    let col_nodes = match retry_once(|| conn.list_columns(&db, &table_name)).await
+                    {
                         Ok(cols) => cols
                             .into_iter()
                             .map(|c| SchemaNode::Column {
@@ -611,6 +612,22 @@ fn spawn_executor(
             }
         }
     });
+}
+
+/// Retry an async DB call once after a short delay on failure. Covers transient
+/// network blips and connection-pool flakes without masking real schema errors.
+async fn retry_once<T, Fut, F>(mut f: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    match f().await {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            f().await
+        }
+    }
 }
 
 /// Snapshot the current schema tree and persist it to disk. Cheap enough to
