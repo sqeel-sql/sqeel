@@ -2754,6 +2754,35 @@ fn draw_editor(
     } else {
         let _ = editor.textarea.set_search_pattern("");
     }
+
+    // Visual-block mode: paint the rectangle as syntax spans since
+    // tui-textarea's real selection can only cover a single char range.
+    // We rebuild the per-row span table from state.highlight_spans so
+    // leaving block mode cleanly drops the overlay on the next draw.
+    if let Some((top, bot, left, right)) = editor.block_highlight() {
+        let row_count = editor.textarea.lines().len();
+        let mut by_row = syntax_spans_by_row(&state.highlight_spans, row_count);
+        let block_style = Style::default()
+            .bg(ui().editor_search_bg)
+            .fg(ui().editor_search_fg);
+        let lines_snapshot: Vec<String> = editor.textarea.lines().to_vec();
+        for (r, line) in lines_snapshot.iter().enumerate().take(bot + 1).skip(top) {
+            let line_len = line.chars().count();
+            let start = left.min(line_len);
+            let end = (right + 1).min(line_len.max(1));
+            let end = end.max(start + 1).min(line_len.max(start + 1));
+            if start < line_len {
+                by_row[r].push((start, end, block_style));
+            } else {
+                // Block extends past end of line — paint a single-cell
+                // strip at the line's end so the user sees the column
+                // corner even when no text sits there.
+                by_row[r].push((line_len, line_len + 1, block_style));
+            }
+        }
+        editor.textarea.set_syntax_spans(by_row);
+    }
+
     f.render_widget(&editor.textarea, chunks[1]);
 
     if let Some(msg) = diag_line {

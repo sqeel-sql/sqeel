@@ -90,6 +90,22 @@ impl<'a> Editor<'a> {
         self.vim.public_mode()
     }
 
+    /// Bounds of the active visual-block rectangle as
+    /// `(top_row, bot_row, left_col, right_col)` — all inclusive.
+    /// `None` when we're not in VisualBlock mode.
+    pub fn block_highlight(&self) -> Option<(usize, usize, usize, usize)> {
+        if self.vim_mode() != VimMode::VisualBlock {
+            return None;
+        }
+        let (ar, ac) = self.vim.block_anchor;
+        let (cr, cc) = self.textarea.cursor();
+        let top = ar.min(cr);
+        let bot = ar.max(cr);
+        let left = ac.min(cc);
+        let right = ac.max(cc);
+        Some((top, bot, left, right))
+    }
+
     /// Force back to normal mode (used when dismissing completions etc.)
     pub fn force_normal(&mut self) {
         self.textarea.cancel_selection();
