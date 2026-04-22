@@ -579,7 +579,7 @@ async fn run_loop(
                             y: mouse.row,
                         };
                         if last_draw_areas.tab_bar.contains(pos) {
-                            // Click on tab bar — determine which tab
+                            // Click on editor tab bar — determine which tab
                             let rel_x =
                                 mouse.column.saturating_sub(last_draw_areas.tab_bar.x) as usize;
                             let clicked = {
@@ -611,6 +611,32 @@ async fn run_loop(
                                 }
                             } else {
                                 state.lock().unwrap().focus = Focus::Editor;
+                            }
+                            mouse_select_start = None;
+                            mouse_did_drag = false;
+                        } else if let Some(rtb) = last_draw_areas.results_tab_bar
+                            && rtb.contains(pos)
+                        {
+                            // Click on results tab bar — select tab and focus results
+                            let rel_x = mouse.column.saturating_sub(rtb.x) as usize;
+                            let clicked = {
+                                let s = state.lock().unwrap();
+                                let mut offset = 0usize;
+                                let mut found = None;
+                                for (i, _tab) in s.result_tabs.iter().enumerate() {
+                                    let w = 3 + if i + 1 < s.result_tabs.len() { 1 } else { 0 };
+                                    if rel_x < offset + w {
+                                        found = Some(i);
+                                        break;
+                                    }
+                                    offset += w;
+                                }
+                                found
+                            };
+                            if let Some(idx) = clicked {
+                                let mut s = state.lock().unwrap();
+                                s.active_result_tab = idx;
+                                s.focus = Focus::Results;
                             }
                             mouse_select_start = None;
                             mouse_did_drag = false;
@@ -1629,6 +1655,7 @@ struct DrawAreas {
     editor: Rect,
     tab_bar: Rect,
     results: Option<Rect>,
+    results_tab_bar: Option<Rect>,
     cursor_shape: CursorShape,
 }
 
@@ -1723,6 +1750,21 @@ fn draw(
         width: right_chunks[0].width,
         height: 1,
     };
+    let results_tab_bar = if show_results {
+        let results_area = right_chunks[1];
+        if state.result_tabs.len() > 1 && results_area.height > 1 {
+            Some(Rect {
+                x: results_area.x + 1,
+                y: results_area.y,
+                width: results_area.width.saturating_sub(2),
+                height: 1,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut areas = DrawAreas {
         schema: outer[0],
         schema_list_area,
@@ -1736,6 +1778,7 @@ fn draw(
         } else {
             None
         },
+        results_tab_bar,
         cursor_shape: CursorShape::Hidden,
     };
 
