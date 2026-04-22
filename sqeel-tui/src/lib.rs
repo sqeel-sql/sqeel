@@ -2880,6 +2880,61 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
             } else {
                 Style::default().fg(ui().results_title_inactive)
             };
+
+            let query_text = state
+                .active_result()
+                .map(|t| t.query.clone())
+                .unwrap_or_default();
+
+            // `SHOW CREATE TABLE/VIEW/...` returns a single row whose last
+            // column holds the DDL. Render that as a syntax-highlighted block
+            // instead of a 1x2 table, which is unreadable.
+            if is_show_create(&query_text)
+                && r.rows.len() == 1
+                && r.columns.len() >= 2
+                && let Some(ddl) = r.rows[0].last()
+            {
+                let sep_style = Style::default().fg(ui().results_sep);
+                let title = if state.result_tabs.len() > 1 {
+                    format!(
+                        " Results ({}/{} • DDL)",
+                        state.active_result_tab + 1,
+                        state.result_tabs.len()
+                    )
+                } else {
+                    " Results (DDL)".to_string()
+                };
+                let query_line = highlight_query_line(&query_text);
+                let body_lines = highlight_sql_lines(ddl);
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Min(0),
+                    ])
+                    .split(content_area);
+                let hr: String = "─".repeat(content_area.width as usize);
+                f.render_widget(Paragraph::new(hr.clone()).style(sep_style), chunks[0]);
+                f.render_widget(Paragraph::new(title).style(title_style), chunks[1]);
+                f.render_widget(Paragraph::new(hr.clone()).style(sep_style), chunks[2]);
+                f.render_widget(Paragraph::new(query_line), chunks[3]);
+                f.render_widget(Paragraph::new(hr).style(sep_style), chunks[4]);
+                let body_area = chunks[5];
+                state
+                    .results_body_rows
+                    .store(body_area.height, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .results_body_width
+                    .store(body_area.width, std::sync::atomic::Ordering::Relaxed);
+                let scroll = state.results_scroll().min(body_lines.len()) as u16;
+                f.render_widget(Paragraph::new(body_lines).scroll((scroll, 0)), body_area);
+                return;
+            }
+
             let title = if state.result_tabs.len() > 1 {
                 format!(
                     " Results ({}/{} • {} rows)",
@@ -2974,10 +3029,6 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
                 .map(|(i, row)| build_row(i, row))
                 .collect();
 
-            let query_text = state
-                .active_result()
-                .map(|t| t.query.clone())
-                .unwrap_or_default();
             let mut query_line = highlight_query_line(&query_text);
             if cursor == Some(ResultsCursor::Query) {
                 let qbg = results_cursor_bg(focused);
@@ -3260,6 +3311,85 @@ fn results_tab_bar(state: &AppState) -> Line<'static> {
 /// Newlines in the source are collapsed to spaces. Byte offsets from the
 /// highlighter refer to the original (multiline) source — we remap them onto
 /// the flattened string so spans stay aligned.
+/// Render `source` as syntax-highlighted lines. Spans crossing line breaks
+/// are split per row. Shared tree-sitter parser kept in TLS (same pattern as
+/// `highlight_query_line`).
+fn highlight_sql_lines(source: &str) -> Vec<Line<'static>> {
+    use std::cell::RefCell;
+    thread_local! {
+        static HL: RefCell<Option<Highlighter>> = const { RefCell::new(None) };
+    }
+
+    let spans = HL.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none()
+            && let Ok(h) = Highlighter::new()
+        {
+            *slot = Some(h);
+        }
+        slot.as_mut()
+            .map(|h| h.highlight(source))
+            .unwrap_or_default()
+    });
+
+    let bytes = source.as_bytes();
+    let plain = Style::default().fg(ui().sql_plain);
+
+    // Byte range of each line (without the trailing newline).
+    let mut line_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            line_ranges.push((start, i));
+            start = i + 1;
+        }
+    }
+    line_ranges.push((start, bytes.len()));
+
+    line_ranges
+        .iter()
+        .map(|&(ls, le)| {
+            let mut out: Vec<Span<'static>> = Vec::new();
+            let mut cursor = ls;
+            for s in &spans {
+                let sb = s.start_byte.max(ls);
+                let eb = s.end_byte.min(le);
+                if sb >= eb {
+                    continue;
+                }
+                if sb > cursor
+                    && let Ok(raw) = std::str::from_utf8(&bytes[cursor..sb])
+                {
+                    out.push(Span::styled(raw.to_string(), plain));
+                }
+                if let Ok(raw) = std::str::from_utf8(&bytes[sb..eb]) {
+                    let style = token_kind_style(s.kind).unwrap_or(plain);
+                    out.push(Span::styled(raw.to_string(), style));
+                }
+                cursor = eb;
+            }
+            if cursor < le
+                && let Ok(raw) = std::str::from_utf8(&bytes[cursor..le])
+            {
+                out.push(Span::styled(raw.to_string(), plain));
+            }
+            if out.is_empty() {
+                Line::from(Span::raw(""))
+            } else {
+                Line::from(out)
+            }
+        })
+        .collect()
+}
+
+/// True when `query` is a `SHOW CREATE ...` statement. Leading whitespace and
+/// SQL comments are stripped before matching.
+fn is_show_create(query: &str) -> bool {
+    let stripped = sqeel_core::highlight::strip_sql_comments(query);
+    let trimmed = stripped.trim_start();
+    trimmed.len() >= 11 && trimmed[..11].eq_ignore_ascii_case("show create")
+}
+
 fn highlight_query_line(query: &str) -> Line<'static> {
     use std::cell::RefCell;
     thread_local! {
