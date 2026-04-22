@@ -32,8 +32,8 @@ use sqeel_core::{
     AppState, UiProvider,
     config::load_main_config,
     highlight::{
-        HighlightSpan, TokenKind, first_syntax_error, statement_at_byte, statement_ranges,
-        strip_sql_comments,
+        HighlightSpan, Highlighter, TokenKind, first_syntax_error, statement_at_byte,
+        statement_ranges, strip_sql_comments,
     },
     lsp::{LspClient, LspEvent},
     schema::{self, SchemaTreeItem},
@@ -2594,12 +2594,9 @@ fn draw_results(
 
             let query_text = state
                 .active_result()
-                .map(|t| t.query.replace('\n', " "))
+                .map(|t| t.query.clone())
                 .unwrap_or_default();
-            let query_line = Line::from(vec![
-                Span::styled("› ", Style::default().fg(Color::DarkGray)),
-                Span::styled(query_text, Style::default().fg(Color::Gray)),
-            ]);
+            let query_line = highlight_query_line(&query_text);
 
             // Split content_area: title (1) + query (1) + header (1) + hr (1) + body (rest).
             let chunks = Layout::default()
@@ -2755,6 +2752,65 @@ fn results_tab_bar(state: &AppState) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+/// Build a syntax-highlighted single-line Line for the results-pane query row.
+/// Newlines in the source are collapsed to spaces. Byte offsets from the
+/// highlighter refer to the original (multiline) source — we remap them onto
+/// the flattened string so spans stay aligned.
+fn highlight_query_line(query: &str) -> Line<'static> {
+    use std::cell::RefCell;
+    thread_local! {
+        static HL: RefCell<Option<Highlighter>> = const { RefCell::new(None) };
+    }
+
+    if query.is_empty() {
+        return Line::from(vec![Span::styled(
+            "› ",
+            Style::default().fg(Color::DarkGray),
+        )]);
+    }
+
+    let spans = HL.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none()
+            && let Ok(h) = Highlighter::new()
+        {
+            *slot = Some(h);
+        }
+        slot.as_mut()
+            .map(|h| h.highlight(query))
+            .unwrap_or_default()
+    });
+
+    let bytes = query.as_bytes();
+    let mut out: Vec<Span<'static>> =
+        vec![Span::styled("› ", Style::default().fg(Color::DarkGray))];
+    let plain = Style::default().fg(Color::Gray);
+    let mut cursor = 0usize;
+    let flatten = |b: &[u8]| -> String {
+        std::str::from_utf8(b)
+            .unwrap_or("")
+            .replace('\n', " ")
+            .replace('\r', " ")
+    };
+
+    for s in &spans {
+        if s.start_byte >= bytes.len() || s.end_byte > bytes.len() || s.start_byte >= s.end_byte {
+            continue;
+        }
+        if s.start_byte > cursor {
+            out.push(Span::styled(flatten(&bytes[cursor..s.start_byte]), plain));
+        }
+        let slice = flatten(&bytes[s.start_byte..s.end_byte]);
+        let style = token_kind_style(s.kind).unwrap_or(plain);
+        out.push(Span::styled(slice, style));
+        cursor = s.end_byte;
+    }
+    if cursor < bytes.len() {
+        out.push(Span::styled(flatten(&bytes[cursor..]), plain));
+    }
+    Line::from(out)
 }
 
 fn token_kind_style(kind: TokenKind) -> Option<Style> {
