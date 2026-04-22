@@ -6,8 +6,19 @@ mod theme;
 
 use clipboard::Clipboard;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+const SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+
+/// Wall-clock spinner frame. Uses a monotonic epoch so the frame advances at a
+/// steady ~8 Hz regardless of how often the TUI redraws.
+fn spinner_frame() -> &'static str {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let start = *EPOCH.get_or_init(Instant::now);
+    let idx = (start.elapsed().as_millis() / 120) as usize % SPINNER_FRAMES.len();
+    SPINNER_FRAMES[idx]
+}
 
 use completion_thread::CompletionThread;
 use crossterm::{
@@ -339,7 +350,6 @@ async fn run_loop(
     let mut doc_version: i32 = 0;
     let mut last_completion_id: Option<i64> = None;
     let mut last_schema_completions: Vec<String> = Vec::new();
-    let mut tick: u32 = 0;
     let mut command_input: Option<TextInput> = None;
     let mut rename_input: Option<TextInput> = None;
     let mut file_picker: Option<FilePicker> = None;
@@ -544,8 +554,6 @@ async fn run_loop(
         }
 
         if needs_redraw {
-            tick = tick.wrapping_add(1);
-            let tick_snap = tick;
             let cmd_snap = command_input.clone();
             let rename_snap = rename_input.clone();
             let picker_snap = file_picker.clone();
@@ -565,7 +573,6 @@ async fn run_loop(
                     f,
                     &s,
                     &mut editor,
-                    tick_snap,
                     cmd_snap.as_ref(),
                     rename_snap.as_ref(),
                     picker_snap.as_ref(),
@@ -1824,7 +1831,6 @@ fn draw(
     f: &mut ratatui::Frame<'_>,
     state: &AppState,
     editor: &mut Editor,
-    tick: u32,
     command_input: Option<&TextInput>,
     rename_input: Option<&TextInput>,
     file_picker: Option<&FilePicker>,
@@ -1888,7 +1894,7 @@ fn draw(
         schema_list_count,
         schema_list_filtered,
         schema_search_cursor,
-    ) = draw_schema(f, state, outer[0], schema_focused, tick, schema_search);
+    ) = draw_schema(f, state, outer[0], schema_focused, schema_search);
 
     let show_results = state.has_results();
     let editor_pct = (state.editor_ratio * 100.0) as u16;
@@ -1960,7 +1966,7 @@ fn draw(
     );
 
     if show_results {
-        draw_results(f, state, right_chunks[1], results_focused, tick);
+        draw_results(f, state, right_chunks[1], results_focused);
     }
 
     // Completion popup (overlay)
@@ -2379,14 +2385,12 @@ fn draw_schema(
     state: &AppState,
     area: Rect,
     focused: bool,
-    tick: u32,
     search: &SchemaSearch,
 ) -> (Rect, usize, usize, bool, Option<(u16, u16)>) {
     let searching = search.focused;
     let search_cursor = search.cursor;
-    const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
     let title = if state.schema_loading {
-        let spin = SPINNER[(tick as usize) % SPINNER.len()];
+        let spin = spinner_frame();
         if state.schema_loading_total > 0 {
             format!(
                 "Explorer {spin} {}/{}",
@@ -2656,13 +2660,7 @@ fn build_tab_title(state: &AppState) -> Line<'_> {
     Line::from(spans)
 }
 
-fn draw_results(
-    f: &mut ratatui::Frame<'_>,
-    state: &AppState,
-    area: Rect,
-    focused: bool,
-    tick: u32,
-) {
+fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool) {
     // Fill pane background (full area), then inset content by 1 on all sides.
     f.render_widget(
         Block::default().style(Style::default().bg(ui().results_pane_bg)),
@@ -2884,8 +2882,7 @@ fn draw_results(
             );
         }
         ResultsPane::Loading => {
-            const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
-            let frame = SPINNER[(tick as usize) % SPINNER.len()];
+            let frame = spinner_frame();
             let title_text = render_pos_title(state, "Result");
             let body = vec![Line::from(Span::styled(
                 format!(" {} Running query…", frame),
