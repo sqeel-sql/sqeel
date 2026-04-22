@@ -188,7 +188,9 @@ pub fn filter_items<'a>(all: &'a [SchemaTreeItem], query: &str) -> Vec<&'a Schem
             needed.insert(item.node_path[..len].to_vec());
         }
     }
-    all.iter().filter(|it| needed.contains(&it.node_path)).collect()
+    all.iter()
+        .filter(|it| needed.contains(&it.node_path))
+        .collect()
 }
 
 /// Copy `expanded` flags from `old` into `new` by matching node names at each level.
@@ -266,7 +268,7 @@ pub fn find_cursor_by_path(
 
 /// Expand all ancestor nodes needed so the item at `path_str` becomes visible.
 /// E.g. for `"mydb/users/id"` this expands the `mydb` database and the `users` table.
-pub fn expand_path(nodes: &mut Vec<SchemaNode>, path_str: &str) {
+pub fn expand_path(nodes: &mut [SchemaNode], path_str: &str) {
     let parts: Vec<&str> = path_str.splitn(3, '/').collect();
     // Need to expand: Database for parts[0] (when parts.len() >= 2),
     // and Table for parts[1] inside that db (when parts.len() >= 3).
@@ -279,23 +281,25 @@ pub fn expand_path(nodes: &mut Vec<SchemaNode>, path_str: &str) {
             expanded,
             tables,
         } = node
-            && name == parts[0] {
-                *expanded = true;
-                if parts.len() >= 3 {
-                    for table in tables.iter_mut() {
-                        if let SchemaNode::Table {
-                            name: tname,
-                            expanded: texpanded,
-                            ..
-                        } = table
-                            && tname == parts[1] {
-                                *texpanded = true;
-                                break;
-                            }
+            && name == parts[0]
+        {
+            *expanded = true;
+            if parts.len() >= 3 {
+                for table in tables.iter_mut() {
+                    if let SchemaNode::Table {
+                        name: tname,
+                        expanded: texpanded,
+                        ..
+                    } = table
+                        && tname == parts[1]
+                    {
+                        *texpanded = true;
+                        break;
                     }
                 }
-                break;
             }
+            break;
+        }
     }
 }
 
@@ -326,7 +330,7 @@ pub fn collect_expanded_paths(nodes: &[SchemaNode]) -> Vec<String> {
 }
 
 /// Expand the nodes named by each path string (inverse of `collect_expanded_paths`).
-pub fn restore_expanded_paths(nodes: &mut Vec<SchemaNode>, paths: &[String]) {
+pub fn restore_expanded_paths(nodes: &mut [SchemaNode], paths: &[String]) {
     for path in paths {
         let parts: Vec<&str> = path.splitn(2, '/').collect();
         match parts.as_slice() {

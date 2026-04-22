@@ -54,9 +54,15 @@ impl SchemaSearch {
             cursor: 0,
         }
     }
-    fn query(&self) -> Option<&str> { self.query.as_ref().map(|q| q.text.as_str()) }
-    fn is_filtering(&self) -> bool { self.query().is_some_and(|q| !q.is_empty()) }
-    fn clear(&mut self) { *self = Self::default(); }
+    fn query(&self) -> Option<&str> {
+        self.query.as_ref().map(|q| q.text.as_str())
+    }
+    fn is_filtering(&self) -> bool {
+        self.query().is_some_and(|q| !q.is_empty())
+    }
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
     fn start(&mut self) {
         if self.query.is_none() {
             self.query = Some(TextInput::default());
@@ -83,7 +89,9 @@ impl SchemaSearch {
         let max = list_len.saturating_sub(1);
         self.cursor = (self.cursor + 1).min(max);
     }
-    fn cursor_up(&mut self) { self.cursor = self.cursor.saturating_sub(1); }
+    fn cursor_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
 }
 
 /// Single-line text input with caret movement. Used by every modal/dialog text
@@ -98,7 +106,10 @@ struct TextInput {
 
 impl TextInput {
     fn from_str(s: &str) -> Self {
-        Self { text: s.to_string(), cursor: s.chars().count() }
+        Self {
+            text: s.to_string(),
+            cursor: s.chars().count(),
+        }
     }
     fn char_count(&self) -> usize {
         self.text.chars().count()
@@ -150,12 +161,30 @@ impl TextInput {
     /// Char insertion is handled by the caller so it can layer chord logic.
     fn handle_nav(&mut self, code: KeyCode) -> bool {
         match code {
-            KeyCode::Left => { self.left(); true }
-            KeyCode::Right => { self.right(); true }
-            KeyCode::Home => { self.home(); true }
-            KeyCode::End => { self.end(); true }
-            KeyCode::Backspace => { self.backspace(); true }
-            KeyCode::Delete => { self.delete(); true }
+            KeyCode::Left => {
+                self.left();
+                true
+            }
+            KeyCode::Right => {
+                self.right();
+                true
+            }
+            KeyCode::Home => {
+                self.home();
+                true
+            }
+            KeyCode::End => {
+                self.end();
+                true
+            }
+            KeyCode::Backspace => {
+                self.backspace();
+                true
+            }
+            KeyCode::Delete => {
+                self.delete();
+                true
+            }
             _ => false,
         }
     }
@@ -292,7 +321,8 @@ async fn run_loop(
     let mut rename_input: Option<TextInput> = None;
     let mut file_picker: Option<FilePicker> = None;
     let mut delete_confirm: Option<String> = None;
-    let mut schema_search = SchemaSearch::from_initial(state.lock().unwrap().schema_search_query.clone());
+    let mut schema_search =
+        SchemaSearch::from_initial(state.lock().unwrap().schema_search_query.clone());
     let mut editor_search: Option<TextInput> = None;
     let mut last_editor_search: Option<String> = None;
 
@@ -324,12 +354,12 @@ async fn run_loop(
         }
 
         // Detect terminal size changes that don't produce Event::Resize (e.g. fullscreen toggle).
-        if let Ok(size) = terminal.size() {
-            if size != last_terminal_size {
-                last_terminal_size = size;
-                terminal.autoresize()?;
-                needs_redraw = true;
-            }
+        if let Ok(size) = terminal.size()
+            && size != last_terminal_size
+        {
+            last_terminal_size = size;
+            terminal.autoresize()?;
+            needs_redraw = true;
         }
 
         // Drain pending tab content (set when connection loads or tab switches)
@@ -601,7 +631,8 @@ async fn run_loop(
                                     let idx = rel + last_draw_areas.schema_list_offset;
                                     if last_draw_areas.schema_list_filtered {
                                         let query = schema_search.query().unwrap_or("");
-                                        let filtered = schema::filter_items(s.all_schema_items(), query);
+                                        let filtered =
+                                            schema::filter_items(s.all_schema_items(), query);
                                         if idx < filtered.len() {
                                             schema_search.cursor = idx;
                                             schema_search.focused = false;
@@ -623,11 +654,7 @@ async fn run_loop(
                             }
                             drop(s);
                             if pane == Focus::Editor {
-                                editor.mouse_click(
-                                    last_draw_areas.editor,
-                                    mouse.column,
-                                    mouse.row,
-                                );
+                                editor.mouse_click(last_draw_areas.editor, mouse.column, mouse.row);
                             }
                             mouse_select_start = Some((mouse.column, mouse.row));
                             mouse_drag_pane = Some(pane);
@@ -678,7 +705,8 @@ async fn run_loop(
                                     schema_search.focused = false;
                                     if schema_search.is_filtering() {
                                         for _ in 0..mouse_scroll_lines {
-                                            schema_search.cursor_down(last_draw_areas.schema_list_count);
+                                            schema_search
+                                                .cursor_down(last_draw_areas.schema_list_count);
                                         }
                                     } else {
                                         for _ in 0..mouse_scroll_lines {
@@ -820,8 +848,7 @@ async fn run_loop(
                             }
                             KeyCode::Char('d') => {
                                 let s = state.lock().unwrap();
-                                if let Some(name) =
-                                    s.tabs.get(s.active_tab).map(|t| t.name.clone())
+                                if let Some(name) = s.tabs.get(s.active_tab).map(|t| t.name.clone())
                                 {
                                     drop(s);
                                     delete_confirm = Some(name);
@@ -963,7 +990,9 @@ async fn run_loop(
                             picker.query.insert_char(c);
                             picker.cursor = 0;
                         }
-                        (mods, code) if mods == KeyModifiers::NONE && picker.query.handle_nav(code) => {
+                        (mods, code)
+                            if mods == KeyModifiers::NONE && picker.query.handle_nav(code) =>
+                        {
                             picker.cursor = 0;
                         }
                         _ => {}
@@ -1064,10 +1093,7 @@ async fn run_loop(
                 // ── Help overlay ─────────────────────────────────────────────────
                 if show_help {
                     match (key.modifiers, key.code) {
-                        (
-                            KeyModifiers::NONE,
-                            KeyCode::Esc,
-                        ) => {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
                             state.lock().unwrap().close_help();
                         }
                         (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
@@ -1531,12 +1557,17 @@ fn draw(
     let results_focused = state.focus == Focus::Results;
 
     // Schema panel
-    let (schema_list_area, schema_list_offset, schema_list_count, schema_list_filtered, schema_search_cursor) =
-        if state.sidebar_visible {
-            draw_schema(f, state, outer[0], schema_focused, tick, schema_search)
-        } else {
-            (Rect::default(), 0, 0, false, None)
-        };
+    let (
+        schema_list_area,
+        schema_list_offset,
+        schema_list_count,
+        schema_list_filtered,
+        schema_search_cursor,
+    ) = if state.sidebar_visible {
+        draw_schema(f, state, outer[0], schema_focused, tick, schema_search)
+    } else {
+        (Rect::default(), 0, 0, false, None)
+    };
 
     let show_results = !matches!(state.results, ResultsPane::Empty);
     let editor_pct = (state.editor_ratio * 100.0) as u16;
@@ -1983,7 +2014,10 @@ fn draw_schema(
         area,
     );
 
-    let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
 
     // Search box is always visible (3 rows: border+input+border), list below
     let chunks = Layout::default()
@@ -2000,7 +2034,10 @@ fn draw_schema(
     // The magnifier emoji is 2 cells wide; total prefix width = 3 cells.
     let prefix_cells: u16 = 3;
     let search_cursor_pos = if searching {
-        Some((chunks[0].x + 1 + prefix_cells + text_cursor as u16, chunks[0].y + 1))
+        Some((
+            chunks[0].x + 1 + prefix_cells + text_cursor as u16,
+            chunks[0].y + 1,
+        ))
     } else {
         None
     };
@@ -2063,21 +2100,21 @@ fn draw_schema(
     let (highlight_style, selected) = if searching {
         (Style::default(), None)
     } else if focused {
-        (
-            Style::default().bg(Color::Rgb(40, 40, 45)),
-            Some(cursor),
-        )
+        (Style::default().bg(Color::Rgb(40, 40, 45)), Some(cursor))
     } else {
-        (
-            Style::default().bg(Color::Rgb(30, 32, 48)),
-            Some(cursor),
-        )
+        (Style::default().bg(Color::Rgb(30, 32, 48)), Some(cursor))
     };
 
     let list = List::new(list_items).highlight_style(highlight_style);
     let mut list_state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, list_area, &mut list_state);
-    (list_area, list_state.offset(), item_count, has_filter, search_cursor_pos)
+    (
+        list_area,
+        list_state.offset(),
+        item_count,
+        has_filter,
+        search_cursor_pos,
+    )
 }
 
 fn draw_editor(
@@ -2097,14 +2134,22 @@ fn draw_editor(
 
     // Tab bar sits flush at the top (full-width, no padding); the remaining
     // content below is inset by 1 on all sides.
-    let tab_bar_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    let tab_bar_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
     let body_outer = Rect {
         x: area.x,
         y: area.y.saturating_add(1),
         width: area.width,
         height: area.height.saturating_sub(1),
     };
-    let inner = body_outer.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
+    let inner = body_outer.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
 
     // Show first diagnostic message if any
     let diag_line = state
@@ -2161,7 +2206,9 @@ fn draw_editor(
         .set_cursor_line_style(Style::default().bg(cursor_line_bg));
     // Real terminal cursor handles all cursor rendering — hide the textarea's
     // cell-based cursor by blending it into the cursor-line background.
-    editor.textarea.set_cursor_style(Style::default().bg(cursor_line_bg));
+    editor
+        .textarea
+        .set_cursor_style(Style::default().bg(cursor_line_bg));
     // Search pattern is dedicated to the user's `/` query (Visual mode clears
     // it so selection color isn't overridden by Search rank).
     if state.vim_mode == VimMode::Visual || state.vim_mode == VimMode::VisualLine {
@@ -2210,7 +2257,10 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
         Block::default().style(Style::default().bg(Color::Rgb(18, 26, 20))),
         area,
     );
-    let area = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
+    let area = area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
 
     match &state.results {
         ResultsPane::Results(r) => {
@@ -2303,7 +2353,9 @@ fn syntax_spans_by_row(
 ) -> Vec<Vec<(usize, usize, Style)>> {
     let mut by_row: Vec<Vec<(usize, usize, Style)>> = vec![Vec::new(); row_count];
     for s in spans {
-        let Some(style) = token_kind_style(s.kind) else { continue };
+        let Some(style) = token_kind_style(s.kind) else {
+            continue;
+        };
         if s.start_row >= row_count {
             continue;
         }
@@ -2446,7 +2498,10 @@ fn draw_input_dialog(
         height: 1,
     };
     f.render_widget(Paragraph::new(content).style(bg), line);
-    (line.x + prefix.chars().count() as u16 + input.cursor as u16, line.y)
+    (
+        line.x + prefix.chars().count() as u16 + input.cursor as u16,
+        line.y,
+    )
 }
 
 /// Borderless centered confirmation dialog with a single message line.
@@ -2499,7 +2554,12 @@ fn draw_file_picker(
     let inner_w = popup.width.saturating_sub(4);
 
     // Input row
-    let input_area = Rect { x: inner_x, y: popup.y + 1, width: inner_w, height: 1 };
+    let input_area = Rect {
+        x: inner_x,
+        y: popup.y + 1,
+        width: inner_w,
+        height: 1,
+    };
     f.render_widget(
         Paragraph::new(format!("> {}", picker.query.text)).style(bg),
         input_area,
@@ -2510,7 +2570,12 @@ fn draw_file_picker(
     let list_y = popup.y + 3;
     let cursor = picker.cursor.min(matched.len().saturating_sub(1));
     for (i, name) in matched.iter().take(list_rows as usize).enumerate() {
-        let row = Rect { x: inner_x, y: list_y + i as u16, width: inner_w, height: 1 };
+        let row = Rect {
+            x: inner_x,
+            y: list_y + i as u16,
+            width: inner_w,
+            height: 1,
+        };
         let is_cursor = i == cursor;
         let is_active = active_name == Some(name.as_str());
         let mut style = bg;
@@ -2518,13 +2583,15 @@ fn draw_file_picker(
             style = style.add_modifier(Modifier::REVERSED);
         }
         let marker = if is_active { "* " } else { "  " };
-        f.render_widget(
-            Paragraph::new(format!("{marker}{name}")).style(style),
-            row,
-        );
+        f.render_widget(Paragraph::new(format!("{marker}{name}")).style(style), row);
     }
     if matched.is_empty() {
-        let row = Rect { x: inner_x, y: list_y, width: inner_w, height: 1 };
+        let row = Rect {
+            x: inner_x,
+            y: list_y,
+            width: inner_w,
+            height: 1,
+        };
         f.render_widget(
             Paragraph::new("(no matches)").style(bg.add_modifier(Modifier::DIM)),
             row,
@@ -2557,7 +2624,12 @@ fn draw_connection_switcher(f: &mut ratatui::Frame<'_>, state: &AppState, area: 
     let inner_w = popup.width.saturating_sub(4);
 
     // Header row
-    let header = Rect { x: inner_x, y: popup.y + 1, width: inner_w, height: 1 };
+    let header = Rect {
+        x: inner_x,
+        y: popup.y + 1,
+        width: inner_w,
+        height: 1,
+    };
     f.render_widget(
         Paragraph::new("Connections  (Enter connect · n new · e edit · d delete)")
             .style(bg.add_modifier(Modifier::DIM)),
@@ -2567,7 +2639,12 @@ fn draw_connection_switcher(f: &mut ratatui::Frame<'_>, state: &AppState, area: 
     // List
     let list_y = popup.y + 3;
     if conns.is_empty() {
-        let row = Rect { x: inner_x, y: list_y, width: inner_w, height: 1 };
+        let row = Rect {
+            x: inner_x,
+            y: list_y,
+            width: inner_w,
+            height: 1,
+        };
         f.render_widget(
             Paragraph::new("(no connections configured)").style(bg.add_modifier(Modifier::DIM)),
             row,
@@ -2576,7 +2653,12 @@ fn draw_connection_switcher(f: &mut ratatui::Frame<'_>, state: &AppState, area: 
     }
     let cur = cursor.min(conns.len().saturating_sub(1));
     for (i, c) in conns.iter().take(list_rows as usize).enumerate() {
-        let row = Rect { x: inner_x, y: list_y + i as u16, width: inner_w, height: 1 };
+        let row = Rect {
+            x: inner_x,
+            y: list_y + i as u16,
+            width: inner_w,
+            height: 1,
+        };
         let is_cursor = i == cur;
         let is_active = active_name == Some(c.name.as_str());
         let mut style = bg;
@@ -2631,10 +2713,7 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
         ),
         (
             "Results Pane",
-            &[
-                ("j / k", "Scroll down / up"),
-                ("Esc", "Dismiss results"),
-            ],
+            &[("j / k", "Scroll down / up"), ("Esc", "Dismiss results")],
         ),
         (
             "Tabs",
@@ -2793,13 +2872,11 @@ fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect)
     );
     match state.add_connection_field {
         AddConnectionField::Name => (
-            rows[0].x + name_label.chars().count() as u16
-                + state.add_connection_name_cursor as u16,
+            rows[0].x + name_label.chars().count() as u16 + state.add_connection_name_cursor as u16,
             rows[0].y,
         ),
         AddConnectionField::Url => (
-            rows[1].x + url_label.chars().count() as u16
-                + state.add_connection_url_cursor as u16,
+            rows[1].x + url_label.chars().count() as u16 + state.add_connection_url_cursor as u16,
             rows[1].y,
         ),
     }

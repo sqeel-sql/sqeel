@@ -6,15 +6,16 @@ use std::sync::{Arc, Condvar, Mutex};
 /// Submit `(prefix, identifiers)` with [`CompletionThread::submit`]; the thread
 /// always processes the latest submitted pair (older pending pairs are discarded).
 /// Poll completed results with [`CompletionThread::try_recv`].
+type PendingSlot = Arc<(Mutex<Option<(String, Vec<String>)>>, Condvar)>;
+
 pub struct CompletionThread {
-    pending: Arc<(Mutex<Option<(String, Vec<String>)>>, Condvar)>,
+    pending: PendingSlot,
     result_rx: mpsc::Receiver<Vec<String>>,
 }
 
 impl CompletionThread {
     pub fn spawn() -> anyhow::Result<Self> {
-        let pending: Arc<(Mutex<Option<(String, Vec<String>)>>, Condvar)> =
-            Arc::new((Mutex::new(None), Condvar::new()));
+        let pending: PendingSlot = Arc::new((Mutex::new(None), Condvar::new()));
         let (result_tx, result_rx) = mpsc::channel::<Vec<String>>();
         let pending_thread = Arc::clone(&pending);
 

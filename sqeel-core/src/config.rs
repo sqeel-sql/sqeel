@@ -67,7 +67,7 @@ fn default_sidebar_visible() -> bool {
 }
 
 /// Data restored from session.toml.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SessionData {
     pub connection: Option<String>,
     /// Numeric fallback cursor — used only when `schema_cursor_path` lookup fails.
@@ -79,20 +79,6 @@ pub struct SessionData {
     pub focus: Focus,
     pub sidebar_visible: bool,
     pub schema_search: Option<String>,
-}
-
-impl Default for SessionData {
-    fn default() -> Self {
-        Self {
-            connection: None,
-            schema_cursor: 0,
-            schema_cursor_path: None,
-            schema_expanded_paths: Vec::new(),
-            focus: Focus::default(),
-            sidebar_visible: false,
-            schema_search: None,
-        }
-    }
 }
 
 impl serde::Serialize for KeybindingMode {

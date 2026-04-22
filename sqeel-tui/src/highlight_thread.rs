@@ -37,7 +37,7 @@ impl HighlightThread {
                         }
                     };
 
-                    let spans = highlighter.highlight(&**content);
+                    let spans = highlighter.highlight(&content);
 
                     if result_tx.send(spans).is_err() {
                         break; // main thread dropped the receiver

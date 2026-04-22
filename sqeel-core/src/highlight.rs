@@ -48,9 +48,10 @@ impl Highlighter {
 
         // Apply edit info to old tree so tree-sitter can reuse unchanged nodes.
         if let Some(tree) = &mut self.old_tree
-            && let Some(edit) = compute_input_edit(&self.old_source, source) {
-                tree.edit(&edit);
-            }
+            && let Some(edit) = compute_input_edit(&self.old_source, source)
+        {
+            tree.edit(&edit);
+        }
 
         let tree = match self.parser.parse(source, self.old_tree.as_ref()) {
             Some(t) => t,
