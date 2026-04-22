@@ -1365,10 +1365,10 @@ async fn run_loop(
                         state.lock().unwrap().scroll_results_left();
                     }
                     // Switch result tabs
-                    (KeyModifiers::NONE, KeyCode::Char(']')) if focus == Focus::Results => {
+                    (KeyModifiers::SHIFT, KeyCode::Char('L')) if focus == Focus::Results => {
                         state.lock().unwrap().next_result_tab();
                     }
-                    (KeyModifiers::NONE, KeyCode::Char('[')) if focus == Focus::Results => {
+                    (KeyModifiers::SHIFT, KeyCode::Char('H')) if focus == Focus::Results => {
                         state.lock().unwrap().prev_result_tab();
                     }
                     // On error tab: Enter jumps editor cursor to the reported line:col
@@ -3110,7 +3110,7 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
             &[
                 ("j / k", "Scroll down / up"),
                 ("h / l", "Scroll left / right"),
-                ("[ / ]", "Prev / next result tab"),
+                ("H / L", "Prev / next result tab"),
             ],
         ),
         (
