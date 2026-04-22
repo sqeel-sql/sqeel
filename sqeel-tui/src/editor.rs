@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 use sqeel_core::state::{KeybindingMode, VimMode};
 use tui_textarea::{CursorMove, Input, Key, Scrolling, TextArea};
 
@@ -132,6 +133,47 @@ impl<'a> Editor<'a> {
     pub fn goto_line(&mut self, line: usize) {
         self.textarea
             .move_cursor(CursorMove::Jump(line.saturating_sub(1), 0));
+    }
+
+    /// Translate a terminal mouse position into a (row, col) inside the document.
+    /// `area` is the outer editor rect: 1-row tab bar at top (flush), then the
+    /// textarea with 1 cell of horizontal pane padding on each side.
+    fn mouse_to_doc_pos(&self, area: Rect, col: u16, row: u16) -> (usize, usize) {
+        let lines = self.textarea.lines();
+        let inner_top = area.y.saturating_add(1); // tab bar row
+        let lnum_width = lines.len().to_string().len() as u16 + 2;
+        let content_x = area.x.saturating_add(1).saturating_add(lnum_width);
+        let rel_row = row.saturating_sub(inner_top) as usize;
+        let top = self.textarea.viewport_top_row();
+        let doc_row = (top + rel_row).min(lines.len().saturating_sub(1));
+        let rel_col = col.saturating_sub(content_x) as usize;
+        let line_len = lines.get(doc_row).map(|l| l.len()).unwrap_or(0);
+        (doc_row, rel_col.min(line_len))
+    }
+
+    /// Jump cursor to the terminal-space mouse position; exits Visual modes if active.
+    pub fn mouse_click(&mut self, area: Rect, col: u16, row: u16) {
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+            self.textarea.cancel_selection();
+            self.mode = Mode::Normal;
+        }
+        let (r, c) = self.mouse_to_doc_pos(area, col, row);
+        self.textarea.move_cursor(CursorMove::Jump(r, c));
+    }
+
+    /// Begin a mouse-drag selection: anchor at current cursor and enter Visual mode.
+    pub fn mouse_begin_drag(&mut self) {
+        if self.mode != Mode::Visual {
+            self.textarea.cancel_selection();
+            self.textarea.start_selection();
+            self.mode = Mode::Visual;
+        }
+    }
+
+    /// Extend an in-progress mouse drag to the given terminal-space position.
+    pub fn mouse_extend_drag(&mut self, area: Rect, col: u16, row: u16) {
+        let (r, c) = self.mouse_to_doc_pos(area, col, row);
+        self.textarea.move_cursor(CursorMove::Jump(r, c));
     }
 
     pub fn insert_str(&mut self, text: &str) {
@@ -848,10 +890,16 @@ impl<'a> Editor<'a> {
 
         self.textarea.cancel_selection();
         if cursor_row >= anchor_row {
-            // Cursor at bottom: anchor top-start → cursor bottom-start
+            // Cursor at bottom: anchor top-start → cursor past bottom-end so the
+            // full bottom line is highlighted (matches the d/y range in finalize).
             self.textarea.move_cursor(CursorMove::Jump(top, 0));
             self.textarea.start_selection();
-            self.textarea.move_cursor(CursorMove::Jump(bottom, 0));
+            if bottom + 1 < total_lines {
+                self.textarea.move_cursor(CursorMove::Jump(bottom + 1, 0));
+            } else {
+                self.textarea.move_cursor(CursorMove::Jump(bottom, 0));
+                self.textarea.move_cursor(CursorMove::End);
+            }
         } else {
             // Cursor at top: anchor below bottom-end → cursor top-start
             if bottom + 1 < total_lines {

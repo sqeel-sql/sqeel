@@ -159,7 +159,7 @@ impl AppState {
     pub fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             editor_ratio: 1.0,
-            sidebar_visible: true,
+            sidebar_visible: false,
             ..Default::default()
         }))
     }

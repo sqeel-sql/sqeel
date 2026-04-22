@@ -151,12 +151,14 @@ async fn run_loop(
     let mut editor_search: Option<String> = None;
     let mut last_editor_search: Option<String> = None;
 
-    let mut toast: Option<(String, std::time::Instant)> = None;
+    let mut toasts: Vec<(String, std::time::Instant)> = Vec::new();
+    let mut last_esc_at: Option<std::time::Instant> = None;
     // Clipboard held alive for the session so the OS clipboard manager sees the content.
     let mut clipboard = Clipboard::new().ok();
     // Mouse drag tracking
     let mut last_draw_areas = DrawAreas::default();
     let mut mouse_select_start: Option<(u16, u16)> = None;
+    let mut mouse_drag_pane: Option<Focus> = None;
     let mut mouse_did_drag = false;
     // Force redraw on first iteration and after every event.
     let mut event_triggered_redraw = true;
@@ -166,12 +168,11 @@ async fn run_loop(
         let mut needs_redraw = event_triggered_redraw;
         event_triggered_redraw = false;
 
-        // Expire toast after 5 seconds.
-        if let Some((_, t)) = &toast {
-            if t.elapsed() >= Duration::from_millis(5000) {
-                toast = None;
-                needs_redraw = true;
-            }
+        // Expire toasts after 5 seconds each.
+        let before = toasts.len();
+        toasts.retain(|(_, t)| t.elapsed() < Duration::from_millis(5000));
+        if toasts.len() != before {
+            needs_redraw = true;
         }
 
         // Detect terminal size changes that don't produce Event::Resize (e.g. fullscreen toggle).
@@ -318,7 +319,7 @@ async fn run_loop(
             let schema_search_snap = schema_search.clone();
             let editor_search_snap = editor_search.clone();
             let last_editor_search_snap = last_editor_search.clone();
-            let toast_snap = toast.as_ref().map(|(msg, _)| msg.clone());
+            let toast_snap: Vec<String> = toasts.iter().map(|(msg, _)| msg.clone()).collect();
             terminal.draw(|f| {
                 let s = state.lock().unwrap();
                 last_draw_areas = draw(
@@ -330,7 +331,7 @@ async fn run_loop(
                     &schema_search_snap,
                     editor_search_snap.as_deref(),
                     last_editor_search_snap.as_deref(),
-                    toast_snap.as_deref(),
+                    &toast_snap,
                 );
             })?;
             last_terminal_size = terminal.size()?;
@@ -449,15 +450,36 @@ async fn run_loop(
                                 }
                             }
                             drop(s);
+                            if pane == Focus::Editor {
+                                editor.mouse_click(
+                                    last_draw_areas.editor,
+                                    mouse.column,
+                                    mouse.row,
+                                );
+                            }
                             mouse_select_start = Some((mouse.column, mouse.row));
+                            mouse_drag_pane = Some(pane);
                             mouse_did_drag = false;
                         }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
+                        if mouse_drag_pane == Some(Focus::Editor) {
+                            if !mouse_did_drag {
+                                editor.mouse_begin_drag();
+                            }
+                            editor.mouse_extend_drag(
+                                last_draw_areas.editor,
+                                mouse.column,
+                                mouse.row,
+                            );
+                        }
                         mouse_did_drag = true;
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
-                        if mouse_did_drag && let Some(start) = mouse_select_start {
+                        if mouse_did_drag
+                            && mouse_drag_pane != Some(Focus::Editor)
+                            && let Some(start) = mouse_select_start
+                        {
                             let end = (mouse.column, mouse.row);
                             let s = state.lock().unwrap();
                             if let Some(text) =
@@ -470,6 +492,7 @@ async fn run_loop(
                             }
                         }
                         mouse_select_start = None;
+                        mouse_drag_pane = None;
                         mouse_did_drag = false;
                     }
                     MouseEventKind::ScrollDown => {
@@ -538,6 +561,19 @@ async fn run_loop(
                 }
             }
             Event::Key(key) => {
+                // Double-Esc within 500ms dismisses any visible toasts. Tracked
+                // globally so it works regardless of which mode the first Esc
+                // may have exited.
+                if key.code == KeyCode::Esc {
+                    let now = std::time::Instant::now();
+                    if let Some(prev) = last_esc_at
+                        && now.duration_since(prev) <= Duration::from_millis(500)
+                        && !toasts.is_empty()
+                    {
+                        toasts.clear();
+                    }
+                    last_esc_at = Some(now);
+                }
                 let s = state.lock().unwrap();
                 let focus = s.focus;
                 let vim_mode = s.vim_mode;
@@ -569,7 +605,7 @@ async fn run_loop(
                                 match trimmed {
                                     "q" | "q!" => break,
                                     other => {
-                                        toast = Some((
+                                        toasts.push((
                                             format!("Unknown command: :{other}"),
                                             std::time::Instant::now(),
                                         ));
@@ -1059,7 +1095,7 @@ fn draw(
     schema_search: &SchemaSearch,
     editor_search: Option<&str>,
     last_editor_search: Option<&str>,
-    toast: Option<&str>,
+    toasts: &[String],
 ) -> DrawAreas {
     let area = f.area();
 
@@ -1124,11 +1160,11 @@ fn draw(
             .split(outer[1])
     };
 
-    // Tab bar is the first content row inside the editor block (border=1 on each side)
+    // Tab bar is the top row of the editor pane, flush with no padding.
     let tab_bar = Rect {
-        x: right_chunks[0].x + 1,
-        y: right_chunks[0].y + 1,
-        width: right_chunks[0].width.saturating_sub(2),
+        x: right_chunks[0].x,
+        y: right_chunks[0].y,
+        width: right_chunks[0].width,
         height: 1,
     };
     let areas = DrawAreas {
@@ -1205,21 +1241,36 @@ fn draw(
         );
     }
 
-    // Toast notification (top-right corner)
-    if let Some(msg) = toast {
-        let width = (msg.len() as u16 + 2).min(area.width);
+    // Toast notifications (top-right corner, stacked vertically).
+    // Each toast is a 3-row block: 1 row top padding, 1 row message, 1 row bottom
+    // padding; message is inset by 1 column on the left and right.
+    let mut y_off: u16 = 0;
+    let toast_bg = Style::default().fg(Color::White).bg(Color::Rgb(180, 0, 0));
+    for msg in toasts {
+        let width = (msg.len() as u16 + 4).min(area.width);
+        let height = 3u16.min(area.height.saturating_sub(y_off));
+        if height == 0 {
+            break;
+        }
         let toast_area = Rect {
             x: area.width.saturating_sub(width),
-            y: 0,
+            y: y_off,
             width,
-            height: 1,
+            height,
         };
         f.render_widget(Clear, toast_area);
-        f.render_widget(
-            Paragraph::new(format!(" {msg}"))
-                .style(Style::default().fg(Color::White).bg(Color::Rgb(180, 0, 0))),
-            toast_area,
-        );
+        // Paint background for the whole block (top+bottom padding rows).
+        f.render_widget(Block::default().style(toast_bg), toast_area);
+        if height >= 2 {
+            let msg_area = Rect {
+                x: toast_area.x + 2,
+                y: toast_area.y + 1,
+                width: toast_area.width.saturating_sub(4),
+                height: 1,
+            };
+            f.render_widget(Paragraph::new(msg.as_str()).style(toast_bg), msg_area);
+        }
+        y_off = y_off.saturating_add(height).saturating_add(1);
     }
 
     areas
@@ -1453,13 +1504,13 @@ fn draw_schema(
         Style::default()
     };
 
-    // Fill pane background
+    // Fill pane background (full area), then inset content by 1 on all sides.
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Rgb(18, 20, 32))),
         area,
     );
 
-    let inner = area;
+    let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
 
     // Search box is always visible (3 rows: border+input+border), list below
     let chunks = Layout::default()
@@ -1565,24 +1616,39 @@ fn draw_editor(
         area,
     );
 
+    // Tab bar sits flush at the top (full-width, no padding); the remaining
+    // content below is inset by 1 on all sides.
+    let tab_bar_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    let body_outer = Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
+    let inner = body_outer.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
+
     // Show first diagnostic message if any
     let diag_line = state
         .lsp_diagnostics
         .first()
         .map(|d| format!(" {}:{} {}", d.line + 1, d.col + 1, d.message));
 
-    // Split area: tab bar (1) + textarea + optional search bar (1) + optional diag (1)
-    let mut constraints = vec![Constraint::Length(1), Constraint::Min(1)];
+    // Split inner: textarea + optional search bar (1) + optional diag (1)
+    let mut constraints = vec![Constraint::Min(1)];
     if editor_search.is_some() {
         constraints.push(Constraint::Length(1));
     }
     if diag_line.is_some() {
         constraints.push(Constraint::Length(1));
     }
-    let chunks = Layout::default()
+    let body_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(area);
+        .split(inner);
+    // Build a `chunks`-like slice: [tab_bar, textarea, ...extras] so the rest of
+    // this function (which references chunks[0..]) keeps working unchanged.
+    let mut chunks: Vec<Rect> = vec![tab_bar_area];
+    chunks.extend(body_chunks.iter().copied());
 
     f.render_widget(
         Paragraph::new(build_tab_title(state)).style(Style::default().bg(Color::Rgb(30, 30, 38))),
@@ -1684,11 +1750,12 @@ fn build_tab_title(state: &AppState) -> Line<'_> {
 }
 
 fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool) {
-    // Fill pane background
+    // Fill pane background (full area), then inset content by 1 on all sides.
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Rgb(18, 26, 20))),
         area,
     );
+    let area = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
 
     match &state.results {
         ResultsPane::Results(r) => {

@@ -56,7 +56,7 @@ struct Session {
 }
 
 fn default_sidebar_visible() -> bool {
-    true
+    false
 }
 
 /// Data restored from session.toml.
@@ -82,7 +82,7 @@ impl Default for SessionData {
             schema_cursor_path: None,
             schema_expanded_paths: Vec::new(),
             focus: Focus::default(),
-            sidebar_visible: true,
+            sidebar_visible: false,
             schema_search: None,
         }
     }
