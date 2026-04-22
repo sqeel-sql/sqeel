@@ -71,7 +71,7 @@ pub enum Focus {
     Results,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
@@ -98,7 +98,7 @@ impl QueryResult {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResultsPane {
     #[default]
     Empty,
@@ -110,13 +110,15 @@ pub enum ResultsPane {
 
 /// One entry in the results pane's tab bar — the query that produced it and
 /// either a result set, an error, or a loading placeholder.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResultsTab {
     pub query: String,
     pub kind: ResultsPane,
     /// Per-tab vertical scroll position; preserved across tab switches.
+    #[serde(default)]
     pub scroll: usize,
     /// Per-tab horizontal column scroll position.
+    #[serde(default)]
     pub col_scroll: usize,
 }
 

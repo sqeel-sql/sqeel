@@ -46,6 +46,23 @@ fn main() -> anyhow::Result<()> {
         s.focus = session.focus;
         s.sidebar_visible = session.sidebar_visible;
         s.schema_search_query = session.schema_search.clone();
+        s.result_tabs = session
+            .result_tabs
+            .clone()
+            .into_iter()
+            .map(|mut t| {
+                if matches!(t.kind, sqeel_core::state::ResultsPane::Loading) {
+                    t.kind = sqeel_core::state::ResultsPane::Cancelled;
+                }
+                if let sqeel_core::state::ResultsPane::Results(ref mut r) = t.kind {
+                    r.compute_col_widths();
+                }
+                t
+            })
+            .collect();
+        s.active_result_tab = session
+            .active_result_tab
+            .min(s.result_tabs.len().saturating_sub(1));
     }
     let url = if let Some(url) = args.url {
         Some(url)
@@ -84,6 +101,8 @@ fn main() -> anyhow::Result<()> {
         let mut last_written_search: Option<String> = None;
         let mut last_written_tab_cursors: Vec<sqeel_core::config::TabCursor> = Vec::new();
         let mut last_written_active_tab: usize = 0;
+        let mut last_written_result_tabs: Vec<sqeel_core::state::ResultsTab> = Vec::new();
+        let mut last_written_active_result_tab: usize = 0;
         let mut dirty = false;
         let mut pending_conn: Option<String> = None;
         let mut pending_cursor: usize = 0;
@@ -94,6 +113,8 @@ fn main() -> anyhow::Result<()> {
         let mut pending_search: Option<String> = None;
         let mut pending_tab_cursors: Vec<sqeel_core::config::TabCursor> = Vec::new();
         let mut pending_active_tab: usize = 0;
+        let mut pending_result_tabs: Vec<sqeel_core::state::ResultsTab> = Vec::new();
+        let mut pending_active_result_tab: usize = 0;
         let mut last_write = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(2))
             .unwrap_or_else(std::time::Instant::now);
@@ -120,6 +141,8 @@ fn main() -> anyhow::Result<()> {
                 .map(|(name, row, col)| sqeel_core::config::TabCursor { name, row, col })
                 .collect();
             let active_tab = s.active_tab;
+            let result_tabs = s.result_tabs.clone();
+            let active_result_tab = s.active_result_tab;
             drop(s);
 
             // Skip while the schema is still loading: schema_nodes is partial,
@@ -138,7 +161,9 @@ fn main() -> anyhow::Result<()> {
                     || sidebar != last_written_sidebar
                     || search != last_written_search
                     || tab_cursors != last_written_tab_cursors
-                    || active_tab != last_written_active_tab)
+                    || active_tab != last_written_active_tab
+                    || result_tabs != last_written_result_tabs
+                    || active_result_tab != last_written_active_result_tab)
             {
                 pending_conn = conn;
                 pending_cursor = cursor;
@@ -149,6 +174,8 @@ fn main() -> anyhow::Result<()> {
                 pending_search = search;
                 pending_tab_cursors = tab_cursors;
                 pending_active_tab = active_tab;
+                pending_result_tabs = result_tabs;
+                pending_active_result_tab = active_result_tab;
                 dirty = true;
             }
 
@@ -164,6 +191,8 @@ fn main() -> anyhow::Result<()> {
                         pending_search.clone(),
                         pending_tab_cursors.clone(),
                         pending_active_tab,
+                        pending_result_tabs.clone(),
+                        pending_active_result_tab,
                     );
                 }
                 last_written_conn = pending_conn.clone();
@@ -175,6 +204,8 @@ fn main() -> anyhow::Result<()> {
                 last_written_search = pending_search.clone();
                 last_written_tab_cursors = pending_tab_cursors.clone();
                 last_written_active_tab = pending_active_tab;
+                last_written_result_tabs = pending_result_tabs.clone();
+                last_written_active_result_tab = pending_active_result_tab;
                 dirty = false;
                 last_write = std::time::Instant::now();
             }
@@ -318,6 +349,8 @@ fn spawn_executor(
             .map(|(name, row, col)| sqeel_core::config::TabCursor { name, row, col })
             .collect();
         let active_tab = s.active_tab;
+        let result_tabs = s.result_tabs.clone();
+        let active_result_tab = s.active_result_tab;
         let _ = save_schema_cache(&col_schema_url, &nodes);
         if let Some(ref name) = s.active_connection.clone() {
             let _ = save_session(
@@ -330,6 +363,8 @@ fn spawn_executor(
                 search_query,
                 tab_cursors,
                 active_tab,
+                result_tabs,
+                active_result_tab,
             );
         }
     });

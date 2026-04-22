@@ -79,6 +79,10 @@ struct Session {
     tab_cursors: Vec<TabCursor>,
     #[serde(default)]
     active_tab: usize,
+    #[serde(default)]
+    result_tabs: Vec<crate::state::ResultsTab>,
+    #[serde(default)]
+    active_result_tab: usize,
 }
 
 fn default_sidebar_visible() -> bool {
@@ -101,6 +105,8 @@ pub struct SessionData {
     /// Per-tab editor cursor positions, keyed by tab name.
     pub tab_cursors: Vec<TabCursor>,
     pub active_tab: usize,
+    pub result_tabs: Vec<crate::state::ResultsTab>,
+    pub active_result_tab: usize,
 }
 
 impl serde::Serialize for KeybindingMode {
@@ -191,6 +197,8 @@ pub fn save_session(
     schema_search: Option<String>,
     tab_cursors: Vec<TabCursor>,
     active_tab: usize,
+    result_tabs: Vec<crate::state::ResultsTab>,
+    active_result_tab: usize,
 ) -> anyhow::Result<()> {
     let dir = config_dir().ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?;
     std::fs::create_dir_all(&dir)?;
@@ -204,6 +212,8 @@ pub fn save_session(
         schema_search,
         tab_cursors,
         active_tab,
+        result_tabs,
+        active_result_tab,
     })?;
     std::fs::write(dir.join("session.toml"), content)?;
     Ok(())
@@ -234,6 +244,8 @@ pub fn load_session_data() -> SessionData {
         schema_search: s.schema_search,
         tab_cursors: s.tab_cursors,
         active_tab: s.active_tab,
+        result_tabs: s.result_tabs,
+        active_result_tab: s.active_result_tab,
     }
 }
 
