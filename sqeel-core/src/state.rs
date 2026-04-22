@@ -223,6 +223,9 @@ pub struct AppState {
     /// Sorted, deduplicated identifier names for completion. Rebuilt on schema changes
     /// so hot-path completion submissions only clone an `Arc`.
     schema_identifier_cache: Arc<Vec<String>>,
+    /// Set by schema mutators that want to defer the O(N log N) cache rebuild.
+    /// Consumers call `rebuild_schema_cache_if_dirty` once per tick.
+    pub schema_cache_dirty: bool,
     pub query_history: Vec<String>,
     pub history_cursor: Option<usize>,
     // Connection switcher
@@ -288,6 +291,20 @@ impl AppState {
         ids.sort();
         ids.dedup();
         self.schema_identifier_cache = Arc::new(ids);
+        self.schema_cache_dirty = false;
+    }
+
+    /// Mark caches stale without doing the work. The next
+    /// `rebuild_schema_cache_if_dirty` call (typically once per TUI tick) coalesces
+    /// many mutations into a single rebuild.
+    fn mark_schema_cache_dirty(&mut self) {
+        self.schema_cache_dirty = true;
+    }
+
+    pub fn rebuild_schema_cache_if_dirty(&mut self) {
+        if self.schema_cache_dirty {
+            self.rebuild_schema_cache();
+        }
     }
 
     /// Active result tab's pane (or `Empty` if no tabs).
@@ -842,7 +859,7 @@ impl AppState {
             }
         }
         if changed {
-            self.rebuild_schema_cache();
+            self.mark_schema_cache_dirty();
         }
     }
 
@@ -868,7 +885,7 @@ impl AppState {
             }
         }
         if changed {
-            self.rebuild_schema_cache();
+            self.mark_schema_cache_dirty();
         }
     }
 

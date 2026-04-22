@@ -415,6 +415,14 @@ async fn run_loop(
         };
         {
             let mut s = state.lock().unwrap();
+            // Coalesce any pending schema-cache rebuilds triggered by background
+            // column/table loaders. Readers below (visible items, identifier cache,
+            // draw) see a fresh cache; if nothing changed this is a no-op.
+            let schema_was_dirty = s.schema_cache_dirty;
+            s.rebuild_schema_cache_if_dirty();
+            if schema_was_dirty {
+                needs_redraw = true;
+            }
             // Leaving the schema pane exits search mode entirely.
             if s.focus != Focus::Schema && schema_search.query.is_some() {
                 schema_search.clear();
