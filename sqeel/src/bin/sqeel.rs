@@ -395,11 +395,31 @@ fn spawn_executor(
         // shells would have wiped cached children.
         let _ = db_shells;
 
-        // Step 2: table shells per database (sequential — one query per db).
-        let mut table_work: Vec<(String, String)> = Vec::new();
-
+        // Step 2: table shells per database — fan out list_tables with bounded
+        // concurrency. For servers with many dbs this collapses N sequential
+        // roundtrips into ceil(N / TABLE_LIST_CONCURRENCY).
+        const TABLE_LIST_CONCURRENCY: usize = 8;
+        let table_sem = Arc::new(tokio::sync::Semaphore::new(TABLE_LIST_CONCURRENCY));
+        let mut table_set: tokio::task::JoinSet<(String, anyhow::Result<Vec<String>>)> =
+            tokio::task::JoinSet::new();
         for db_name in &db_names {
-            let table_names = match schema_conn.list_tables(db_name).await {
+            let permit = table_sem.clone().acquire_owned().await.unwrap();
+            let conn = schema_conn.clone();
+            let db = db_name.clone();
+            table_set.spawn(async move {
+                let _permit = permit;
+                let r = conn.list_tables(&db).await;
+                (db, r)
+            });
+        }
+
+        let mut table_work: Vec<(String, String)> = Vec::new();
+        while let Some(joined) = table_set.join_next().await {
+            let (db_name, result) = match joined {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            };
+            let table_names = match result {
                 Ok(t) => t,
                 Err(e) => {
                     schema_state
@@ -409,13 +429,10 @@ fn spawn_executor(
                     continue;
                 }
             };
-
-            // Merge fresh table names into the db node — reuses cached columns
-            // for tables that still exist, drops tables that are gone.
             schema_state
                 .lock()
                 .unwrap()
-                .set_db_tables(db_name, &table_names);
+                .set_db_tables(&db_name, &table_names);
             table_work.extend(table_names.into_iter().map(|t| (db_name.clone(), t)));
         }
 
