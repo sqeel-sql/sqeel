@@ -399,6 +399,7 @@ fn spawn_executor(
         // Ignore `db_shells` — we only used it to derive db_names; the fresh
         // shells would have wiped cached children.
         let _ = db_shells;
+        snapshot_and_save_schema(&schema_state, &schema_url);
 
         // Steps 2 + 3: table shells per database + columns per table. Both
         // fan out with bounded concurrency. Column tasks are spawned as each
@@ -441,6 +442,7 @@ fn spawn_executor(
                 .lock()
                 .unwrap()
                 .set_db_tables(&db_name, &table_names);
+            snapshot_and_save_schema(&schema_state, &schema_url);
 
             for table_name in table_names {
                 let permit = column_sem.clone().acquire_owned().await.unwrap();
@@ -603,3 +605,10 @@ fn spawn_executor(
     });
 }
 
+/// Snapshot the current schema tree and persist it to disk. Cheap enough to
+/// call at phase boundaries (db list, per-db table list, end-of-load) so a
+/// mid-load disconnect still leaves a useful cache behind.
+fn snapshot_and_save_schema(state: &Arc<std::sync::Mutex<AppState>>, url: &str) {
+    let nodes = state.lock().unwrap().schema_nodes.clone();
+    let _ = save_schema_cache(url, &nodes);
+}
