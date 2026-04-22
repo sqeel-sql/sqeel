@@ -31,7 +31,7 @@ use ratatui::{
 use sqeel_core::{
     AppState, UiProvider,
     config::load_main_config,
-    highlight::{HighlightSpan, TokenKind},
+    highlight::{HighlightSpan, TokenKind, statement_at_byte, statement_ranges},
     lsp::{LspClient, LspEvent},
     schema::{self, SchemaTreeItem},
     state::{AddConnectionField, Focus, KeybindingMode, ResultsPane, VimMode},
@@ -548,10 +548,7 @@ async fn run_loop(
             Event::Mouse(mouse) => {
                 let area = terminal.size()?;
                 let schema_width = (area.width * 15 / 100).max(30);
-                let show_results = !matches!(
-                    state.lock().unwrap().results,
-                    sqeel_core::state::ResultsPane::Empty
-                );
+                let show_results = state.lock().unwrap().has_results();
                 let editor_ratio = state.lock().unwrap().editor_ratio;
                 let s = state.lock().unwrap();
                 let bottom_rows = 1 + (!s.lsp_available) as u16;
@@ -781,7 +778,7 @@ async fn run_loop(
                 let show_switcher = s.show_connection_switcher;
                 let show_add = s.show_add_connection;
                 let show_help = s.show_help;
-                let show_results = !matches!(s.results, sqeel_core::state::ResultsPane::Empty);
+                let show_results = s.has_results();
                 drop(s);
 
                 // ── Leader-key chord ─────────────────────────────────────────────
@@ -1296,18 +1293,56 @@ async fn run_loop(
                     (KeyModifiers::NONE, KeyCode::Char('h')) if focus == Focus::Results => {
                         state.lock().unwrap().scroll_results_left();
                     }
+                    // Switch result tabs
+                    (KeyModifiers::NONE, KeyCode::Char(']')) if focus == Focus::Results => {
+                        state.lock().unwrap().next_result_tab();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char('[')) if focus == Focus::Results => {
+                        state.lock().unwrap().prev_result_tab();
+                    }
+                    // Close active result tab
+                    (KeyModifiers::NONE, KeyCode::Char('x')) if focus == Focus::Results => {
+                        state.lock().unwrap().close_active_result_tab();
+                    }
                     // Dismiss results
                     (KeyModifiers::NONE, KeyCode::Esc) if focus == Focus::Results => {
                         state.lock().unwrap().dismiss_results();
                     }
-                    // Execute query: Ctrl+Enter
+                    // Execute query under cursor: Ctrl+Enter
                     (KeyModifiers::CONTROL, KeyCode::Enter) => {
                         let content = editor.content();
+                        let cursor_byte =
+                            cursor_byte_offset(editor.textarea.lines(), editor.textarea.cursor());
+                        let stmt = statement_at_byte(&content, cursor_byte)
+                            .map(|(s, e)| content[s..e].trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| content.trim().to_string());
                         let mut s = state.lock().unwrap();
                         s.dismiss_completions();
-                        let sent = s.send_query(content.clone());
+                        let sent = s.send_query(stmt.clone());
                         if !sent {
-                            s.push_history(&content);
+                            s.push_history(&stmt);
+                            s.set_error(
+                                "No DB connected. Use --url / --connection or <leader>c to switch."
+                                    .into(),
+                            );
+                        }
+                    }
+                    // Run all statements in the file: Ctrl+Shift+Enter
+                    (m, KeyCode::Enter)
+                        if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+                    {
+                        let content = editor.content();
+                        let stmts: Vec<String> = statement_ranges(&content)
+                            .into_iter()
+                            .map(|(s, e)| content[s..e].trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        let mut s = state.lock().unwrap();
+                        s.dismiss_completions();
+                        if stmts.is_empty() {
+                            s.set_error("No statements to run.".into());
+                        } else if !s.send_batch(stmts) {
                             s.set_error(
                                 "No DB connected. Use --url / --connection or <leader>c to switch."
                                     .into(),
@@ -1480,6 +1515,24 @@ fn byte_to_char_col(line: &str, byte_idx: usize) -> usize {
     line[..byte_idx.min(line.len())].chars().count()
 }
 
+/// Convert a (row, char-col) cursor into a byte offset into `lines.join("\n")`.
+fn cursor_byte_offset(lines: &[String], cursor: (usize, usize)) -> usize {
+    let mut byte = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if i < cursor.0 {
+            byte += line.len() + 1; // +1 for '\n'
+        } else if i == cursor.0 {
+            byte += line
+                .chars()
+                .take(cursor.1)
+                .map(|c| c.len_utf8())
+                .sum::<usize>();
+            break;
+        }
+    }
+    byte
+}
+
 /// Desired terminal cursor shape after a draw. The TUI uses a thin vertical bar
 /// for any text-input context (insert mode, dialogs, schema search) and a thick
 /// block for editor normal mode, so cursors look consistent across the app.
@@ -1569,7 +1622,7 @@ fn draw(
         (Rect::default(), 0, 0, false, None)
     };
 
-    let show_results = !matches!(state.results, ResultsPane::Empty);
+    let show_results = state.has_results();
     let editor_pct = (state.editor_ratio * 100.0) as u16;
     let results_pct = 100 - editor_pct;
 
@@ -1803,18 +1856,18 @@ fn extract_mouse_selection(
     if let Some(results_area) = areas.results
         && results_area.contains(start_pos)
     {
-        if let sqeel_core::state::ResultsPane::Results(ref r) = state.results {
+        if let sqeel_core::state::ResultsPane::Results(r) = state.results() {
             // border (1) + header row (1) = 2 rows offset
             let inner_top = results_area.y + 2;
             let row_start =
-                (r1.saturating_sub(inner_top) as usize).saturating_add(state.results_scroll);
+                (r1.saturating_sub(inner_top) as usize).saturating_add(state.results_scroll());
             let row_end =
-                (r2.saturating_sub(inner_top) as usize).saturating_add(state.results_scroll);
+                (r2.saturating_sub(inner_top) as usize).saturating_add(state.results_scroll());
             if row_start >= r.rows.len() {
                 return None;
             }
             let row_end = row_end.min(r.rows.len() - 1);
-            let col_start = state.results_col_scroll;
+            let col_start = state.results_col_scroll();
             let text = r.rows[row_start..=row_end]
                 .iter()
                 .map(|row| {
@@ -2262,19 +2315,44 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
         vertical: 0,
     });
 
-    match &state.results {
+    // Split off a 1-row tab bar at the top when there are multiple result tabs.
+    let (tab_bar_area, content_area) = if state.result_tabs.len() > 1 && area.height > 1 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(area);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, area)
+    };
+
+    if let Some(tab_area) = tab_bar_area {
+        f.render_widget(results_tab_bar(state), tab_area);
+    }
+
+    match state.results() {
         ResultsPane::Results(r) => {
             let title_style = if focused {
                 Style::default().fg(Color::Yellow)
             } else {
                 Style::default().fg(Color::Green)
             };
+            let title = if state.result_tabs.len() > 1 {
+                format!(
+                    "Results ({}/{} • {} rows)",
+                    state.active_result_tab + 1,
+                    state.result_tabs.len(),
+                    r.rows.len()
+                )
+            } else {
+                format!("Results ({} rows)", r.rows.len())
+            };
             let block = Block::default()
-                .title(format!("Results ({} rows)", r.rows.len()))
+                .title(title)
                 .title_style(title_style)
                 .borders(Borders::NONE);
 
-            let col_start = state.results_col_scroll;
+            let col_start = state.results_col_scroll();
             let visible_cols: Vec<&String> = r.columns.iter().skip(col_start).collect();
 
             let header_cells: Vec<Cell> = visible_cols
@@ -2295,7 +2373,7 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
             let visible_rows: Vec<Row> = r
                 .rows
                 .iter()
-                .skip(state.results_scroll)
+                .skip(state.results_scroll())
                 .map(|row| {
                     Row::new(
                         row.iter()
@@ -2310,7 +2388,7 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
                 .header(header)
                 .block(block);
 
-            f.render_widget(table, area);
+            f.render_widget(table, content_area);
         }
         ResultsPane::Error(e) => {
             let block = Block::default().title("Error").borders(Borders::NONE);
@@ -2318,11 +2396,48 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
                 Paragraph::new(e.as_str())
                     .style(Style::default().fg(Color::Red))
                     .block(block),
-                area,
+                content_area,
             );
         }
         ResultsPane::Empty => unreachable!(),
     }
+}
+
+/// Render a 1-row tab bar above the results pane: numbered tabs with the active
+/// one highlighted in cyan. Each tab shows a short snippet of its query.
+fn results_tab_bar(state: &AppState) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(state.result_tabs.len() * 2);
+    for (i, tab) in state.result_tabs.iter().enumerate() {
+        let is_err = matches!(tab.kind, ResultsPane::Error(_));
+        let snippet: String = tab
+            .query
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(20)
+            .collect();
+        let label = if snippet.is_empty() {
+            format!(" {} ", i + 1)
+        } else {
+            format!(" {}:{} ", i + 1, snippet)
+        };
+        let style = if i == state.active_result_tab {
+            Style::default()
+                .fg(Color::Black)
+                .bg(if is_err { Color::Red } else { Color::Cyan })
+                .add_modifier(Modifier::BOLD)
+        } else if is_err {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(label, style));
+        if i + 1 < state.result_tabs.len() {
+            spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+        }
+    }
+    Line::from(spans)
 }
 
 fn token_kind_style(kind: TokenKind) -> Option<Style> {
@@ -2679,7 +2794,8 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
             "Global",
             &[
                 ("?", "Open this help (normal mode)"),
-                ("Ctrl+Enter", "Execute query"),
+                ("Ctrl+Enter", "Run statement under cursor"),
+                ("Ctrl+Shift+Enter", "Run all statements in file"),
                 (":q", "Quit"),
                 ("Esc Esc", "Dismiss all toasts"),
             ],
@@ -2713,7 +2829,13 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
         ),
         (
             "Results Pane",
-            &[("j / k", "Scroll down / up"), ("Esc", "Dismiss results")],
+            &[
+                ("j / k", "Scroll down / up"),
+                ("h / l", "Scroll left / right"),
+                ("[ / ]", "Prev / next result tab"),
+                ("x", "Close active result tab"),
+                ("Esc", "Dismiss all results"),
+            ],
         ),
         (
             "Tabs",

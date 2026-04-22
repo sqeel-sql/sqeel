@@ -9,7 +9,10 @@ dirs = "6.0.0"
 lsp-types = "0.97.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-sqlx = { version = "0.8.6", features = ["mysql", "runtime-tokio-rustls", "macros", "sqlite", "postgres", "any"] }
+sqlx = { version = "0.8.6", features = ["mysql", "runtime-tokio-rustls", "macros", "sqlite", "postgres", "chrono", "bigdecimal", "uuid"] }
+chrono = "0.4"
+bigdecimal = "0.4"
+uuid = "1"
 tokio = { version = "1", features = ["full"] }
 toml = "1.1.2"
 tree-sitter = "0.26.8"

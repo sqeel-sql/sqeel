@@ -113,6 +113,13 @@ pub struct ResultsTab {
     pub col_scroll: usize,
 }
 
+/// A query request sent over the executor channel — single statement or batch.
+#[derive(Debug, Clone)]
+pub enum QueryRequest {
+    Single(String),
+    Batch(Vec<String>),
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub editor_content: Arc<String>,
@@ -123,7 +130,15 @@ pub struct AppState {
     pub keybinding_mode: KeybindingMode,
     pub vim_mode: VimMode,
     pub focus: Focus,
-    pub results: ResultsPane,
+    pub result_tabs: Vec<ResultsTab>,
+    pub active_result_tab: usize,
+    /// Soft cap for accumulated single-query result tabs. A run-all batch
+    /// may temporarily exceed this; the cap re-applies on the next single push.
+    pub max_result_tabs: usize,
+    /// Whether a run-all batch should stop on the first query error.
+    pub stop_on_error: bool,
+    /// Set while a run-all batch is in progress so cap enforcement is skipped.
+    pub batch_in_progress: bool,
     pub editor_ratio: f32,
     pub lsp_diagnostics: Vec<Diagnostic>,
     pub highlight_spans: Vec<HighlightSpan>,
@@ -132,8 +147,6 @@ pub struct AppState {
     pub completion_cursor: usize,
     pub active_connection: Option<String>,
     pub status_message: Option<String>,
-    pub results_scroll: usize,
-    pub results_col_scroll: usize,
     pub schema_nodes: Vec<SchemaNode>,
     pub schema_cursor: usize,
     pub schema_loading: bool,
@@ -165,7 +178,7 @@ pub struct AppState {
     pub lsp_available: bool,
     pub lsp_binary: String,
     // Live query channel — set by the binary when connected
-    pub query_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    pub query_tx: Option<tokio::sync::mpsc::Sender<QueryRequest>>,
     /// Schema sidebar search query — persisted to session so it survives app restart.
     pub schema_search_query: Option<String>,
 }
@@ -175,8 +188,15 @@ impl AppState {
         Arc::new(Mutex::new(Self {
             editor_ratio: 1.0,
             sidebar_visible: false,
+            max_result_tabs: 10,
+            stop_on_error: true,
             ..Default::default()
         }))
+    }
+
+    pub fn apply_editor_config(&mut self, cfg: &crate::config::EditorConfig) {
+        self.max_result_tabs = cfg.max_result_tabs;
+        self.stop_on_error = cfg.stop_on_error;
     }
 
     fn rebuild_schema_cache(&mut self) {
@@ -184,54 +204,152 @@ impl AppState {
         self.all_schema_items_cache = flatten_all(&self.schema_nodes);
     }
 
+    /// Active result tab's pane (or `Empty` if no tabs).
+    pub fn results(&self) -> &ResultsPane {
+        static EMPTY: ResultsPane = ResultsPane::Empty;
+        self.result_tabs
+            .get(self.active_result_tab)
+            .map(|t| &t.kind)
+            .unwrap_or(&EMPTY)
+    }
+
+    pub fn active_result(&self) -> Option<&ResultsTab> {
+        self.result_tabs.get(self.active_result_tab)
+    }
+
+    pub fn active_result_mut(&mut self) -> Option<&mut ResultsTab> {
+        self.result_tabs.get_mut(self.active_result_tab)
+    }
+
+    pub fn has_results(&self) -> bool {
+        !self.result_tabs.is_empty()
+    }
+
+    pub fn results_scroll(&self) -> usize {
+        self.active_result().map(|t| t.scroll).unwrap_or(0)
+    }
+
+    pub fn results_col_scroll(&self) -> usize {
+        self.active_result().map(|t| t.col_scroll).unwrap_or(0)
+    }
+
+    /// Append a new result tab. Single-query semantics (cap enforcement) when
+    /// `batch_in_progress` is false; batch pushes append unbounded.
+    pub fn push_result_tab(&mut self, query: String, kind: ResultsPane) {
+        let tab = ResultsTab {
+            query,
+            kind,
+            scroll: 0,
+            col_scroll: 0,
+        };
+        self.result_tabs.push(tab);
+        if !self.batch_in_progress && self.max_result_tabs > 0 {
+            while self.result_tabs.len() > self.max_result_tabs {
+                self.result_tabs.remove(0);
+            }
+            self.active_result_tab = self.result_tabs.len().saturating_sub(1);
+        }
+        self.editor_ratio = 0.5;
+    }
+
+    /// Begin a run-all batch: returns the index where the first batch tab will land.
+    pub fn start_batch(&mut self) -> usize {
+        self.batch_in_progress = true;
+        self.result_tabs.len()
+    }
+
+    /// End the current batch and focus the first batch tab.
+    pub fn end_batch(&mut self, batch_start: usize) {
+        self.batch_in_progress = false;
+        if batch_start < self.result_tabs.len() {
+            self.active_result_tab = batch_start;
+        } else if !self.result_tabs.is_empty() {
+            self.active_result_tab = self.result_tabs.len() - 1;
+        }
+        self.editor_ratio = 0.5;
+    }
+
+    pub fn next_result_tab(&mut self) {
+        if self.result_tabs.is_empty() {
+            return;
+        }
+        self.active_result_tab = (self.active_result_tab + 1) % self.result_tabs.len();
+    }
+
+    pub fn prev_result_tab(&mut self) {
+        if self.result_tabs.is_empty() {
+            return;
+        }
+        self.active_result_tab = if self.active_result_tab == 0 {
+            self.result_tabs.len() - 1
+        } else {
+            self.active_result_tab - 1
+        };
+    }
+
+    pub fn close_active_result_tab(&mut self) {
+        if self.result_tabs.is_empty() {
+            return;
+        }
+        self.result_tabs.remove(self.active_result_tab);
+        if self.result_tabs.is_empty() {
+            self.active_result_tab = 0;
+            self.editor_ratio = 1.0;
+        } else if self.active_result_tab >= self.result_tabs.len() {
+            self.active_result_tab = self.result_tabs.len() - 1;
+        }
+    }
+
+    /// Replace single-query result. Wraps `push_result_tab` for the test API.
     pub fn set_results(&mut self, mut result: QueryResult) {
         result.compute_col_widths();
-        self.results = ResultsPane::Results(result);
-        self.editor_ratio = 0.5;
-        self.results_scroll = 0;
-        self.results_col_scroll = 0;
+        self.push_result_tab(String::new(), ResultsPane::Results(result));
     }
 
     pub fn set_error(&mut self, msg: String) {
-        self.results = ResultsPane::Error(msg);
-        self.editor_ratio = 0.5;
-        self.results_scroll = 0;
-        self.results_col_scroll = 0;
+        self.push_result_tab(String::new(), ResultsPane::Error(msg));
     }
 
     pub fn dismiss_results(&mut self) {
-        self.results = ResultsPane::Empty;
+        self.result_tabs.clear();
+        self.active_result_tab = 0;
         self.editor_ratio = 1.0;
-        self.results_scroll = 0;
-        self.results_col_scroll = 0;
     }
 
     pub fn scroll_results_down(&mut self) {
-        let max = match &self.results {
-            ResultsPane::Results(r) => r.rows.len().saturating_sub(1),
+        let max = match self.active_result().map(|t| &t.kind) {
+            Some(ResultsPane::Results(r)) => r.rows.len().saturating_sub(1),
             _ => 0,
         };
-        if self.results_scroll < max {
-            self.results_scroll += 1;
+        if let Some(t) = self.active_result_mut()
+            && t.scroll < max
+        {
+            t.scroll += 1;
         }
     }
 
     pub fn scroll_results_up(&mut self) {
-        self.results_scroll = self.results_scroll.saturating_sub(1);
+        if let Some(t) = self.active_result_mut() {
+            t.scroll = t.scroll.saturating_sub(1);
+        }
     }
 
     pub fn scroll_results_right(&mut self) {
-        let max = match &self.results {
-            ResultsPane::Results(r) => r.columns.len().saturating_sub(1),
+        let max = match self.active_result().map(|t| &t.kind) {
+            Some(ResultsPane::Results(r)) => r.columns.len().saturating_sub(1),
             _ => 0,
         };
-        if self.results_col_scroll < max {
-            self.results_col_scroll += 1;
+        if let Some(t) = self.active_result_mut()
+            && t.col_scroll < max
+        {
+            t.col_scroll += 1;
         }
     }
 
     pub fn scroll_results_left(&mut self) {
-        self.results_col_scroll = self.results_col_scroll.saturating_sub(1);
+        if let Some(t) = self.active_result_mut() {
+            t.col_scroll = t.col_scroll.saturating_sub(1);
+        }
     }
 
     pub fn set_diagnostics(&mut self, diags: Vec<Diagnostic>) {
@@ -676,10 +794,19 @@ impl AppState {
         Ok(())
     }
 
-    /// Try to send a query to the active executor. Returns false if not connected.
+    /// Try to send a single query to the active executor. Returns false if not connected.
     pub fn send_query(&self, query: String) -> bool {
+        self.send_query_request(QueryRequest::Single(query))
+    }
+
+    /// Try to send a batch of queries to the active executor. Returns false if not connected.
+    pub fn send_batch(&self, queries: Vec<String>) -> bool {
+        self.send_query_request(QueryRequest::Batch(queries))
+    }
+
+    fn send_query_request(&self, req: QueryRequest) -> bool {
         if let Some(tx) = &self.query_tx {
-            tx.try_send(query).is_ok()
+            tx.try_send(req).is_ok()
         } else {
             false
         }
@@ -924,7 +1051,7 @@ mod tests {
         assert_eq!(s.keybinding_mode, KeybindingMode::Vim);
         assert_eq!(s.vim_mode, VimMode::Normal);
         assert_eq!(s.focus, Focus::Editor);
-        assert!(matches!(s.results, ResultsPane::Empty));
+        assert!(matches!(s.results(), ResultsPane::Empty));
         assert_eq!(s.editor_ratio, 1.0);
     }
 
@@ -938,7 +1065,7 @@ mod tests {
             col_widths: vec![],
         });
         assert_eq!(s.editor_ratio, 0.5);
-        assert!(matches!(s.results, ResultsPane::Results(_)));
+        assert!(matches!(s.results(), ResultsPane::Results(_)));
     }
 
     #[test]
@@ -947,7 +1074,7 @@ mod tests {
         let mut s = state.lock().unwrap();
         s.set_error("syntax error".into());
         assert_eq!(s.editor_ratio, 0.5);
-        assert!(matches!(s.results, ResultsPane::Error(_)));
+        assert!(matches!(s.results(), ResultsPane::Error(_)));
     }
 
     #[test]
@@ -959,16 +1086,16 @@ mod tests {
             rows: vec![vec!["1".into()], vec!["2".into()], vec!["3".into()]],
             col_widths: vec![],
         });
-        assert_eq!(s.results_scroll, 0);
+        assert_eq!(s.results_scroll(), 0);
         s.scroll_results_down();
-        assert_eq!(s.results_scroll, 1);
+        assert_eq!(s.results_scroll(), 1);
         s.scroll_results_down();
-        assert_eq!(s.results_scroll, 2);
+        assert_eq!(s.results_scroll(), 2);
         // Cannot go past last row
         s.scroll_results_down();
-        assert_eq!(s.results_scroll, 2);
+        assert_eq!(s.results_scroll(), 2);
         s.scroll_results_up();
-        assert_eq!(s.results_scroll, 1);
+        assert_eq!(s.results_scroll(), 1);
     }
 
     #[test]
@@ -978,7 +1105,39 @@ mod tests {
         s.set_error("oops".into());
         s.dismiss_results();
         assert_eq!(s.editor_ratio, 1.0);
-        assert!(matches!(s.results, ResultsPane::Empty));
+        assert!(matches!(s.results(), ResultsPane::Empty));
+    }
+
+    #[test]
+    fn singles_accumulate_then_cap_evicts_fifo() {
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.max_result_tabs = 3;
+        for i in 0..5 {
+            s.push_result_tab(format!("q{i}"), ResultsPane::Error(format!("e{i}")));
+        }
+        assert_eq!(s.result_tabs.len(), 3);
+        assert_eq!(s.result_tabs[0].query, "q2");
+        assert_eq!(s.result_tabs[2].query, "q4");
+        assert_eq!(s.active_result_tab, 2);
+    }
+
+    #[test]
+    fn batch_bypasses_cap_then_single_reapplies() {
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.max_result_tabs = 3;
+        let start = s.start_batch();
+        for i in 0..5 {
+            s.push_result_tab(format!("b{i}"), ResultsPane::Error("e".into()));
+        }
+        assert_eq!(s.result_tabs.len(), 5);
+        s.end_batch(start);
+        assert_eq!(s.active_result_tab, 0);
+        // Next single push triggers cap re-application.
+        s.push_result_tab("after".into(), ResultsPane::Error("e".into()));
+        assert_eq!(s.result_tabs.len(), 3);
+        assert_eq!(s.result_tabs[2].query, "after");
     }
 
     #[test]

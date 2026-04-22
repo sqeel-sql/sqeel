@@ -3,10 +3,11 @@ use std::sync::Arc;
 use clap::Parser;
 use sqeel_core::{
     AppState, UiProvider,
-    config::{load_connections, load_session_data, save_session},
+    config::{load_connections, load_main_config, load_session_data, save_session},
     db::DbConnection,
     persistence::{load_schema_cache, sanitize_conn_slug, save_schema_cache},
     schema::SchemaNode,
+    state::{QueryRequest, ResultsPane},
 };
 use sqeel_tui::TuiProvider;
 
@@ -31,11 +32,13 @@ fn main() -> anyhow::Result<()> {
     let state = AppState::new();
     state.lock().unwrap().debug_mode = args.debug;
 
+    let main_config = load_main_config().unwrap_or_default();
     let conns = load_connections().unwrap_or_default();
-    state
-        .lock()
-        .unwrap()
-        .set_available_connections(conns.clone());
+    {
+        let mut s = state.lock().unwrap();
+        s.apply_editor_config(&main_config.editor);
+        s.set_available_connections(conns.clone());
+    }
 
     let session = load_session_data();
     {
@@ -213,7 +216,7 @@ fn spawn_executor(
     session_schema_expanded_paths: Vec<String>,
 ) {
     let conn = Arc::new(conn);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<QueryRequest>(8);
     state.lock().unwrap().query_tx = Some(tx);
 
     // Show cached schema immediately with restored expansion + cursor, then refresh in background
@@ -360,16 +363,53 @@ fn spawn_executor(
     });
 
     tokio::spawn(async move {
-        while let Some(query) = rx.recv().await {
-            let result = conn.execute(&query).await;
-            let mut s = state.lock().unwrap();
-            match result {
-                Ok(r) => {
-                    s.persist_result(&query, &r);
-                    s.push_history(&query);
-                    s.set_results(r);
+        while let Some(req) = rx.recv().await {
+            match req {
+                QueryRequest::Single(query) => {
+                    let result = conn.execute(&query).await;
+                    let mut s = state.lock().unwrap();
+                    s.batch_in_progress = false;
+                    match result {
+                        Ok(mut r) => {
+                            s.persist_result(&query, &r);
+                            s.push_history(&query);
+                            r.compute_col_widths();
+                            s.push_result_tab(query, ResultsPane::Results(r));
+                        }
+                        Err(e) => {
+                            s.push_result_tab(query, ResultsPane::Error(e.to_string()));
+                        }
+                    }
                 }
-                Err(e) => s.set_error(e.to_string()),
+                QueryRequest::Batch(queries) => {
+                    let (stop_on_error, batch_start) = {
+                        let mut s = state.lock().unwrap();
+                        (s.stop_on_error, s.start_batch())
+                    };
+                    for query in queries {
+                        let result = conn.execute(&query).await;
+                        let is_err = result.is_err();
+                        {
+                            let mut s = state.lock().unwrap();
+                            match result {
+                                Ok(mut r) => {
+                                    s.persist_result(&query, &r);
+                                    s.push_history(&query);
+                                    r.compute_col_widths();
+                                    s.push_result_tab(query, ResultsPane::Results(r));
+                                }
+                                Err(e) => {
+                                    s.push_result_tab(query, ResultsPane::Error(e.to_string()));
+                                }
+                            }
+                        }
+                        if is_err && stop_on_error {
+                            break;
+                        }
+                    }
+                    let mut s = state.lock().unwrap();
+                    s.end_batch(batch_start);
+                }
             }
         }
     });

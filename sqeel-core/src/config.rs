@@ -16,6 +16,13 @@ pub struct EditorConfig {
     pub mouse_scroll_lines: usize,
     #[serde(default = "default_leader_key")]
     pub leader_key: String,
+    /// Cap on stored result tabs from single-query runs. Run-all batches may
+    /// temporarily exceed this; the cap re-applies on the next single push.
+    #[serde(default = "default_max_result_tabs")]
+    pub max_result_tabs: usize,
+    /// Whether `Ctrl+Shift+Enter` (run-all) stops on the first query error.
+    #[serde(default = "default_stop_on_error")]
+    pub stop_on_error: bool,
 }
 
 fn default_mouse_scroll_lines() -> usize {
@@ -26,6 +33,14 @@ fn default_leader_key() -> String {
     " ".to_string()
 }
 
+fn default_max_result_tabs() -> usize {
+    10
+}
+
+fn default_stop_on_error() -> bool {
+    true
+}
+
 impl Default for EditorConfig {
     fn default() -> Self {
         Self {
@@ -33,6 +48,8 @@ impl Default for EditorConfig {
             lsp_binary: "sqls".into(),
             mouse_scroll_lines: default_mouse_scroll_lines(),
             leader_key: default_leader_key(),
+            max_result_tabs: default_max_result_tabs(),
+            stop_on_error: default_stop_on_error(),
         }
     }
 }
@@ -110,6 +127,14 @@ mouse_scroll_lines = 3
 # Leader key for chord shortcuts (e.g. <leader>e toggles the schema sidebar).
 # Use a single character; " " for Space.
 leader_key = " "
+
+# Maximum number of accumulated single-query result tabs. A run-all batch
+# (Ctrl+Shift+Enter) may temporarily exceed this; the cap re-applies on the
+# next single-query run.
+max_result_tabs = 10
+
+# Stop running a Ctrl+Shift+Enter batch on the first query error.
+stop_on_error = true
 "#;
 
 pub fn load_main_config() -> anyhow::Result<MainConfig> {

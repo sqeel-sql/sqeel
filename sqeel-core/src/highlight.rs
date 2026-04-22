@@ -73,6 +73,54 @@ impl Highlighter {
     }
 }
 
+/// Parse `source` and return the byte ranges of each top-level statement.
+/// Whitespace between statements is excluded. Statements are returned in source order.
+pub fn statement_ranges(source: &str) -> Vec<(usize, usize)> {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_sequel::LANGUAGE.into())
+        .is_err()
+    {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let root = tree.root_node();
+    let mut ranges = Vec::new();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        let start = child.start_byte();
+        let end = child.end_byte();
+        if start < end && end <= source.len() {
+            ranges.push((start, end));
+        }
+    }
+    if ranges.is_empty() && !source.trim().is_empty() {
+        ranges.push((0, source.len()));
+    }
+    ranges
+}
+
+/// Returns the byte range of the statement containing `byte`. If `byte` falls in
+/// inter-statement whitespace, returns the statement immediately preceding it
+/// (or the next one if it precedes the first statement).
+pub fn statement_at_byte(source: &str, byte: usize) -> Option<(usize, usize)> {
+    let ranges = statement_ranges(source);
+    if ranges.is_empty() {
+        return None;
+    }
+    for (i, (s, e)) in ranges.iter().enumerate() {
+        if byte >= *s && byte < *e {
+            return Some((*s, *e));
+        }
+        if byte < *s {
+            return Some(if i == 0 { ranges[0] } else { ranges[i - 1] });
+        }
+    }
+    Some(*ranges.last().unwrap())
+}
+
 impl Default for Highlighter {
     fn default() -> Self {
         Self::new().expect("failed to initialize tree-sitter-sequel")
