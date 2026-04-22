@@ -59,13 +59,21 @@ fn main() -> anyhow::Result<()> {
                 .result_tabs
                 .iter()
                 .filter_map(|r| {
-                    let qr = load_result_for(&slug, &r.filename).ok()?;
+                    let kind = if r.cancelled {
+                        ResultsPane::Cancelled
+                    } else if let Some(ref err) = r.error {
+                        ResultsPane::Error(err.clone())
+                    } else if let Some(ref filename) = r.filename {
+                        ResultsPane::Results(load_result_for(&slug, filename).ok()?)
+                    } else {
+                        return None;
+                    };
                     Some(ResultsTab {
                         query: r.query.clone(),
-                        kind: ResultsPane::Results(qr),
+                        kind,
                         scroll: r.scroll,
                         col_scroll: r.col_scroll,
-                        saved_filename: Some(r.filename.clone()),
+                        saved_filename: r.filename.clone(),
                     })
                 })
                 .collect();
@@ -157,18 +165,7 @@ fn main() -> anyhow::Result<()> {
             let result_tabs: Vec<sqeel_core::config::SavedResultRef> = s
                 .result_tabs
                 .iter()
-                .filter_map(|t| {
-                    let filename = t.saved_filename.clone()?;
-                    if !matches!(t.kind, sqeel_core::state::ResultsPane::Results(_)) {
-                        return None;
-                    }
-                    Some(sqeel_core::config::SavedResultRef {
-                        filename,
-                        query: t.query.clone(),
-                        scroll: t.scroll,
-                        col_scroll: t.col_scroll,
-                    })
-                })
+                .filter_map(saved_ref_from_tab)
                 .collect();
             let active_result_tab = s.active_result_tab;
             drop(s);
@@ -242,6 +239,41 @@ fn main() -> anyhow::Result<()> {
 
     TuiProvider::run(state.clone())?;
     Ok(())
+}
+
+fn saved_ref_from_tab(t: &ResultsTab) -> Option<sqeel_core::config::SavedResultRef> {
+    use sqeel_core::config::SavedResultRef;
+    use sqeel_core::state::ResultsPane as P;
+    match &t.kind {
+        P::Results(_) => {
+            let filename = t.saved_filename.clone()?;
+            Some(SavedResultRef {
+                filename: Some(filename),
+                query: t.query.clone(),
+                scroll: t.scroll,
+                col_scroll: t.col_scroll,
+                error: None,
+                cancelled: false,
+            })
+        }
+        P::Error(msg) => Some(SavedResultRef {
+            filename: None,
+            query: t.query.clone(),
+            scroll: t.scroll,
+            col_scroll: t.col_scroll,
+            error: Some(msg.clone()),
+            cancelled: false,
+        }),
+        P::Cancelled => Some(SavedResultRef {
+            filename: None,
+            query: t.query.clone(),
+            scroll: t.scroll,
+            col_scroll: t.col_scroll,
+            error: None,
+            cancelled: true,
+        }),
+        P::Loading | P::Empty => None,
+    }
 }
 
 async fn connect_and_spawn(
@@ -380,18 +412,7 @@ fn spawn_executor(
         let result_tabs: Vec<sqeel_core::config::SavedResultRef> = s
             .result_tabs
             .iter()
-            .filter_map(|t| {
-                let filename = t.saved_filename.clone()?;
-                if !matches!(t.kind, sqeel_core::state::ResultsPane::Results(_)) {
-                    return None;
-                }
-                Some(sqeel_core::config::SavedResultRef {
-                    filename,
-                    query: t.query.clone(),
-                    scroll: t.scroll,
-                    col_scroll: t.col_scroll,
-                })
-            })
+            .filter_map(saved_ref_from_tab)
             .collect();
         let active_result_tab = s.active_result_tab;
         let _ = save_schema_cache(&col_schema_url, &nodes);

@@ -61,16 +61,27 @@ pub struct TabCursor {
 }
 
 /// Lightweight pointer persisted in session.toml for a single results tab.
-/// Points at a JSON file under `~/.local/share/sqeel/results/<conn>/`.
+/// Success rows live in a separate JSON under
+/// `~/.local/share/sqeel/results/<conn>/<filename>.json`. Error + cancelled
+/// outcomes are stored inline.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
 pub struct SavedResultRef {
-    pub filename: String,
+    /// Present only for success tabs — on-disk JSON payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
     #[serde(default)]
     pub query: String,
     #[serde(default)]
     pub scroll: usize,
     #[serde(default)]
     pub col_scroll: usize,
+    /// Error text captured when the query failed. `None` for success /
+    /// cancelled tabs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// True for tabs whose batch slot was skipped after an earlier error.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
