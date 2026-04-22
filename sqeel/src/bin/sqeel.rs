@@ -6,10 +6,7 @@ use sqeel_core::{
     config::{load_connections, load_main_config, load_session_data, save_session},
     db::DbConnection,
     ddl::parse_ddl,
-    persistence::{
-        evict_old_results, load_result_for, load_schema_cache, sanitize_conn_slug,
-        save_schema_cache,
-    },
+    persistence::{evict_old_results, load_result_for, sanitize_conn_slug},
     schema::SchemaNode,
     state::{QueryRequest, ResultsPane, ResultsTab, SchemaLoadRequest},
 };
@@ -343,26 +340,6 @@ fn spawn_executor(
         sanitize_conn_slug(conn_name)
     };
 
-    // Show cached schema immediately with restored expansion + cursor, then refresh in background.
-    // When a cache exists we restore here; the background loader then leaves
-    // cursor/expansion alone so user toggles made during the refresh survive.
-    let cache_restored = if let Some(cached) = load_schema_cache(&conn.url) {
-        let mut s = state.lock().unwrap();
-        s.set_schema_nodes(cached);
-        s.restore_schema_expanded_paths(&session_schema_expanded_paths);
-        let restored = session_schema_cursor_path
-            .as_deref()
-            .map(|p| s.restore_schema_cursor_by_path(p))
-            .unwrap_or(false);
-        if !restored {
-            let max = s.visible_schema_items().len().saturating_sub(1);
-            s.schema_cursor = session_schema_cursor.min(max);
-        }
-        true
-    } else {
-        false
-    };
-
     // ── Lazy schema loader ───────────────────────────────────────────────────
     // Bounded-concurrency worker that handles one SchemaLoadRequest at a time:
     // Databases (initial) → Tables(db) when a db is expanded → Columns(db,table)
@@ -386,14 +363,11 @@ fn spawn_executor(
 
     let schema_conn = conn.clone();
     let schema_state = state.clone();
-    let schema_url = conn.url.clone();
     tokio::spawn(schema_loader_task(
         schema_conn,
         schema_state,
-        schema_url,
         load_rx,
         load_tx,
-        cache_restored,
         session_schema_cursor,
         session_schema_cursor_path,
         session_schema_expanded_paths,
@@ -502,14 +476,6 @@ where
     }
 }
 
-/// Snapshot the current schema tree and persist it to disk. Cheap enough to
-/// call at phase boundaries (db list, per-db table list, end-of-load) so a
-/// mid-load disconnect still leaves a useful cache behind.
-fn snapshot_and_save_schema(state: &Arc<std::sync::Mutex<AppState>>, url: &str) {
-    let nodes = state.lock().unwrap().schema_nodes.clone();
-    let _ = save_schema_cache(url, &nodes);
-}
-
 /// Walk the tree and emit a load request for every expanded node whose
 /// children haven't been fetched this session. Called at startup so cached
 /// nodes the user had open last time refresh automatically.
@@ -565,10 +531,8 @@ fn collect_expanded_load_requests(nodes: &[SchemaNode]) -> Vec<SchemaLoadRequest
 async fn schema_loader_task(
     conn: Arc<DbConnection>,
     state: Arc<std::sync::Mutex<AppState>>,
-    schema_url: String,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SchemaLoadRequest>,
     tx: tokio::sync::mpsc::UnboundedSender<SchemaLoadRequest>,
-    cache_restored: bool,
     session_schema_cursor: usize,
     session_schema_cursor_path: Option<String>,
     session_schema_expanded_paths: Vec<String>,
@@ -583,7 +547,6 @@ async fn schema_loader_task(
         let permit = sem.clone().acquire_owned().await.unwrap();
         let conn = conn.clone();
         let state = state.clone();
-        let schema_url = schema_url.clone();
         let req_tx = tx.clone();
         let apply_saved_expansion =
             !databases_loaded && matches!(req, SchemaLoadRequest::Databases);
@@ -610,18 +573,15 @@ async fn schema_loader_task(
                                 let mut s = state.lock().unwrap();
                                 s.merge_db_list(&names);
                                 if apply_saved_expansion {
-                                    if !cache_restored {
-                                        s.restore_schema_expanded_paths(&session_expanded);
-                                        let restored = session_cursor_path
-                                            .as_deref()
-                                            .map(|p| s.restore_schema_cursor_by_path(p))
-                                            .unwrap_or(false);
-                                        if !restored {
-                                            s.rebuild_schema_cache_if_dirty();
-                                            let max =
-                                                s.visible_schema_items().len().saturating_sub(1);
-                                            s.schema_cursor = session_schema_cursor.min(max);
-                                        }
+                                    s.restore_schema_expanded_paths(&session_expanded);
+                                    let restored = session_cursor_path
+                                        .as_deref()
+                                        .map(|p| s.restore_schema_cursor_by_path(p))
+                                        .unwrap_or(false);
+                                    if !restored {
+                                        s.rebuild_schema_cache_if_dirty();
+                                        let max = s.visible_schema_items().len().saturating_sub(1);
+                                        s.schema_cursor = session_schema_cursor.min(max);
                                     }
                                     // Queue follow-up Tables requests for any
                                     // db that's currently expanded.
@@ -695,7 +655,6 @@ async fn schema_loader_task(
                         .set_table_columns(&db, &table, col_nodes);
                 }
             }
-            snapshot_and_save_schema(&state, &schema_url);
             state.lock().unwrap().finish_schema_load(&finish_req);
         });
     }

@@ -1,29 +1,8 @@
-use crate::schema::SchemaNode;
 use crate::state::QueryResult;
 use std::path::PathBuf;
 
 pub fn data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("sqeel"))
-}
-
-pub fn schema_cache_dir() -> Option<PathBuf> {
-    data_dir().map(|d| d.join("schema"))
-}
-
-pub fn save_schema_cache(url: &str, nodes: &[SchemaNode]) -> anyhow::Result<()> {
-    let dir = schema_cache_dir().ok_or_else(|| anyhow::anyhow!("cannot determine data dir"))?;
-    ensure_dir(&dir)?;
-    let key = fnv_hash8(url);
-    let json = serde_json::to_string(nodes)?;
-    std::fs::write(dir.join(format!("{key}.json")), json)?;
-    Ok(())
-}
-
-pub fn load_schema_cache(url: &str) -> Option<Vec<SchemaNode>> {
-    let dir = schema_cache_dir()?;
-    let key = fnv_hash8(url);
-    let content = std::fs::read_to_string(dir.join(format!("{key}.json"))).ok()?;
-    serde_json::from_str(&content).ok()
 }
 
 pub fn queries_dir() -> Option<PathBuf> {
