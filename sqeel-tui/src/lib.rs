@@ -2543,7 +2543,7 @@ fn draw_results(
                 .col_widths
                 .iter()
                 .skip(col_start)
-                .map(|&w| Constraint::Min(w))
+                .map(|&w| Constraint::Length(w))
                 .collect();
             let col_widths = interleave_widths(raw_widths);
 
