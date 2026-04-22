@@ -3372,8 +3372,7 @@ fn draw_completions(
         .max()
         .unwrap_or(0);
     let popup_w = (longest + 2)
-        .max(20)
-        .min(60)
+        .clamp(20, 60)
         .min(editor_area.width.saturating_sub(2));
     let popup_h = (items.len() as u16 + 2).min(12);
 
