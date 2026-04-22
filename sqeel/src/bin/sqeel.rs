@@ -400,11 +400,14 @@ fn spawn_executor(
         // shells would have wiped cached children.
         let _ = db_shells;
 
-        // Step 2: table shells per database — fan out list_tables with bounded
-        // concurrency. For servers with many dbs this collapses N sequential
-        // roundtrips into ceil(N / TABLE_LIST_CONCURRENCY).
+        // Steps 2 + 3: table shells per database + columns per table. Both
+        // fan out with bounded concurrency. Column tasks are spawned as each
+        // db's table list arrives — avoids buffering every (db,table) pair
+        // before column fetching begins.
         const TABLE_LIST_CONCURRENCY: usize = 8;
+        const COLUMN_CONCURRENCY: usize = 8;
         let table_sem = Arc::new(tokio::sync::Semaphore::new(TABLE_LIST_CONCURRENCY));
+        let column_sem = Arc::new(tokio::sync::Semaphore::new(COLUMN_CONCURRENCY));
         let mut table_set: tokio::task::JoinSet<(String, anyhow::Result<Vec<String>>)> =
             tokio::task::JoinSet::new();
         for db_name in &db_names {
@@ -418,7 +421,7 @@ fn spawn_executor(
             });
         }
 
-        let mut table_work: Vec<(String, String)> = Vec::new();
+        let mut column_set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
         while let Some(joined) = table_set.join_next().await {
             let (db_name, result) = match joined {
                 Ok(pair) => pair,
@@ -438,38 +441,34 @@ fn spawn_executor(
                 .lock()
                 .unwrap()
                 .set_db_tables(&db_name, &table_names);
-            table_work.extend(table_names.into_iter().map(|t| (db_name.clone(), t)));
-        }
 
-        // Step 3: columns — bounded concurrency.
-        const COLUMN_CONCURRENCY: usize = 8;
-        let sem = Arc::new(tokio::sync::Semaphore::new(COLUMN_CONCURRENCY));
-        let mut join_set = tokio::task::JoinSet::new();
-        for (db_name, table_name) in table_work {
-            let permit = sem.clone().acquire_owned().await.unwrap();
-            let conn = schema_conn.clone();
-            let state = schema_state.clone();
-            join_set.spawn(async move {
-                let _permit = permit;
-                let col_nodes = match conn.list_columns(&db_name, &table_name).await {
-                    Ok(cols) => cols
-                        .into_iter()
-                        .map(|c| SchemaNode::Column {
-                            name: c.name,
-                            type_name: c.type_name,
-                            nullable: c.nullable,
-                            is_pk: c.is_pk,
-                        })
-                        .collect(),
-                    Err(_) => vec![],
-                };
-                state
-                    .lock()
-                    .unwrap()
-                    .set_table_columns(&db_name, &table_name, col_nodes);
-            });
+            for table_name in table_names {
+                let permit = column_sem.clone().acquire_owned().await.unwrap();
+                let conn = schema_conn.clone();
+                let state = schema_state.clone();
+                let db = db_name.clone();
+                column_set.spawn(async move {
+                    let _permit = permit;
+                    let col_nodes = match conn.list_columns(&db, &table_name).await {
+                        Ok(cols) => cols
+                            .into_iter()
+                            .map(|c| SchemaNode::Column {
+                                name: c.name,
+                                type_name: c.type_name,
+                                nullable: c.nullable,
+                                is_pk: c.is_pk,
+                            })
+                            .collect(),
+                        Err(_) => vec![],
+                    };
+                    state
+                        .lock()
+                        .unwrap()
+                        .set_table_columns(&db, &table_name, col_nodes);
+                });
+            }
         }
-        while join_set.join_next().await.is_some() {}
+        while column_set.join_next().await.is_some() {}
 
         // All columns loaded — save cache + session. Expansion/cursor were
         // restored up-front from cache (if present); don't stomp user toggles
