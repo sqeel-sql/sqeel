@@ -68,7 +68,7 @@ tab_cancel_fg   = "comment"
 tab_cancel_bg   = "comment"
 
 # Status bar
-status_bar_bg       = "bg_dark"
+status_bar_bg       = "bg_highlight"
 status_bar_fg       = "fg_dark"
 status_mode_fg      = "black"
 status_mode_normal  = "blue"
