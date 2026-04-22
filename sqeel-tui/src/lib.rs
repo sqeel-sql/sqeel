@@ -846,9 +846,9 @@ async fn run_loop(
                                                 .cursor_down(last_draw_areas.schema_list_count);
                                         }
                                     } else {
-                                        for _ in 0..mouse_scroll_lines {
-                                            s.schema_cursor_down();
-                                        }
+                                        // Wheel scrolls the viewport only —
+                                        // the cursor stays where the user put it.
+                                        s.scroll_schema_viewport(mouse_scroll_lines as i32);
                                     }
                                 }
                                 Focus::Results => {
@@ -877,9 +877,7 @@ async fn run_loop(
                                             schema_search.cursor_up();
                                         }
                                     } else {
-                                        for _ in 0..mouse_scroll_lines {
-                                            s.schema_cursor_up();
-                                        }
+                                        s.scroll_schema_viewport(-(mouse_scroll_lines as i32));
                                     }
                                 }
                                 Focus::Results => {
@@ -2528,8 +2526,30 @@ fn draw_schema(
         )
     };
 
+    // Publish viewport height so cursor-nav helpers on AppState can keep the
+    // selection visible without needing the draw metrics plumbed through.
+    state
+        .schema_viewport_rows
+        .store(list_area.height, std::sync::atomic::Ordering::Relaxed);
+
+    let height = list_area.height as usize;
+    let max_offset = item_count.saturating_sub(height.max(1));
+    let offset = state.schema_scroll_offset.min(max_offset);
+    // Only mark the row as "selected" when it's actually inside the viewport;
+    // otherwise ratatui's List would fight our offset and snap back to the
+    // cursor every frame.
+    let selected_visible = selected.and_then(|c| {
+        if height > 0 && c >= offset && c < offset + height {
+            Some(c)
+        } else {
+            None
+        }
+    });
+
     let list = List::new(list_items).highlight_style(highlight_style);
-    let mut list_state = ListState::default().with_selected(selected);
+    let mut list_state = ListState::default()
+        .with_offset(offset)
+        .with_selected(selected_visible);
     f.render_stateful_widget(list, list_area, &mut list_state);
     (
         list_area,

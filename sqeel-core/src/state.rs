@@ -279,6 +279,13 @@ pub struct AppState {
     /// has a shared ref) can update them without taking a mutable lock.
     pub results_body_rows: AtomicU16,
     pub results_body_width: AtomicU16,
+    /// Visible row count of the schema list viewport, written by the TUI on
+    /// every draw so cursor-nav helpers can scroll the viewport without needing
+    /// the height plumbed through.
+    pub schema_viewport_rows: AtomicU16,
+    /// Top item index currently shown in the schema list. Decoupled from the
+    /// cursor so the mouse wheel can scroll without dragging the selection.
+    pub schema_scroll_offset: usize,
 }
 
 impl AppState {
@@ -823,6 +830,7 @@ impl AppState {
             find_cursor_by_path(&self.schema_items_cache, &self.schema_nodes, path_str)
         {
             self.schema_cursor = idx;
+            self.ensure_schema_cursor_visible();
             true
         } else {
             false
@@ -834,19 +842,54 @@ impl AppState {
         if self.schema_cursor < max {
             self.schema_cursor += 1;
         }
+        self.ensure_schema_cursor_visible();
     }
 
     pub fn schema_cursor_up(&mut self) {
         self.schema_cursor = self.schema_cursor.saturating_sub(1);
+        self.ensure_schema_cursor_visible();
     }
 
     pub fn schema_cursor_top(&mut self) {
         self.schema_cursor = 0;
+        self.schema_scroll_offset = 0;
     }
 
     pub fn schema_cursor_bottom(&mut self) {
         self.rebuild_schema_cache_if_dirty();
         self.schema_cursor = self.visible_schema_items().len().saturating_sub(1);
+        self.ensure_schema_cursor_visible();
+    }
+
+    /// After a cursor move, shift `schema_scroll_offset` just enough to keep
+    /// the cursor inside the viewport. Needs the TUI's last-rendered viewport
+    /// height, which it writes to `schema_viewport_rows`.
+    pub fn ensure_schema_cursor_visible(&mut self) {
+        let height = self.schema_viewport_rows.load(Ordering::Relaxed) as usize;
+        if height == 0 {
+            return;
+        }
+        let item_count = self.schema_items_cache.len();
+        if self.schema_cursor < self.schema_scroll_offset {
+            self.schema_scroll_offset = self.schema_cursor;
+        } else if self.schema_cursor >= self.schema_scroll_offset + height {
+            self.schema_scroll_offset = self.schema_cursor + 1 - height;
+        }
+        let max_offset = item_count.saturating_sub(height);
+        if self.schema_scroll_offset > max_offset {
+            self.schema_scroll_offset = max_offset;
+        }
+    }
+
+    /// Scroll the schema viewport by `delta` rows (positive = down). Leaves the
+    /// cursor untouched — the mouse wheel should only move the view.
+    pub fn scroll_schema_viewport(&mut self, delta: i32) {
+        let height = self.schema_viewport_rows.load(Ordering::Relaxed) as usize;
+        let item_count = self.schema_items_cache.len();
+        let max_offset = item_count.saturating_sub(height.max(1));
+        let new =
+            (self.schema_scroll_offset as i64 + delta as i64).clamp(0, max_offset as i64) as usize;
+        self.schema_scroll_offset = new;
     }
 
     pub fn schema_toggle_path(&mut self, path: &[usize]) {
