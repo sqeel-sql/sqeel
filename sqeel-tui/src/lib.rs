@@ -481,23 +481,30 @@ async fn run_loop(
 
             let (row, col) = editor.textarea.cursor();
 
-            // Suppress completions when the character immediately left of the
-            // cursor is whitespace, a newline, or `;`.
+            // Suppress completions after `;` or on empty buffer. Whitespace
+            // only suppresses when ctx is `Any` — inside Table/Column/Qualified
+            // contexts, an empty prefix should still surface candidates (e.g.
+            // right after `where `).
             let char_left = editor.textarea.lines().get(row).and_then(|line| {
                 let before = &line[..col.min(line.len())];
                 before.chars().next_back()
             });
-            let suppress = matches!(char_left, Some(c) if c.is_whitespace() || c == ';')
-                || char_left.is_none();
+            let hard_suppress =
+                matches!(char_left, Some(';')) || char_left.is_none();
+
+            let prefix = word_prefix_at(editor.textarea.lines(), row, col);
+            let byte_offset = row_col_to_byte(editor.textarea.lines(), row, col);
+            let ctx = completion_ctx::parse_context(content, byte_offset);
+
+            let whitespace_left = matches!(char_left, Some(c) if c.is_whitespace());
+            let suppress = hard_suppress
+                || (whitespace_left && matches!(ctx, CompletionCtx::Any));
 
             if suppress {
                 state.lock().unwrap().dismiss_completions();
                 last_completion_id = None;
                 last_completion_ctx = None;
             } else {
-                let prefix = word_prefix_at(editor.textarea.lines(), row, col);
-                let byte_offset = row_col_to_byte(editor.textarea.lines(), row, col);
-                let ctx = completion_ctx::parse_context(content, byte_offset);
 
                 // Context-scoped pool (unfiltered) fed to the prefix-filter
                 // thread; empty prefix returns the full sorted pool.
@@ -3358,19 +3365,20 @@ fn draw_completions(
     let items: Vec<ListItem> = state
         .completions
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let style = if i == cursor {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            ListItem::new(s.as_str()).style(style)
-        })
+        .map(|s| ListItem::new(s.as_str()))
         .collect();
 
-    let popup_w = 30u16.min(editor_area.width.saturating_sub(2));
-    let popup_h = (items.len() as u16 + 2).min(10);
+    let longest = state
+        .completions
+        .iter()
+        .map(|s| s.chars().count() as u16)
+        .max()
+        .unwrap_or(0);
+    let popup_w = (longest + 2)
+        .max(20)
+        .min(60)
+        .min(editor_area.width.saturating_sub(2));
+    let popup_h = (items.len() as u16 + 2).min(12);
 
     // inner editor area starts 1 cell in from the block border
     let inner_x = editor_area.x + 1;
@@ -3399,14 +3407,15 @@ fn draw_completions(
     };
 
     f.render_widget(Clear, popup);
-    f.render_widget(
-        List::new(items).block(
+    let list = List::new(items)
+        .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(ui().completion_border)),
-        ),
-        popup,
-    );
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut list_state = ListState::default().with_selected(Some(cursor));
+    f.render_stateful_widget(list, popup, &mut list_state);
 }
 
 /// Small borderless centered dialog: 2-col horizontal padding, 1-row vertical
