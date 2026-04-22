@@ -6,6 +6,7 @@
 //! [`vim`] and communicates with Editor through a small internal API
 //! exposed via `pub(super)` fields and helper methods.
 
+pub mod ex;
 pub mod vim;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

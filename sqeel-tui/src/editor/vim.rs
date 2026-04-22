@@ -90,10 +90,22 @@ pub enum Motion {
     LineEnd,
     FileTop,
     FileBottom,
-    Find { ch: char, forward: bool, till: bool },
-    FindRepeat { reverse: bool },
+    Find {
+        ch: char,
+        forward: bool,
+        till: bool,
+    },
+    FindRepeat {
+        reverse: bool,
+    },
     MatchBracket,
-    WordAtCursor { forward: bool },
+    WordAtCursor {
+        forward: bool,
+    },
+    /// `n` / `N` — repeat the last `/` or `?` search.
+    SearchNext {
+        reverse: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -565,6 +577,8 @@ fn parse_motion(input: &Input) -> Option<Motion> {
         Key::Char(',') => Some(Motion::FindRepeat { reverse: true }),
         Key::Char('*') => Some(Motion::WordAtCursor { forward: true }),
         Key::Char('#') => Some(Motion::WordAtCursor { forward: false }),
+        Key::Char('n') => Some(Motion::SearchNext { reverse: false }),
+        Key::Char('N') => Some(Motion::SearchNext { reverse: true }),
         _ => None,
     }
 }
@@ -658,6 +672,18 @@ fn apply_motion_cursor(ed: &mut Editor<'_>, motion: &Motion, count: usize) {
         }
         Motion::WordAtCursor { forward } => {
             word_at_cursor_search(ed, *forward, count);
+        }
+        Motion::SearchNext { reverse } => {
+            if ed.textarea.search_pattern().is_none() {
+                return;
+            }
+            for _ in 0..count.max(1) {
+                if *reverse {
+                    let _ = ed.textarea.search_back(false);
+                } else {
+                    let _ = ed.textarea.search_forward(false);
+                }
+            }
         }
     }
 }
@@ -1270,8 +1296,7 @@ fn motion_kind(motion: &Motion) -> MotionKind {
         Motion::Up | Motion::Down => MotionKind::Linewise,
         Motion::FileTop | Motion::FileBottom => MotionKind::Linewise,
         Motion::WordEnd | Motion::BigWordEnd => MotionKind::Inclusive,
-        Motion::Find { till: false, .. } => MotionKind::Inclusive,
-        Motion::Find { till: true, .. } => MotionKind::Inclusive,
+        Motion::Find { .. } => MotionKind::Inclusive,
         Motion::MatchBracket => MotionKind::Inclusive,
         _ => MotionKind::Exclusive,
     }
@@ -2273,5 +2298,32 @@ mod tests {
         let mut e = editor_with("foo bar foo baz");
         run_keys(&mut e, "*");
         assert_eq!(e.textarea.cursor().1, 8);
+    }
+
+    #[test]
+    fn n_repeats_last_search_forward() {
+        let mut e = editor_with("foo bar foo baz foo");
+        e.textarea.set_search_pattern("foo").unwrap();
+        run_keys(&mut e, "n");
+        assert_eq!(e.textarea.cursor().1, 8);
+        run_keys(&mut e, "n");
+        assert_eq!(e.textarea.cursor().1, 16);
+    }
+
+    #[test]
+    fn shift_n_reverses_search() {
+        let mut e = editor_with("foo bar foo baz foo");
+        e.textarea.set_search_pattern("foo").unwrap();
+        run_keys(&mut e, "nn");
+        assert_eq!(e.textarea.cursor().1, 16);
+        run_keys(&mut e, "N");
+        assert_eq!(e.textarea.cursor().1, 8);
+    }
+
+    #[test]
+    fn n_noop_without_pattern() {
+        let mut e = editor_with("foo bar");
+        run_keys(&mut e, "n");
+        assert_eq!(e.textarea.cursor(), (0, 0));
     }
 }

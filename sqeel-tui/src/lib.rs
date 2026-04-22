@@ -1048,20 +1048,53 @@ async fn run_loop(
                         (KeyModifiers::NONE, KeyCode::Enter) => {
                             let cmd_str = command_input.take().unwrap_or_default().text;
                             let trimmed = cmd_str.trim();
-                            if let Ok(line) = trimmed.parse::<usize>() {
-                                state.lock().unwrap().focus = Focus::Editor;
-                                editor.goto_line(line);
-                            } else {
-                                match trimmed {
-                                    "q" | "q!" => break,
-                                    other => {
-                                        toasts.push((
-                                            format!("Unknown command: :{other}"),
-                                            ToastKind::Error,
-                                            std::time::Instant::now(),
-                                        ));
+                            match editor::ex::run(&mut editor, trimmed) {
+                                editor::ex::ExEffect::Quit { force: _, save } => {
+                                    if save && editor_dirty {
+                                        let mut s = state.lock().unwrap();
+                                        s.editor_content = Arc::new(editor.content());
+                                        s.autosave();
                                     }
+                                    break;
                                 }
+                                editor::ex::ExEffect::Save => {
+                                    let mut s = state.lock().unwrap();
+                                    s.editor_content = Arc::new(editor.content());
+                                    s.autosave();
+                                    editor_dirty = false;
+                                    last_save_time = Instant::now();
+                                    toasts.push((
+                                        "Saved".into(),
+                                        ToastKind::Info,
+                                        std::time::Instant::now(),
+                                    ));
+                                }
+                                editor::ex::ExEffect::Substituted { count } => {
+                                    state.lock().unwrap().focus = Focus::Editor;
+                                    editor_dirty = true;
+                                    toasts.push((
+                                        format!("{count} substitution(s)"),
+                                        ToastKind::Info,
+                                        std::time::Instant::now(),
+                                    ));
+                                }
+                                editor::ex::ExEffect::Ok => {
+                                    state.lock().unwrap().focus = Focus::Editor;
+                                }
+                                editor::ex::ExEffect::Info(msg) => {
+                                    toasts.push((msg, ToastKind::Info, std::time::Instant::now()));
+                                }
+                                editor::ex::ExEffect::Error(msg) => {
+                                    toasts.push((msg, ToastKind::Error, std::time::Instant::now()));
+                                }
+                                editor::ex::ExEffect::Unknown(c) => {
+                                    toasts.push((
+                                        format!("Unknown command: :{c}"),
+                                        ToastKind::Error,
+                                        std::time::Instant::now(),
+                                    ));
+                                }
+                                editor::ex::ExEffect::None => {}
                             }
                         }
                         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {

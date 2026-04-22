@@ -9,6 +9,7 @@ anyhow = "1"
 ratatui = "0.29.0"
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 tui-textarea = { version = "0.7.0", features = ["search"] }
+regex = "1"
 tokio = { version = "1.52.1", features = ["full"] }
 lsp-types = "0.97.0"
 arboard = { version = "3", features = ["wayland-data-control"] }
