@@ -419,7 +419,12 @@ async fn run_loop(
                                             .collect();
                                         if idx < filtered.len() {
                                             schema_search_cursor = idx;
-                                            s.schema_toggle_path(&filtered[idx]);
+                                            let path_str = sqeel_core::schema::path_to_string(
+                                                &filtered[idx],
+                                                &s.schema_nodes,
+                                            );
+                                            s.restore_schema_cursor_by_path(&path_str);
+                                            s.schema_toggle_current();
                                         }
                                     } else {
                                         let max = s.visible_schema_items().len();
