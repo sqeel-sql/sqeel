@@ -1791,6 +1791,9 @@ fn mode_label(state: &AppState) -> Span<'static> {
         VimMode::Insert => Span::styled(" INSERT ", Style::default().fg(u.status_mode_insert)),
         VimMode::Visual => Span::styled(" VISUAL ", Style::default().fg(u.status_mode_visual)),
         VimMode::VisualLine => Span::styled(" V-LINE ", Style::default().fg(u.status_mode_visual)),
+        VimMode::VisualBlock => {
+            Span::styled(" V-BLOCK ", Style::default().fg(u.status_mode_visual))
+        }
     }
 }
 

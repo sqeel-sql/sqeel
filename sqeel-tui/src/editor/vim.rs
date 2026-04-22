@@ -103,6 +103,11 @@ pub enum Mode {
     Insert,
     Visual,
     VisualLine,
+    /// Column-oriented selection (`Ctrl-V`). Unlike the other visual
+    /// modes this one doesn't use tui-textarea's single-range selection
+    /// — the block corners live in [`VimState::block_anchor`] and the
+    /// live cursor. Operators read the rectangle off those two points.
+    VisualBlock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -270,6 +275,9 @@ pub struct VimState {
     insert_session: Option<InsertSession>,
     /// Row anchor for VisualLine mode.
     pub(super) visual_line_anchor: usize,
+    /// (row, col) anchor for VisualBlock mode. The live cursor is the
+    /// opposite corner.
+    pub(super) block_anchor: (usize, usize),
     /// Track whether the last yank/cut was linewise (drives `p`/`P` layout).
     pub(super) yank_linewise: bool,
     /// Set while replaying `.` / last-change so we don't re-record it.
@@ -300,6 +308,10 @@ enum InsertReason {
     /// Entry via an insert triggered during dot-replay — don't touch
     /// last_change because the outer replay will restore it.
     ReplayOnly,
+    /// `I` or `A` from VisualBlock: insert the typed text at `col` on
+    /// every row in `top..=bot`. `col` is the start column for `I`, the
+    /// one-past-block-end column for `A`.
+    BlockEdge { top: usize, bot: usize, col: usize },
 }
 
 impl VimState {
@@ -309,6 +321,7 @@ impl VimState {
             Mode::Insert => VimMode::Insert,
             Mode::Visual => VimMode::Visual,
             Mode::VisualLine => VimMode::VisualLine,
+            Mode::VisualBlock => VimMode::VisualBlock,
         }
     }
 
@@ -320,7 +333,10 @@ impl VimState {
     }
 
     pub fn is_visual(&self) -> bool {
-        matches!(self.mode, Mode::Visual | Mode::VisualLine)
+        matches!(
+            self.mode,
+            Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+        )
     }
 
     pub fn is_visual_char(&self) -> bool {
@@ -413,6 +429,21 @@ fn finish_insert_session(ed: &mut Editor<'_>) {
             ed.mutate(|t| t.insert_str(&inserted));
         }
     }
+    // VisualBlock `I` / `A` replay: apply the inserted text to every
+    // other row in the block range. Not currently part of the dot-repeat
+    // log — that's a polish item.
+    if let InsertReason::BlockEdge { top, bot, col } = session.reason {
+        if !inserted.is_empty() && top < bot && !ed.vim.replaying {
+            for r in (top + 1)..=bot {
+                let line_len = ed.textarea.lines()[r].chars().count();
+                let clamp = col.min(line_len);
+                ed.textarea.move_cursor(CursorMove::Jump(r, clamp));
+                ed.mutate(|t| t.insert_str(&inserted));
+            }
+            ed.textarea.move_cursor(CursorMove::Jump(top, col));
+        }
+        return;
+    }
     if ed.vim.replaying {
         return;
     }
@@ -443,6 +474,7 @@ fn finish_insert_session(ed: &mut Editor<'_>) {
             });
         }
         InsertReason::ReplayOnly => {}
+        InsertReason::BlockEdge { .. } => unreachable!("handled above"),
     }
 }
 
@@ -543,6 +575,17 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
             ed.vim.mode = Mode::VisualLine;
             return true;
         }
+        Key::Char('v') if input.ctrl && ed.vim.mode == Mode::Normal => {
+            ed.textarea.cancel_selection();
+            ed.vim.block_anchor = ed.textarea.cursor();
+            ed.vim.mode = Mode::VisualBlock;
+            return true;
+        }
+        Key::Char('v') if input.ctrl && ed.vim.mode == Mode::VisualBlock => {
+            // Second Ctrl-v exits block mode back to Normal.
+            ed.vim.mode = Mode::Normal;
+            return true;
+        }
         _ => {}
     }
 
@@ -554,8 +597,48 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
         return true;
     }
 
+    // VisualBlock: extra commands beyond the standard y/d/c/x — `r`
+    // replaces the block with a single char, `I` / `A` enter insert
+    // mode at the block's left / right edge and repeat on every row.
+    if ed.vim.mode == Mode::VisualBlock && !input.ctrl {
+        match input.key {
+            Key::Char('r') => {
+                ed.vim.pending = Pending::Replace;
+                return true;
+            }
+            Key::Char('I') => {
+                let (top, bot, left, _right) = block_bounds(ed);
+                ed.textarea.move_cursor(CursorMove::Jump(top, left));
+                ed.vim.mode = Mode::Normal;
+                begin_insert(
+                    ed,
+                    1,
+                    InsertReason::BlockEdge {
+                        top,
+                        bot,
+                        col: left,
+                    },
+                );
+                return true;
+            }
+            Key::Char('A') => {
+                let (top, bot, _left, right) = block_bounds(ed);
+                let line_len = ed.textarea.lines()[top].chars().count();
+                let col = (right + 1).min(line_len);
+                ed.textarea.move_cursor(CursorMove::Jump(top, col));
+                ed.vim.mode = Mode::Normal;
+                begin_insert(ed, 1, InsertReason::BlockEdge { top, bot, col });
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     // Visual mode: `i` / `a` start a text-object extension.
-    if ed.vim.is_visual() && !input.ctrl && matches!(input.key, Key::Char('i') | Key::Char('a')) {
+    if matches!(ed.vim.mode, Mode::Visual | Mode::VisualLine)
+        && !input.ctrl
+        && matches!(input.key, Key::Char('i') | Key::Char('a'))
+    {
         let inner = matches!(input.key, Key::Char('i'));
         ed.vim.pending = Pending::VisualTextObj { inner };
         return true;
@@ -1276,6 +1359,10 @@ fn handle_after_g(ed: &mut Editor<'_>, input: Input) -> bool {
 
 fn handle_replace(ed: &mut Editor<'_>, input: Input) -> bool {
     if let Key::Char(ch) = input.key {
+        if ed.vim.mode == Mode::VisualBlock {
+            block_replace(ed, ch);
+            return true;
+        }
         let count = take_count(&mut ed.vim);
         replace_char(ed, ch, count.max(1));
         if !ed.vim.replaying {
@@ -1883,8 +1970,140 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                 }
             }
         }
+        Mode::VisualBlock => apply_block_operator(ed, op),
         _ => {}
     }
+}
+
+/// Compute `(top_row, bot_row, left_col, right_col)` for the current
+/// VisualBlock selection. Columns are inclusive on both ends.
+fn block_bounds(ed: &Editor<'_>) -> (usize, usize, usize, usize) {
+    let (ar, ac) = ed.vim.block_anchor;
+    let (cr, cc) = ed.textarea.cursor();
+    let top = ar.min(cr);
+    let bot = ar.max(cr);
+    let left = ac.min(cc);
+    let right = ac.max(cc);
+    (top, bot, left, right)
+}
+
+/// Yank / delete / change / replace a rectangular selection. Yanked text
+/// is stored as one string per row joined with `\n` so pasting reproduces
+/// the block as sequential lines. (Vim's true block-paste reinserts as
+/// columns; we render the content with our char-wise paste path.)
+fn apply_block_operator(ed: &mut Editor<'_>, op: Operator) {
+    let (top, bot, left, right) = block_bounds(ed);
+    // Snapshot the block text for yank / clipboard.
+    let yank = block_yank(ed, top, bot, left, right);
+
+    match op {
+        Operator::Yank => {
+            if !yank.is_empty() {
+                ed.textarea.set_yank_text(yank.clone());
+                ed.last_yank = Some(yank);
+            }
+            ed.vim.yank_linewise = false;
+            ed.vim.mode = Mode::Normal;
+            ed.textarea.move_cursor(CursorMove::Jump(top, left));
+        }
+        Operator::Delete => {
+            ed.push_undo();
+            delete_block_contents(ed, top, bot, left, right);
+            if !yank.is_empty() {
+                ed.textarea.set_yank_text(yank.clone());
+                ed.last_yank = Some(yank);
+            }
+            ed.vim.yank_linewise = false;
+            ed.vim.mode = Mode::Normal;
+            ed.textarea.move_cursor(CursorMove::Jump(top, left));
+        }
+        Operator::Change => {
+            ed.push_undo();
+            delete_block_contents(ed, top, bot, left, right);
+            if !yank.is_empty() {
+                ed.textarea.set_yank_text(yank.clone());
+                ed.last_yank = Some(yank);
+            }
+            ed.vim.yank_linewise = false;
+            ed.textarea.move_cursor(CursorMove::Jump(top, left));
+            begin_insert_noundo(
+                ed,
+                1,
+                InsertReason::BlockEdge {
+                    top,
+                    bot,
+                    col: left,
+                },
+            );
+        }
+    }
+}
+
+fn block_yank(ed: &Editor<'_>, top: usize, bot: usize, left: usize, right: usize) -> String {
+    let lines = ed.textarea.lines();
+    let mut rows: Vec<String> = Vec::new();
+    for r in top..=bot {
+        let line = match lines.get(r) {
+            Some(l) => l,
+            None => break,
+        };
+        let chars: Vec<char> = line.chars().collect();
+        let end = (right + 1).min(chars.len());
+        if left >= chars.len() {
+            rows.push(String::new());
+        } else {
+            rows.push(chars[left..end].iter().collect());
+        }
+    }
+    rows.join("\n")
+}
+
+fn delete_block_contents(ed: &mut Editor<'_>, top: usize, bot: usize, left: usize, right: usize) {
+    let mut lines: Vec<String> = ed.textarea.lines().to_vec();
+    for r in top..=bot.min(lines.len().saturating_sub(1)) {
+        let chars: Vec<char> = lines[r].chars().collect();
+        if left >= chars.len() {
+            continue;
+        }
+        let end = (right + 1).min(chars.len());
+        let before: String = chars[..left].iter().collect();
+        let after: String = chars[end..].iter().collect();
+        lines[r] = format!("{before}{after}");
+    }
+    reset_textarea_lines(ed, lines);
+}
+
+/// Replace each character cell in the block with `ch`.
+fn block_replace(ed: &mut Editor<'_>, ch: char) {
+    let (top, bot, left, right) = block_bounds(ed);
+    ed.push_undo();
+    let mut lines: Vec<String> = ed.textarea.lines().to_vec();
+    for r in top..=bot.min(lines.len().saturating_sub(1)) {
+        let chars: Vec<char> = lines[r].chars().collect();
+        if left >= chars.len() {
+            continue;
+        }
+        let end = (right + 1).min(chars.len());
+        let before: String = chars[..left].iter().collect();
+        let middle: String = std::iter::repeat(ch).take(end - left).collect();
+        let after: String = chars[end..].iter().collect();
+        lines[r] = format!("{before}{middle}{after}");
+    }
+    reset_textarea_lines(ed, lines);
+    ed.vim.mode = Mode::Normal;
+    ed.textarea.move_cursor(CursorMove::Jump(top, left));
+}
+
+/// Replace the textarea's buffer with `lines` while preserving the yank
+/// register and disabling the textarea's own history (we keep our own).
+fn reset_textarea_lines(ed: &mut Editor<'_>, lines: Vec<String>) {
+    let carried = ed.textarea.yank_text();
+    ed.textarea = tui_textarea::TextArea::new(lines);
+    ed.textarea.set_max_histories(0);
+    if !carried.is_empty() {
+        ed.textarea.set_yank_text(carried);
+    }
+    ed.content_dirty = true;
 }
 
 // ─── Visual-line helpers ───────────────────────────────────────────────────
@@ -3237,6 +3456,98 @@ mod tests {
         // After the command completes, back in insert.
         assert_eq!(e.vim_mode(), VimMode::Insert);
         assert_eq!(e.textarea.lines()[0], "world");
+    }
+
+    // ─── Visual block ────────────────────────────────────────────────────
+
+    #[test]
+    fn ctrl_v_enters_visual_block() {
+        let mut e = editor_with("aaa\nbbb\nccc");
+        run_keys(&mut e, "<C-v>");
+        assert_eq!(e.vim_mode(), VimMode::VisualBlock);
+    }
+
+    #[test]
+    fn visual_block_esc_returns_to_normal() {
+        let mut e = editor_with("aaa\nbbb\nccc");
+        run_keys(&mut e, "<C-v>");
+        run_keys(&mut e, "<Esc>");
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+    }
+
+    #[test]
+    fn visual_block_delete_removes_column_range() {
+        let mut e = editor_with("hello\nworld\nhappy");
+        // Move off col 0 first so the block starts mid-row.
+        run_keys(&mut e, "l");
+        run_keys(&mut e, "<C-v>");
+        run_keys(&mut e, "jj");
+        run_keys(&mut e, "ll");
+        run_keys(&mut e, "d");
+        // Deletes cols 1-3 on every row — "ell" / "orl" / "app".
+        assert_eq!(
+            e.textarea.lines(),
+            &["ho".to_string(), "wd".to_string(), "hy".to_string()]
+        );
+    }
+
+    #[test]
+    fn visual_block_yank_joins_with_newlines() {
+        let mut e = editor_with("hello\nworld\nhappy");
+        run_keys(&mut e, "<C-v>");
+        run_keys(&mut e, "jj");
+        run_keys(&mut e, "ll");
+        run_keys(&mut e, "y");
+        assert_eq!(e.last_yank.as_deref(), Some("hel\nwor\nhap"));
+    }
+
+    #[test]
+    fn visual_block_replace_fills_block() {
+        let mut e = editor_with("hello\nworld\nhappy");
+        run_keys(&mut e, "<C-v>");
+        run_keys(&mut e, "jj");
+        run_keys(&mut e, "ll");
+        run_keys(&mut e, "rx");
+        assert_eq!(
+            e.textarea.lines(),
+            &[
+                "xxxlo".to_string(),
+                "xxxld".to_string(),
+                "xxxpy".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn visual_block_insert_repeats_across_rows() {
+        let mut e = editor_with("hello\nworld\nhappy");
+        run_keys(&mut e, "<C-v>");
+        run_keys(&mut e, "jj");
+        run_keys(&mut e, "I");
+        run_keys(&mut e, "# <Esc>");
+        assert_eq!(
+            e.textarea.lines(),
+            &[
+                "# hello".to_string(),
+                "# world".to_string(),
+                "# happy".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn visual_block_append_repeats_across_rows() {
+        let mut e = editor_with("foo\nbar\nbaz");
+        run_keys(&mut e, "<C-v>");
+        run_keys(&mut e, "jj");
+        // Single-column block (anchor col = cursor col = 0); `A` appends
+        // after column 0 on every row.
+        run_keys(&mut e, "A");
+        run_keys(&mut e, "!<Esc>");
+        assert_eq!(
+            e.textarea.lines(),
+            &["f!oo".to_string(), "b!ar".to_string(), "b!az".to_string()]
+        );
     }
 
     #[test]

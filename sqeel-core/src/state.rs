@@ -58,6 +58,7 @@ pub enum VimMode {
     Insert,
     Visual,
     VisualLine,
+    VisualBlock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
