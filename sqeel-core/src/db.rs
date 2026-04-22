@@ -59,6 +59,14 @@ impl DbConnection {
     }
 
     pub async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
+        let owned;
+        let query = match apply_default_limit(query, DEFAULT_ROW_LIMIT) {
+            Some(q) => {
+                owned = q;
+                owned.as_str()
+            }
+            None => query,
+        };
         let (columns, rows) = match &self.pool {
             Pool::MySql(p) => {
                 let rs = sqlx::query(query).fetch_all(p).await?;
@@ -431,4 +439,184 @@ fn decode_sqlite(row: &sqlx::sqlite::SqliteRow, idx: usize) -> String {
         return bytes_to_display(&v);
     }
     "?".into()
+}
+
+/// Rows added automatically when a SELECT/WITH query has no LIMIT clause.
+pub const DEFAULT_ROW_LIMIT: usize = 100;
+
+/// If `query` is a top-level SELECT or WITH statement with no LIMIT clause,
+/// return a rewritten query with ` LIMIT <limit>` appended. Returns `None`
+/// when the query already limits itself or isn't a row-producing statement.
+pub fn apply_default_limit(query: &str, limit: usize) -> Option<String> {
+    let trimmed = strip_trailing_semicolons(query).trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let after_comments = skip_leading_whitespace_and_comments(trimmed);
+    let first_kw = leading_keyword(after_comments)?.to_ascii_uppercase();
+    if first_kw != "SELECT" && first_kw != "WITH" {
+        return None;
+    }
+    if has_top_level_keyword(trimmed, "LIMIT") {
+        return None;
+    }
+    Some(format!("{trimmed} LIMIT {limit}"))
+}
+
+fn strip_trailing_semicolons(q: &str) -> &str {
+    q.trim_end().trim_end_matches(';').trim_end()
+}
+
+fn skip_leading_whitespace_and_comments(mut s: &str) -> &str {
+    loop {
+        let before = s;
+        s = s.trim_start();
+        if let Some(rest) = s.strip_prefix("--") {
+            s = rest.split_once('\n').map(|(_, r)| r).unwrap_or("");
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            s = rest.split_once("*/").map(|(_, r)| r).unwrap_or("");
+        }
+        if s == before {
+            return s;
+        }
+    }
+}
+
+fn leading_keyword(s: &str) -> Option<&str> {
+    let end = s
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_alphabetic())
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    if end == 0 { None } else { Some(&s[..end]) }
+}
+
+/// Scan `q` for `needle` (case-insensitive, whole word) appearing at
+/// paren-depth 0 and outside of string/identifier literals and comments.
+fn has_top_level_keyword(q: &str, needle: &str) -> bool {
+    let bytes = q.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    let mut depth: i32 = 0;
+    while i < n {
+        let b = bytes[i];
+        match b {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+            }
+            b'\'' | b'"' | b'`' => {
+                let quote = b;
+                i += 1;
+                while i < n {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == quote {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'-' if i + 1 < n && bytes[i + 1] == b'-' => {
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < n && bytes[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(n);
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i;
+                while i < n && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                if depth == 0 && q[start..i].eq_ignore_ascii_case(needle) {
+                    return true;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    fn apply(q: &str) -> Option<String> {
+        apply_default_limit(q, 100)
+    }
+
+    #[test]
+    fn appends_to_bare_select() {
+        assert_eq!(
+            apply("SELECT * FROM t"),
+            Some("SELECT * FROM t LIMIT 100".into())
+        );
+    }
+
+    #[test]
+    fn strips_trailing_semicolon_before_appending() {
+        assert_eq!(
+            apply("select id from users;"),
+            Some("select id from users LIMIT 100".into())
+        );
+    }
+
+    #[test]
+    fn leaves_query_that_already_limits() {
+        assert_eq!(apply("SELECT * FROM t LIMIT 5"), None);
+        assert_eq!(apply("select * from t limit 5 offset 10"), None);
+    }
+
+    #[test]
+    fn ignores_limit_inside_subquery_paren() {
+        let q = "SELECT * FROM (SELECT id FROM t LIMIT 5) x";
+        assert_eq!(
+            apply(q),
+            Some("SELECT * FROM (SELECT id FROM t LIMIT 5) x LIMIT 100".into())
+        );
+    }
+
+    #[test]
+    fn ignores_limit_inside_string_literal() {
+        assert!(apply("SELECT 'has LIMIT in string' AS x").is_some());
+    }
+
+    #[test]
+    fn handles_with_cte() {
+        let q = "WITH x AS (SELECT 1) SELECT * FROM x";
+        assert_eq!(
+            apply(q),
+            Some("WITH x AS (SELECT 1) SELECT * FROM x LIMIT 100".into())
+        );
+    }
+
+    #[test]
+    fn skips_non_select() {
+        assert_eq!(apply("INSERT INTO t VALUES (1)"), None);
+        assert_eq!(apply("UPDATE t SET x = 1"), None);
+        assert_eq!(apply("DELETE FROM t"), None);
+        assert_eq!(apply("EXPLAIN SELECT * FROM t"), None);
+    }
+
+    #[test]
+    fn skips_leading_comments() {
+        let q = "-- fetch users\nSELECT * FROM users";
+        let out = apply(q).unwrap();
+        assert!(out.ends_with(" LIMIT 100"));
+        assert!(out.contains("SELECT * FROM users"));
+    }
 }
