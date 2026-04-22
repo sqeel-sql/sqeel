@@ -1280,10 +1280,10 @@ async fn run_loop(
                     // editor or when in Vim Normal mode so it doesn't shadow
                     // typing in Insert mode.
                     (KeyModifiers::SHIFT, KeyCode::Char('L')) if focus == Focus::Results => {
-                        state.lock().unwrap().scroll_results_right();
+                        state.lock().unwrap().next_result_tab();
                     }
                     (KeyModifiers::SHIFT, KeyCode::Char('H')) if focus == Focus::Results => {
-                        state.lock().unwrap().scroll_results_left();
+                        state.lock().unwrap().prev_result_tab();
                     }
                     (KeyModifiers::SHIFT, KeyCode::Char('L'))
                         if focus != Focus::Editor || vim_mode == VimMode::Normal =>
@@ -1363,13 +1363,6 @@ async fn run_loop(
                     }
                     (KeyModifiers::NONE, KeyCode::Char('h')) if focus == Focus::Results => {
                         state.lock().unwrap().scroll_results_left();
-                    }
-                    // Switch result tabs
-                    (KeyModifiers::SHIFT, KeyCode::Char('L')) if focus == Focus::Results => {
-                        state.lock().unwrap().next_result_tab();
-                    }
-                    (KeyModifiers::SHIFT, KeyCode::Char('H')) if focus == Focus::Results => {
-                        state.lock().unwrap().prev_result_tab();
                     }
                     // On error tab: Enter jumps editor cursor to the reported line:col
                     (KeyModifiers::NONE, KeyCode::Enter) if focus == Focus::Results => {
