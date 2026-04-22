@@ -114,32 +114,21 @@ fn flatten_nodes(
     nodes: &[SchemaNode],
     depth: usize,
     path: &[usize],
-    ancestor_is_last: &[bool],
+    _ancestor_is_last: &[bool],
     items: &mut Vec<SchemaTreeItem>,
 ) {
-    let n = nodes.len();
     for (i, node) in nodes.iter().enumerate() {
-        let is_last = i == n - 1;
         let mut node_path = path.to_vec();
         node_path.push(i);
 
-        let mut prefix = String::new();
-        if depth == 0 {
-            prefix.push(' ');
-        } else {
-            for &anc_last in ancestor_is_last {
-                prefix.push_str(if anc_last { "   " } else { "│  " });
-            }
-            prefix.push_str(if is_last { "└╴" } else { "├╴" });
-        }
-
+        let indent = " ".repeat(1 + depth * 2);
         let icon = node_icon(node);
         let name = node.name();
         let extra = match node {
             SchemaNode::Column { type_name, .. } => format!(": {type_name}"),
             _ => String::new(),
         };
-        let label = format!("{prefix}{icon}{name}{extra}");
+        let label = format!("{indent}{icon}{name}{extra}");
 
         items.push(SchemaTreeItem {
             label,
@@ -147,8 +136,7 @@ fn flatten_nodes(
             node_path: node_path.clone(),
         });
 
-        let mut child_ancestor_is_last = ancestor_is_last.to_vec();
-        child_ancestor_is_last.push(is_last);
+        let child_ancestor_is_last: Vec<bool> = Vec::new();
 
         match node {
             SchemaNode::Database {
