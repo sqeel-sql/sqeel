@@ -160,7 +160,6 @@ Press `?` in normal mode to open the help overlay.
 | `Enter`               | Jump editor cursor to error line:col (error tab) |
 | Left click            | Copy column value                                |
 | Right click           | Copy full row                                    |
-| Drag                  | Copy selection                                   |
 | Left click (error)    | Copy query or error text                         |
 | `q` / `Ctrl+C`        | Dismiss results                                  |
 

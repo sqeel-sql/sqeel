@@ -338,7 +338,6 @@ async fn run_loop(
     let mut clipboard = Clipboard::new().ok();
     // Mouse drag tracking
     let mut last_draw_areas = DrawAreas::default();
-    let mut mouse_select_start: Option<(u16, u16)> = None;
     let mut mouse_drag_pane: Option<Focus> = None;
     let mut mouse_did_drag = false;
     // Force redraw on first iteration and after every event.
@@ -632,7 +631,6 @@ async fn run_loop(
                             } else {
                                 state.lock().unwrap().focus = Focus::Editor;
                             }
-                            mouse_select_start = None;
                             mouse_did_drag = false;
                         } else if let Some(rtb) = last_draw_areas.results_tab_bar
                             && rtb.contains(pos)
@@ -660,7 +658,6 @@ async fn run_loop(
                                 s.active_result_tab = idx;
                                 s.focus = Focus::Results;
                             }
-                            mouse_select_start = None;
                             mouse_did_drag = false;
                         } else {
                             let mut s = state.lock().unwrap();
@@ -703,7 +700,6 @@ async fn run_loop(
                             if pane == Focus::Editor {
                                 editor.mouse_click(last_draw_areas.editor, mouse.column, mouse.row);
                             }
-                            mouse_select_start = Some((mouse.column, mouse.row));
                             mouse_drag_pane = Some(pane);
                             mouse_did_drag = false;
                         }
@@ -722,26 +718,7 @@ async fn run_loop(
                         mouse_did_drag = true;
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
-                        if mouse_did_drag
-                            && mouse_drag_pane != Some(Focus::Editor)
-                            && let Some(start) = mouse_select_start
-                        {
-                            let end = (mouse.column, mouse.row);
-                            let s = state.lock().unwrap();
-                            if let Some(text) =
-                                extract_mouse_selection(start, end, &last_draw_areas, &editor, &s)
-                            {
-                                drop(s);
-                                if let Some(ref mut cb) = clipboard {
-                                    let _ = cb.set_text(text);
-                                }
-                                toasts.push((
-                                    "Selection copied to clipboard".to_string(),
-                                    ToastKind::Info,
-                                    std::time::Instant::now(),
-                                ));
-                            }
-                        } else if !mouse_did_drag && mouse_drag_pane == Some(Focus::Results) {
+                        if !mouse_did_drag && mouse_drag_pane == Some(Focus::Results) {
                             let s = state.lock().unwrap();
                             if let Some((text, label)) = extract_results_left_click(
                                 mouse.column,
@@ -760,7 +737,6 @@ async fn run_loop(
                                 ));
                             }
                         }
-                        mouse_select_start = None;
                         mouse_drag_pane = None;
                         mouse_did_drag = false;
                     }
@@ -1741,7 +1717,6 @@ enum CursorShape {
 
 #[derive(Default, Clone, Copy)]
 struct DrawAreas {
-    schema: Rect,
     schema_list_area: Rect,
     schema_list_offset: usize,
     schema_list_count: usize,
@@ -1860,7 +1835,6 @@ fn draw(
         None
     };
     let mut areas = DrawAreas {
-        schema: outer[0],
         schema_list_area,
         schema_list_offset,
         schema_list_count,
@@ -2125,145 +2099,6 @@ fn extract_results_row(x: u16, y: u16, areas: &DrawAreas, state: &AppState) -> O
     }
     let row_idx = (y - body_y) as usize + state.results_scroll();
     r.rows.get(row_idx).map(|row| row.join("\t"))
-}
-
-fn extract_mouse_selection(
-    start: (u16, u16),
-    end: (u16, u16),
-    areas: &DrawAreas,
-    editor: &Editor,
-    state: &AppState,
-) -> Option<String> {
-    use ratatui::layout::Position;
-    let start_pos = Position {
-        x: start.0,
-        y: start.1,
-    };
-
-    let (r1, r2) = if start.1 <= end.1 {
-        (start.1, end.1)
-    } else {
-        (end.1, start.1)
-    };
-    let (c1, c2) = if start.0 <= end.0 {
-        (start.0, end.0)
-    } else {
-        (end.0, start.0)
-    };
-
-    if areas.schema.contains(start_pos) {
-        let inner_top = areas.schema.y + 1;
-        let row_start = r1.saturating_sub(inner_top) as usize;
-        let row_end = r2.saturating_sub(inner_top) as usize;
-        let items = state.visible_schema_items();
-        if row_start >= items.len() {
-            return None;
-        }
-        let row_end = row_end.min(items.len() - 1);
-        let text = items[row_start..=row_end]
-            .iter()
-            .map(|i| i.label.trim())
-            .collect::<Vec<_>>()
-            .join("\n");
-        return if text.is_empty() { None } else { Some(text) };
-    }
-
-    if let Some(results_area) = areas.results
-        && results_area.contains(start_pos)
-    {
-        if let sqeel_core::state::ResultsPane::Results(r) = state.results() {
-            // Body starts after (optional tab bar) + title(1) + header(1) + hr(1).
-            let tab_bar_rows: u16 = if state.result_tabs.len() > 1 { 1 } else { 0 };
-            let body_y = results_area.y + tab_bar_rows + 3;
-            let body_x = results_area.x + 1; // horizontal Margin(1)
-            let row_start =
-                (r1.saturating_sub(body_y) as usize).saturating_add(state.results_scroll());
-            let row_end =
-                (r2.saturating_sub(body_y) as usize).saturating_add(state.results_scroll());
-            if row_start >= r.rows.len() {
-                return None;
-            }
-            let row_end = row_end.min(r.rows.len() - 1);
-
-            // Rebuild the full (unscrolled) line for a row, matching draw_results.
-            let build_line = |row: &[String]| -> String {
-                let mut s = String::new();
-                for i in 0..r.columns.len() {
-                    let w = r.col_widths.get(i).copied().unwrap_or(0) as usize;
-                    let inner = w.saturating_sub(1);
-                    let cell = row.get(i).map(|x| x.as_str()).unwrap_or("");
-                    s.push_str(&format!(" {:<inner$}", cell, inner = inner));
-                    if i + 1 < r.columns.len() {
-                        s.push('│');
-                    }
-                }
-                s
-            };
-
-            let char_offset: usize = r
-                .col_widths
-                .iter()
-                .take(state.results_col_scroll())
-                .map(|&w| w as usize + 1)
-                .sum();
-
-            let text = if row_start == row_end {
-                let full = build_line(&r.rows[row_start]);
-                let chars: Vec<char> = full.chars().collect();
-                let start_idx = (c1.saturating_sub(body_x) as usize).saturating_add(char_offset);
-                let end_idx = (c2.saturating_sub(body_x) as usize)
-                    .saturating_add(char_offset)
-                    .saturating_add(1)
-                    .min(chars.len());
-                if start_idx >= chars.len() {
-                    String::new()
-                } else {
-                    chars[start_idx..end_idx]
-                        .iter()
-                        .collect::<String>()
-                        .trim()
-                        .to_string()
-                }
-            } else {
-                r.rows[row_start..=row_end]
-                    .iter()
-                    .map(|row| row.join("\t"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            return if text.is_empty() { None } else { Some(text) };
-        }
-        return None;
-    }
-
-    // Editor pane
-    let lines = editor.textarea.lines();
-    // line number width: digits in line count + 1 space
-    let lnum_width = lines.len().to_string().len() as u16 + 1;
-    let inner_top = areas.editor.y + 1;
-    let row_start = r1.saturating_sub(inner_top) as usize;
-    let row_end = r2.saturating_sub(inner_top) as usize;
-    if row_start >= lines.len() {
-        return None;
-    }
-    let row_end = row_end.min(lines.len() - 1);
-
-    let text = if row_start == row_end {
-        // Single row: extract column range, accounting for border + line numbers
-        let line = &lines[row_start];
-        let content_x = areas.editor.x + 1 + lnum_width;
-        let col_start = c1.saturating_sub(content_x) as usize;
-        let col_end = (c2.saturating_sub(content_x) as usize + 1).min(line.len());
-        if col_start >= line.len() {
-            line.clone()
-        } else {
-            line[col_start..col_end].to_string()
-        }
-    } else {
-        lines[row_start..=row_end].join("\n")
-    };
-
-    if text.is_empty() { None } else { Some(text) }
 }
 
 fn draw_status_bar(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor, area: Rect) {
@@ -3306,7 +3141,6 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
                 ("H / L", "Prev / next result tab"),
                 ("Left click", "Copy column value"),
                 ("Right click", "Copy full row"),
-                ("Drag", "Copy selection"),
                 ("Left click (error)", "Copy query or error text"),
             ],
         ),
