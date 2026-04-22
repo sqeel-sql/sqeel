@@ -2,8 +2,6 @@ use crate::schema::SchemaNode;
 use crate::state::QueryResult;
 use std::path::PathBuf;
 
-const RESULT_HISTORY_LIMIT: usize = 10;
-
 pub fn data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("sqeel"))
 }
@@ -190,7 +188,6 @@ fn unix_timestamp() -> u64 {
 }
 
 /// Persist a successful query result under the connection's results subdir.
-/// Keeps at most RESULT_HISTORY_LIMIT files per connection; oldest is evicted.
 pub fn save_result(conn_slug: &str, query: &str, result: &QueryResult) -> anyhow::Result<()> {
     let dir =
         results_dir_for(conn_slug).ok_or_else(|| anyhow::anyhow!("cannot determine data dir"))?;
@@ -203,34 +200,12 @@ pub fn save_result(conn_slug: &str, query: &str, result: &QueryResult) -> anyhow
     let json = serde_json::to_string_pretty(result)?;
     std::fs::write(dir.join(&filename), json)?;
 
-    evict_oldest_results(&dir)?;
+    evict_oldest_results(&dir);
     Ok(())
 }
 
-fn evict_oldest_results(dir: &std::path::Path) -> anyhow::Result<()> {
-    let mut files: Vec<(String, std::time::SystemTime)> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("json") {
-                let mtime = e.metadata().ok()?.modified().ok()?;
-                let name = p.file_name()?.to_str()?.to_string();
-                Some((name, mtime))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if files.len() <= RESULT_HISTORY_LIMIT {
-        return Ok(());
-    }
-
-    files.sort_by_key(|(_, mtime)| *mtime);
-    for (name, _) in files.iter().take(files.len() - RESULT_HISTORY_LIMIT) {
-        let _ = std::fs::remove_file(dir.join(name));
-    }
-    Ok(())
+fn evict_oldest_results(_dir: &std::path::Path) {
+    // No eviction — results accumulate until user clears them.
 }
 
 /// List saved result filenames, newest first.
@@ -335,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn result_history_rotation() {
+    fn results_no_eviction() {
         let tmp = temp_data_dir();
         let dir = tmp.path().to_path_buf();
         let result = QueryResult {
@@ -343,16 +318,16 @@ mod tests {
             rows: vec![vec!["1".into()]],
             col_widths: vec![],
         };
-        // Save 11 results — oldest should be evicted
-        for i in 0..11u64 {
+        // Save 20 results — none should be evicted
+        for i in 0..20u64 {
             let r = dir.join("results");
             fs::create_dir_all(&r).unwrap();
             let filename = format!("{}_{}.json", i, i);
             let json = serde_json::to_string_pretty(&result).unwrap();
             fs::write(r.join(&filename), json).unwrap();
-            evict_oldest_results(&r).unwrap();
+            evict_oldest_results(&r);
         }
-        assert_eq!(count_results(&dir), 10);
+        assert_eq!(count_results(&dir), 20);
     }
 
     #[test]
