@@ -17,6 +17,83 @@
 //!
 //! The most recent mutating command is stored in
 //! [`VimState::last_change`] so `.` can replay it.
+//!
+//! # Roadmap
+//!
+//! Tracked in the original plan at
+//! `~/.claude/plans/look-at-the-vim-curried-fern.md`. Phases still
+//! outstanding — each one can land as an isolated PR.
+//!
+//! ## P3 — Registers & marks
+//!
+//! - TODO: `RegisterBank` indexed by char:
+//!     - unnamed `""`, last-yank `"0`, small-delete `"-`
+//!     - named `"a-"z` (uppercase `"A-"Z` appends instead of overwriting)
+//!     - blackhole `"_`
+//!     - system clipboard `"+` / `"*` (wire to `crate::clipboard::Clipboard`)
+//!     - read-only `":`, `".`, `"%` — surface in `:reg` output
+//! - TODO: route every yank / cut / paste through the bank. Parser needs
+//!   a `"{reg}` prefix state that captures the target register before a
+//!   count / operator.
+//! - TODO: `m{a-z}` sets a mark in a `HashMap<char, (buffer_id, row, col)>`;
+//!   `'x` jumps to the line (FirstNonBlank), `` `x `` to the exact cell.
+//!   Uppercase marks are global across tabs; lowercase are per-buffer.
+//! - TODO: `''` and `` `` `` jump to the last-jump position; `'[` `']`
+//!   `'<` `'>` bound the last change / visual region.
+//! - TODO: `:reg` and `:marks` ex commands.
+//!
+//! ## P4 — Macros
+//!
+//! - TODO: `q{a-z}` starts recording raw `Input`s into the register;
+//!   next `q` stops.
+//! - TODO: `@{a-z}` replays the register by re-feeding inputs through
+//!   `step`. `@@` repeats the last macro. Nested macros need a sane
+//!   depth cap (e.g. 100) to avoid runaway loops.
+//! - TODO: ensure recording doesn't capture the initial `q{a-z}` itself.
+//!
+//! ## P5 — Visual block (`Ctrl-V`)
+//!
+//! - TODO: new `Mode::VisualBlock` with `(anchor_row, anchor_col)`;
+//!   j/k extends rows, h/l extends columns.
+//! - TODO: block-aware operators:
+//!     - `d` / `x` cut the column range from every covered row.
+//!     - `c` cuts + enters insert mode; typed text repeats on every row
+//!       when Esc finishes (multi-cursor effect).
+//!     - `I` inserts before the block on every row; `A` after.
+//!     - `r{ch}` replaces every cell in the block with `ch`.
+//!     - `y` yanks the block with a `MotionKind::Block` classification
+//!       so paste rebuilds columns rather than lines.
+//!
+//! ## P6 — Polish
+//!
+//! - TODO: indent operators `>` / `<` (with line + text-object targets).
+//! - TODO: format operator `=` — map to whatever SQL formatter we wire
+//!   up; for now stub that returns the range unchanged with a toast.
+//! - TODO: case operators `gU` / `gu` / `g~` on a range (already have
+//!   single-char `~`).
+//! - TODO: proper `ge` / `gE` (backward-word-end) instead of the current
+//!   "WordBack then WordEnd" approximation in `handle_after_g`.
+//! - TODO: screen motions `H` / `M` / `L` once we track the render
+//!   viewport height inside Editor.
+//! - TODO: scroll-to-cursor motions `zz` / `zt` / `zb`.
+//! - TODO: `gJ` (join lines without inserting a space) variant of `J`.
+//! - TODO: `Y` == `y$` (vim 8 default; currently falls through as
+//!   "unknown").
+//!
+//! ## Known substrate / divergence notes
+//!
+//! - TODO: `w` vs `W` and `e` vs `E` currently share tui-textarea's
+//!   word motion (`WordForward` / `WordEnd` / `WordBack`). True
+//!   big-word (whitespace-delimited) semantics need a custom motion
+//!   pass that treats any run of non-whitespace as a single token.
+//! - TODO: insert-mode shortcuts — `Ctrl-w` (delete word back),
+//!   `Ctrl-u` (delete to line start), `Ctrl-t` / `Ctrl-d` (indent /
+//!   un-indent), `Ctrl-o` (one-shot normal command),
+//!   `Ctrl-r <reg>` (paste register). Needs the `RegisterBank` from
+//!   P3 to be useful.
+//! - TODO: `/` and `?` search prompts still live in `sqeel-tui/src/lib.rs`.
+//!   The plan calls for moving them into the editor (so the editor owns
+//!   `last_search_pattern` rather than the TUI loop). Safe to defer.
 
 use sqeel_core::state::VimMode;
 use tui_textarea::{CursorMove, Input, Key, Scrolling};
