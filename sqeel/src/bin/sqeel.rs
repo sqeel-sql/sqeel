@@ -101,14 +101,23 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     if let Some(url) = url {
-        rt.block_on(connect_and_spawn(
-            &state,
-            &url,
-            session_schema_cursor,
-            session_schema_cursor_path,
-            session_schema_expanded_paths,
-            session_active_tab,
-        ));
+        // Spawn — don't block. Slow DB handshakes must not freeze the TUI.
+        state
+            .lock()
+            .unwrap()
+            .set_status(format!("Connecting to {url}…"));
+        let connect_state = state.clone();
+        rt.spawn(async move {
+            connect_and_spawn(
+                &connect_state,
+                &url,
+                session_schema_cursor,
+                session_schema_cursor_path,
+                session_schema_expanded_paths,
+                session_active_tab,
+            )
+            .await;
+        });
     }
 
     let watcher_state = state.clone();
