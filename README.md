@@ -152,12 +152,16 @@ Press `?` in normal mode to open the help overlay.
 
 ### Results Pane
 
-| Key                   | Action                                           |
+| Key / Mouse           | Action                                           |
 | --------------------- | ------------------------------------------------ |
 | `j` / `k`             | Scroll down / up                                 |
 | `h` / `l`             | Scroll left / right                              |
 | `Shift+H` / `Shift+L` | Prev / next result tab                           |
 | `Enter`               | Jump editor cursor to error line:col (error tab) |
+| Left click            | Copy column value                                |
+| Right click           | Copy full row                                    |
+| Drag                  | Copy selection                                   |
+| Left click (error)    | Copy query or error text                         |
 | `q` / `Ctrl+C`        | Dismiss results                                  |
 
 ### Connection Switcher
