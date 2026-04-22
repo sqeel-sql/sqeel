@@ -2379,7 +2379,13 @@ fn build_tab_title(state: &AppState) -> Line<'_> {
     Line::from(spans)
 }
 
-fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool, tick: u32) {
+fn draw_results(
+    f: &mut ratatui::Frame<'_>,
+    state: &AppState,
+    area: Rect,
+    focused: bool,
+    tick: u32,
+) {
     // Fill pane background (full area), then inset content by 1 on all sides.
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Rgb(18, 26, 20))),
