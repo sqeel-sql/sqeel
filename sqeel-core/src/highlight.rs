@@ -245,6 +245,14 @@ pub fn strip_sql_comments(source: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| source.to_string())
 }
 
+/// True when `query` is a `SHOW CREATE ...` statement. Leading whitespace and
+/// SQL comments are skipped before matching.
+pub fn is_show_create(query: &str) -> bool {
+    let stripped = strip_sql_comments(query);
+    let trimmed = stripped.trim_start();
+    trimmed.len() >= 11 && trimmed[..11].eq_ignore_ascii_case("show create")
+}
+
 impl Default for Highlighter {
     fn default() -> Self {
         Self::new().expect("failed to initialize tree-sitter-sequel")

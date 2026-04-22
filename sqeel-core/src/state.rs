@@ -374,6 +374,23 @@ impl AppState {
         self.active_result().map(|t| t.scroll).unwrap_or(0)
     }
 
+    /// Returns the DDL payload when the active tab is a `SHOW CREATE ...`
+    /// result (single row, ≥2 cols — the last column holds the DDL text).
+    /// Used by the renderer and scroll logic to treat it as a text block
+    /// rather than a 1-row table.
+    pub fn active_ddl_text(&self) -> Option<&str> {
+        let tab = self.active_result()?;
+        if !crate::highlight::is_show_create(&tab.query) {
+            return None;
+        }
+        match &tab.kind {
+            ResultsPane::Results(r) if r.rows.len() == 1 && r.columns.len() >= 2 => {
+                r.rows[0].last().map(|s| s.as_str())
+            }
+            _ => None,
+        }
+    }
+
     pub fn results_col_scroll(&self) -> usize {
         self.active_result().map(|t| t.col_scroll).unwrap_or(0)
     }
@@ -486,9 +503,13 @@ impl AppState {
     }
 
     pub fn scroll_results_down(&mut self) {
-        let max = match self.active_result().map(|t| &t.kind) {
-            Some(ResultsPane::Results(r)) => r.rows.len().saturating_sub(1),
-            _ => 0,
+        let max = if let Some(ddl) = self.active_ddl_text() {
+            ddl.lines().count().saturating_sub(1)
+        } else {
+            match self.active_result().map(|t| &t.kind) {
+                Some(ResultsPane::Results(r)) => r.rows.len().saturating_sub(1),
+                _ => 0,
+            }
         };
         if let Some(t) = self.active_result_mut()
             && t.scroll < max
@@ -504,9 +525,17 @@ impl AppState {
     }
 
     pub fn scroll_results_right(&mut self) {
-        let max = match self.active_result().map(|t| &t.kind) {
-            Some(ResultsPane::Results(r)) => r.columns.len().saturating_sub(1),
-            _ => 0,
+        let max = if let Some(ddl) = self.active_ddl_text() {
+            ddl.lines()
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0)
+                .saturating_sub(1)
+        } else {
+            match self.active_result().map(|t| &t.kind) {
+                Some(ResultsPane::Results(r)) => r.columns.len().saturating_sub(1),
+                _ => 0,
+            }
         };
         if let Some(t) = self.active_result_mut()
             && t.col_scroll < max

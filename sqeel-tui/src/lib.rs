@@ -46,8 +46,8 @@ use sqeel_core::{
     completion_ctx::{self, CompletionCtx},
     config::load_main_config,
     highlight::{
-        HighlightSpan, Highlighter, TokenKind, first_syntax_error, statement_at_byte,
-        statement_ranges, strip_sql_comments,
+        HighlightSpan, Highlighter, TokenKind, first_syntax_error, is_show_create,
+        statement_at_byte, statement_ranges, strip_sql_comments,
     },
     lsp::{LspClient, LspEvent},
     schema::{self, SchemaItemKind, SchemaTreeItem},
@@ -1541,16 +1541,36 @@ async fn run_loop(
                     }
                     // Results pane navigation
                     (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Results => {
-                        state.lock().unwrap().results_cursor_down();
+                        let mut s = state.lock().unwrap();
+                        if s.active_ddl_text().is_some() {
+                            s.scroll_results_down();
+                        } else {
+                            s.results_cursor_down();
+                        }
                     }
                     (KeyModifiers::NONE, KeyCode::Char('k')) if focus == Focus::Results => {
-                        state.lock().unwrap().results_cursor_up();
+                        let mut s = state.lock().unwrap();
+                        if s.active_ddl_text().is_some() {
+                            s.scroll_results_up();
+                        } else {
+                            s.results_cursor_up();
+                        }
                     }
                     (KeyModifiers::NONE, KeyCode::Char('l')) if focus == Focus::Results => {
-                        state.lock().unwrap().results_cursor_right();
+                        let mut s = state.lock().unwrap();
+                        if s.active_ddl_text().is_some() {
+                            s.scroll_results_right();
+                        } else {
+                            s.results_cursor_right();
+                        }
                     }
                     (KeyModifiers::NONE, KeyCode::Char('h')) if focus == Focus::Results => {
-                        state.lock().unwrap().results_cursor_left();
+                        let mut s = state.lock().unwrap();
+                        if s.active_ddl_text().is_some() {
+                            s.scroll_results_left();
+                        } else {
+                            s.results_cursor_left();
+                        }
                     }
                     (KeyModifiers::NONE, KeyCode::Char('y')) if focus == Focus::Results => {
                         let now = std::time::Instant::now();
@@ -2930,8 +2950,12 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
                 state
                     .results_body_width
                     .store(body_area.width, std::sync::atomic::Ordering::Relaxed);
-                let scroll = state.results_scroll().min(body_lines.len()) as u16;
-                f.render_widget(Paragraph::new(body_lines).scroll((scroll, 0)), body_area);
+                let v_scroll = state.results_scroll().min(body_lines.len()) as u16;
+                let h_scroll = state.results_col_scroll() as u16;
+                f.render_widget(
+                    Paragraph::new(body_lines).scroll((v_scroll, h_scroll)),
+                    body_area,
+                );
                 return;
             }
 
@@ -3380,14 +3404,6 @@ fn highlight_sql_lines(source: &str) -> Vec<Line<'static>> {
             }
         })
         .collect()
-}
-
-/// True when `query` is a `SHOW CREATE ...` statement. Leading whitespace and
-/// SQL comments are stripped before matching.
-fn is_show_create(query: &str) -> bool {
-    let stripped = sqeel_core::highlight::strip_sql_comments(query);
-    let trimmed = stripped.trim_start();
-    trimmed.len() >= 11 && trimmed[..11].eq_ignore_ascii_case("show create")
 }
 
 fn highlight_query_line(query: &str) -> Line<'static> {
