@@ -1818,14 +1818,30 @@ fn draw(
         (chunks[0], None, chunks[1])
     };
 
-    let outer = Layout::default()
+    let outer_raw = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(if state.sidebar_visible {
-            vec![Constraint::Min(30), Constraint::Percentage(85)]
+            vec![
+                Constraint::Min(30),
+                Constraint::Length(1),
+                Constraint::Percentage(85),
+            ]
         } else {
             vec![Constraint::Length(0), Constraint::Percentage(100)]
         })
         .split(main_area);
+    let outer: Vec<Rect> = if state.sidebar_visible {
+        let sep = outer_raw[1];
+        f.render_widget(
+            Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(ui().pane_sep).bg(ui().schema_pane_bg)),
+            sep,
+        );
+        vec![outer_raw[0], outer_raw[2]]
+    } else {
+        vec![outer_raw[0], outer_raw[1]]
+    };
 
     let schema_focused = state.focus == Focus::Schema;
     let editor_focused = state.focus == Focus::Editor;

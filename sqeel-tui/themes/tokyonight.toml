@@ -21,6 +21,7 @@ white        = "#c0caf5"
 [ui]
 # Panes
 schema_pane_bg    = "bg_dark"
+pane_sep          = "comment"
 editor_pane_bg    = "bg_dark"
 editor_tab_bar_bg = "bg"
 results_pane_bg   = "bg_dark"

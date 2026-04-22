@@ -124,6 +124,7 @@ macro_rules! ui_colors {
 
 ui_colors!(
     schema_pane_bg,
+    pane_sep,
     editor_pane_bg,
     editor_tab_bar_bg,
     results_pane_bg,
