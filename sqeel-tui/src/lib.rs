@@ -2596,7 +2596,16 @@ fn draw_results(
             );
         }
         ResultsPane::Cancelled => {
-            let block = Block::default().title("Results").borders(Borders::NONE);
+            let title = if state.result_tabs.len() > 1 {
+                format!(
+                    "Result ({}/{})",
+                    state.active_result_tab + 1,
+                    state.result_tabs.len(),
+                )
+            } else {
+                "Result".into()
+            };
+            let block = Block::default().title(title).borders(Borders::NONE);
             f.render_widget(
                 Paragraph::new("Skipped (previous query failed)")
                     .style(Style::default().fg(Color::DarkGray))
