@@ -878,8 +878,9 @@ impl AppState {
         let new_set: HashSet<&str> = new_names.iter().map(String::as_str).collect();
 
         let before = self.schema_nodes.len();
-        self.schema_nodes
-            .retain(|n| matches!(n, SchemaNode::Database { name, .. } if new_set.contains(name.as_str())));
+        self.schema_nodes.retain(
+            |n| matches!(n, SchemaNode::Database { name, .. } if new_set.contains(name.as_str())),
+        );
         let mut changed = self.schema_nodes.len() != before;
 
         let existing: HashSet<String> = self
