@@ -719,14 +719,24 @@ async fn run_loop(
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         if !mouse_did_drag && mouse_drag_pane == Some(Focus::Results) {
-                            let s = state.lock().unwrap();
-                            if let Some((text, label)) = extract_results_left_click(
-                                mouse.column,
-                                mouse.row,
-                                &last_draw_areas,
-                                &s,
-                            ) {
-                                drop(s);
+                            let click = {
+                                let s = state.lock().unwrap();
+                                extract_results_left_click(
+                                    mouse.column,
+                                    mouse.row,
+                                    &last_draw_areas,
+                                    &s,
+                                )
+                            };
+                            if let Some((text, label, cur)) = click {
+                                {
+                                    let mut s = state.lock().unwrap();
+                                    let idx = s.active_result_tab;
+                                    if let Some(t) = s.result_tabs.get_mut(idx) {
+                                        t.cursor = cur;
+                                    }
+                                    s.clamp_results_cursor();
+                                }
                                 if let Some(ref mut cb) = clipboard {
                                     let _ = cb.set_text(text);
                                 }
@@ -2021,7 +2031,7 @@ fn extract_results_left_click(
     y: u16,
     areas: &DrawAreas,
     state: &AppState,
-) -> Option<(String, &'static str)> {
+) -> Option<(String, &'static str, ResultsCursor)> {
     let results_area = areas.results?;
     use ratatui::layout::Position;
     if !results_area.contains(Position { x, y }) {
@@ -2047,17 +2057,16 @@ fn extract_results_left_click(
         && x >= results_area.x
         && x < results_area.x + results_area.width
     {
-        return Some((query_text, "Query"));
+        return Some((query_text, "Query", ResultsCursor::Query));
     }
     match state.results() {
         sqeel_core::state::ResultsPane::Results(r) => {
+            let header_y = results_area.y + tab_bar_rows + 5;
             let body_y = results_area.y + tab_bar_rows + 7;
             let body_x = results_area.x + 1;
-            if y < body_y {
+            if y < header_y || y == header_y + 1 {
                 return None;
             }
-            let row_idx = (y - body_y) as usize + state.results_scroll();
-            let row = r.rows.get(row_idx)?;
             let char_offset: usize = r
                 .col_widths
                 .iter()
@@ -2065,21 +2074,40 @@ fn extract_results_left_click(
                 .map(|&w| w as usize + 1)
                 .sum();
             let rel = (x.saturating_sub(body_x) as usize).saturating_add(char_offset);
-            let mut cursor = 0usize;
+            let mut cursor_x = 0usize;
+            let mut col_idx: Option<usize> = None;
             for (i, &w) in r.col_widths.iter().enumerate() {
                 let col_w = w as usize;
-                if rel < cursor + col_w {
-                    return row.get(i).map(|s| (s.trim().to_string(), "Column"));
+                if rel < cursor_x + col_w {
+                    col_idx = Some(i);
+                    break;
                 }
-                cursor += col_w;
+                cursor_x += col_w;
                 if i + 1 < r.col_widths.len() {
-                    if rel == cursor {
+                    if rel == cursor_x {
                         return None;
                     }
-                    cursor += 1;
+                    cursor_x += 1;
                 }
             }
-            None
+            let col_idx = col_idx?;
+            if y == header_y {
+                let name = r.columns.get(col_idx)?.clone();
+                return Some((name, "Column", ResultsCursor::Header(col_idx)));
+            }
+            if y < body_y {
+                return None;
+            }
+            let row_idx = (y - body_y) as usize + state.results_scroll();
+            let value = r.rows.get(row_idx)?.get(col_idx)?.trim().to_string();
+            Some((
+                value,
+                "Value",
+                ResultsCursor::Cell {
+                    row: row_idx,
+                    col: col_idx,
+                },
+            ))
         }
         sqeel_core::state::ResultsPane::Error(e) => {
             let content_y = results_area.y + tab_bar_rows;
@@ -2091,23 +2119,44 @@ fn extract_results_left_click(
                 .active_result()
                 .map(|t| t.query.clone())
                 .unwrap_or_default();
-            if !query.trim().is_empty() {
-                // hr(0), title(1), hr(2), query(3), hr(4), err lines(5..)
-                if rel_y == 3 {
-                    return Some((query.clone(), "Query"));
-                }
-                if rel_y >= 5 {
-                    return Some((e.clone(), "Error"));
-                }
-                None
+            let (body_start, has_q) = if !query.trim().is_empty() {
+                (5usize, true)
             } else {
-                // hr(0), title(1), hr(2), err lines(3..)
-                if rel_y >= 3 {
-                    Some((e.clone(), "Error"))
-                } else {
-                    None
-                }
+                (3usize, false)
+            };
+            if has_q && rel_y == 3 {
+                return Some((query.clone(), "Query", ResultsCursor::Query));
             }
+            if rel_y >= body_start {
+                let line_idx = rel_y - body_start + state.results_scroll();
+                let line = e.lines().nth(line_idx)?.to_string();
+                return Some((line, "Line", ResultsCursor::MessageLine(line_idx)));
+            }
+            None
+        }
+        sqeel_core::state::ResultsPane::Cancelled => {
+            let content_y = results_area.y + tab_bar_rows;
+            if y < content_y {
+                return None;
+            }
+            let rel_y = (y - content_y) as usize;
+            let query = state
+                .active_result()
+                .map(|t| t.query.clone())
+                .unwrap_or_default();
+            let has_q = !query.trim().is_empty();
+            let body_start = if has_q { 5 } else { 3 };
+            if has_q && rel_y == 3 {
+                return Some((query, "Query", ResultsCursor::Query));
+            }
+            if rel_y >= body_start {
+                return Some((
+                    "Skipped after earlier error".to_string(),
+                    "Line",
+                    ResultsCursor::MessageLine(0),
+                ));
+            }
+            None
         }
         _ => None,
     }
@@ -2595,7 +2644,19 @@ fn draw_results(
                 .sum::<u32>() as u16;
 
             let cursor = state.active_result().map(|t| t.cursor);
-            let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
+            let col_bg = results_cursor_bg(focused);
+            let cursor_bg = results_cursor_bg_strong(focused);
+            // Highlighted column (Header or Cell cursor) — whole column gets muted bg.
+            let active_col: Option<usize> = match cursor {
+                Some(ResultsCursor::Header(c)) | Some(ResultsCursor::Cell { col: c, .. }) => {
+                    Some(c)
+                }
+                _ => None,
+            };
+            let cursor_row: Option<usize> = match cursor {
+                Some(ResultsCursor::Cell { row, .. }) => Some(row),
+                _ => None,
+            };
 
             let build_header = || -> Line<'static> {
                 let mut spans: Vec<Span<'static>> = Vec::with_capacity(r.columns.len() * 2);
@@ -2603,8 +2664,10 @@ fn draw_results(
                     let w = r.col_widths.get(i).copied().unwrap_or(0) as usize;
                     let inner = w.saturating_sub(1);
                     let mut st = header_style;
-                    if focused && cursor == Some(ResultsCursor::Header(i)) {
-                        st = st.add_modifier(Modifier::REVERSED);
+                    if cursor == Some(ResultsCursor::Header(i)) {
+                        st = st.bg(cursor_bg);
+                    } else if active_col == Some(i) {
+                        st = st.bg(col_bg);
                     }
                     spans.push(Span::styled(format!(" {:<inner$}", c, inner = inner), st));
                     if i + 1 < r.columns.len() {
@@ -2621,14 +2684,16 @@ fn draw_results(
                     let inner = w.saturating_sub(1);
                     let cell = row.get(i).map(|s| s.as_str()).unwrap_or("");
                     let text = format!(" {:<inner$}", cell, inner = inner);
-                    if focused
-                        && cursor
-                            == Some(ResultsCursor::Cell {
-                                row: row_idx,
-                                col: i,
-                            })
-                    {
-                        spans.push(Span::styled(text, cursor_style));
+                    let is_cursor = cursor_row == Some(row_idx) && active_col == Some(i);
+                    let bg_style = if is_cursor {
+                        Some(cursor_bg)
+                    } else if active_col == Some(i) {
+                        Some(col_bg)
+                    } else {
+                        None
+                    };
+                    if let Some(bg) = bg_style {
+                        spans.push(Span::styled(text, Style::default().bg(bg)));
                     } else {
                         spans.push(Span::raw(text));
                     }
@@ -2652,13 +2717,14 @@ fn draw_results(
                 .map(|t| t.query.clone())
                 .unwrap_or_default();
             let mut query_line = highlight_query_line(&query_text);
-            if focused && cursor == Some(ResultsCursor::Query) {
+            if cursor == Some(ResultsCursor::Query) {
+                let qbg = results_cursor_bg(focused);
                 query_line = Line::from(
                     query_line
                         .spans
                         .into_iter()
                         .map(|s| {
-                            let st = s.style.add_modifier(Modifier::REVERSED);
+                            let st = s.style.bg(qbg);
                             Span::styled(s.content, st)
                         })
                         .collect::<Vec<_>>(),
@@ -2706,13 +2772,14 @@ fn draw_results(
         ResultsPane::Error(e) => {
             let title_text = render_pos_title(state, "Result");
             let cursor = state.active_result().map(|t| t.cursor);
+            let cursor_bg = results_cursor_bg(focused);
             let body: Vec<Line<'static>> = e
                 .lines()
                 .enumerate()
                 .map(|(i, el)| {
                     let mut st = Style::default().fg(Color::Red);
-                    if focused && cursor == Some(ResultsCursor::MessageLine(i)) {
-                        st = st.add_modifier(Modifier::REVERSED);
+                    if cursor == Some(ResultsCursor::MessageLine(i)) {
+                        st = st.bg(cursor_bg);
                     }
                     Line::from(Span::styled(format!(" {}", el), st))
                 })
@@ -2753,8 +2820,8 @@ fn draw_results(
             let title_text = render_pos_title(state, "Result");
             let cursor = state.active_result().map(|t| t.cursor);
             let mut st = Style::default().fg(Color::DarkGray);
-            if focused && matches!(cursor, Some(ResultsCursor::MessageLine(_))) {
-                st = st.add_modifier(Modifier::REVERSED);
+            if matches!(cursor, Some(ResultsCursor::MessageLine(_))) {
+                st = st.bg(results_cursor_bg(focused));
             }
             let body = vec![Line::from(Span::styled(
                 " Skipped (previous query failed)",
@@ -2775,6 +2842,26 @@ fn draw_results(
             );
         }
         ResultsPane::Empty => unreachable!(),
+    }
+}
+
+/// Muted background for the currently-highlighted column in the results pane —
+/// mirrors the editor's `cursor_line_bg` so focus feels consistent.
+fn results_cursor_bg(focused: bool) -> Color {
+    if focused {
+        Color::Rgb(40, 48, 40)
+    } else {
+        Color::Rgb(28, 34, 28)
+    }
+}
+
+/// Slightly brighter bg used for the single cell (or header) the cursor
+/// actually points at, sitting on top of the column-wide muted bg.
+fn results_cursor_bg_strong(focused: bool) -> Color {
+    if focused {
+        Color::Rgb(70, 90, 60)
+    } else {
+        Color::Rgb(45, 55, 40)
     }
 }
 
@@ -2835,12 +2922,13 @@ fn render_framed_pane(
         let mut query_line = highlight_query_line(&query_text);
         let cursor = state.active_result().map(|t| t.cursor);
         if state.focus == Focus::Results && cursor == Some(ResultsCursor::Query) {
+            let qbg = results_cursor_bg(state.focus == Focus::Results);
             query_line = Line::from(
                 query_line
                     .spans
                     .into_iter()
                     .map(|s| {
-                        let st = s.style.add_modifier(Modifier::REVERSED);
+                        let st = s.style.bg(qbg);
                         Span::styled(s.content, st)
                     })
                     .collect::<Vec<_>>(),
