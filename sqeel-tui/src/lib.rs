@@ -763,12 +763,18 @@ async fn run_loop(
                                     }
                                     s.clamp_results_cursor();
                                 }
-                                {
-                                    clipboard.set_text(&text);
-                                }
+                                let ok = clipboard.set_text(&text);
                                 toasts.push((
-                                    format!("{label} copied to clipboard"),
-                                    ToastKind::Info,
+                                    if ok {
+                                        format!("{label} copied to clipboard")
+                                    } else {
+                                        format!("{label}: clipboard copy failed (too large)")
+                                    },
+                                    if ok {
+                                        ToastKind::Info
+                                    } else {
+                                        ToastKind::Error
+                                    },
                                     std::time::Instant::now(),
                                 ));
                             }
@@ -788,12 +794,18 @@ async fn run_loop(
                                 extract_results_row(mouse.column, mouse.row, &last_draw_areas, &s)
                             {
                                 drop(s);
-                                {
-                                    clipboard.set_text(&text);
-                                }
+                                let ok = clipboard.set_text(&text);
                                 toasts.push((
-                                    "Row copied to clipboard".to_string(),
-                                    ToastKind::Info,
+                                    if ok {
+                                        "Row copied to clipboard".to_string()
+                                    } else {
+                                        "Row: clipboard copy failed (too large)".to_string()
+                                    },
+                                    if ok {
+                                        ToastKind::Info
+                                    } else {
+                                        ToastKind::Error
+                                    },
                                     std::time::Instant::now(),
                                 ));
                             }
@@ -1429,12 +1441,18 @@ async fn run_loop(
                         };
                         pending_results_y = if is_yy { None } else { Some(now) };
                         if let Some((text, label)) = yanked {
-                            {
-                                clipboard.set_text(&text);
-                            }
+                            let ok = clipboard.set_text(&text);
                             toasts.push((
-                                format!("{label} copied to clipboard"),
-                                ToastKind::Info,
+                                if ok {
+                                    format!("{label} copied to clipboard")
+                                } else {
+                                    format!("{label}: clipboard copy failed (too large)")
+                                },
+                                if ok {
+                                    ToastKind::Info
+                                } else {
+                                    ToastKind::Error
+                                },
                                 now,
                             ));
                         }
@@ -1600,12 +1618,18 @@ async fn run_loop(
                         }
                         editor.handle_key(key);
                         if let Some(text) = editor.last_yank.take() {
-                            {
-                                clipboard.set_text(&text);
-                            }
+                            let ok = clipboard.set_text(&text);
                             toasts.push((
-                                "Yanked to clipboard".to_string(),
-                                ToastKind::Info,
+                                if ok {
+                                    "Yanked to clipboard".to_string()
+                                } else {
+                                    "Yank: clipboard copy failed (too large)".to_string()
+                                },
+                                if ok {
+                                    ToastKind::Info
+                                } else {
+                                    ToastKind::Error
+                                },
                                 std::time::Instant::now(),
                             ));
                         }

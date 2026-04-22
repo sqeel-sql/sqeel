@@ -701,10 +701,6 @@ impl<'a> Editor<'a> {
                 } else {
                     self.mutate(|t| t.paste());
                 }
-                let y = self.textarea.yank_text();
-                if !y.is_empty() {
-                    self.last_yank = Some(y);
-                }
                 self.mode = Mode::Normal;
                 return true;
             }
@@ -722,10 +718,6 @@ impl<'a> Editor<'a> {
                 } else {
                     self.textarea.move_cursor(CursorMove::Back);
                     self.mutate(|t| t.paste());
-                }
-                let y = self.textarea.yank_text();
-                if !y.is_empty() {
-                    self.last_yank = Some(y);
                 }
                 return true;
             }
