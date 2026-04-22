@@ -125,6 +125,9 @@ pub struct TextArea<'a> {
     mask: Option<char>,
     selection_start: Option<(usize, usize)>,
     select_style: Style,
+    /// External per-row syntax styling (e.g. tree-sitter). Each entry is
+    /// `(start_byte, end_byte, style)` for that row, sorted by start, no overlaps.
+    syntax_spans: Vec<Vec<(usize, usize, Style)>>,
 }
 
 /// Convert any iterator whose elements can be converted into [`String`] into [`TextArea`]. Each [`String`] element is
@@ -230,7 +233,21 @@ impl<'a> TextArea<'a> {
             mask: None,
             selection_start: None,
             select_style: Style::default().bg(Color::LightBlue),
+            syntax_spans: Vec::new(),
         }
+    }
+
+    /// Set per-row syntax styling. `spans[row]` is a list of
+    /// `(start_byte, end_byte, style)` for that row. Spans within a row must be
+    /// sorted by start and not overlap. Apply with [`Style::patch`] semantics:
+    /// cursor / search / selection styles override these.
+    pub fn set_syntax_spans(&mut self, spans: Vec<Vec<(usize, usize, Style)>>) {
+        self.syntax_spans = spans;
+    }
+
+    /// Clear any externally-supplied syntax styling.
+    pub fn clear_syntax_spans(&mut self) {
+        self.syntax_spans.clear();
     }
 
     /// Handle a key input with default key mappings. For default key mappings, see the table in
@@ -1634,6 +1651,19 @@ impl<'a> TextArea<'a> {
             );
         }
 
+        if let Some(row_spans) = self.syntax_spans.get(row) {
+            let line_len = line.len();
+            let shifted = row_spans.iter().filter_map(|&(s, e, sty)| {
+                if e <= byte_offset {
+                    return None;
+                }
+                let s = s.saturating_sub(byte_offset).min(line_len);
+                let e = e.saturating_sub(byte_offset).min(line_len);
+                if s >= e { None } else { Some((s, e, sty)) }
+            });
+            hl.syntax(shifted);
+        }
+
         hl.into_spans()
     }
 
@@ -1689,6 +1719,11 @@ impl<'a> TextArea<'a> {
     /// Returns the scroll-top row last stored by the renderer.
     pub fn viewport_top_row(&self) -> usize {
         self.viewport.scroll_top().0
+    }
+
+    /// Returns the leftmost visible column (horizontal scroll offset).
+    pub fn viewport_top_col(&self) -> usize {
+        self.viewport.scroll_top().1
     }
 
     pub fn set_style(&mut self, style: Style) {

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use completion_thread::CompletionThread;
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
         KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
@@ -30,6 +31,7 @@ use ratatui::{
 use sqeel_core::{
     AppState, UiProvider,
     config::load_main_config,
+    highlight::{HighlightSpan, TokenKind},
     lsp::{LspClient, LspEvent},
     schema::{self, SchemaTreeItem},
     state::{AddConnectionField, Focus, KeybindingMode, ResultsPane, VimMode},
@@ -39,33 +41,171 @@ use sqeel_core::{
 /// focus (typing mode), and cursor position within the filtered list.
 #[derive(Clone, Default)]
 struct SchemaSearch {
-    query: Option<String>,
+    query: Option<TextInput>,
     focused: bool,
     cursor: usize,
 }
 
 impl SchemaSearch {
     fn from_initial(q: Option<String>) -> Self {
-        Self { query: q, focused: false, cursor: 0 }
+        Self {
+            query: q.map(|s| TextInput::from_str(&s)),
+            focused: false,
+            cursor: 0,
+        }
     }
-    fn query(&self) -> Option<&str> { self.query.as_deref() }
-    fn is_filtering(&self) -> bool { self.query.as_deref().is_some_and(|q| !q.is_empty()) }
+    fn query(&self) -> Option<&str> { self.query.as_ref().map(|q| q.text.as_str()) }
+    fn is_filtering(&self) -> bool { self.query().is_some_and(|q| !q.is_empty()) }
     fn clear(&mut self) { *self = Self::default(); }
     fn start(&mut self) {
-        if self.query.is_none() { self.query = Some(String::new()); self.cursor = 0; }
+        if self.query.is_none() {
+            self.query = Some(TextInput::default());
+            self.cursor = 0;
+        }
         self.focused = true;
     }
     fn push(&mut self, c: char) {
-        if let Some(ref mut q) = self.query { q.push(c); self.cursor = 0; }
+        if let Some(ref mut q) = self.query {
+            q.insert_char(c);
+            self.cursor = 0;
+        }
     }
-    fn pop(&mut self) {
-        if let Some(ref mut q) = self.query { q.pop(); self.cursor = 0; }
+    fn handle_nav(&mut self, code: KeyCode) -> bool {
+        if let Some(ref mut q) = self.query
+            && q.handle_nav(code)
+        {
+            self.cursor = 0;
+            return true;
+        }
+        false
     }
     fn cursor_down(&mut self, list_len: usize) {
         let max = list_len.saturating_sub(1);
         self.cursor = (self.cursor + 1).min(max);
     }
     fn cursor_up(&mut self) { self.cursor = self.cursor.saturating_sub(1); }
+}
+
+/// Single-line text input with caret movement. Used by every modal/dialog text
+/// box (command palette, rename, file picker, schema search, add-connection)
+/// so cursor behavior is uniform across the app.
+#[derive(Clone, Default)]
+struct TextInput {
+    text: String,
+    /// Caret position as a char index into `text`.
+    cursor: usize,
+}
+
+impl TextInput {
+    fn from_str(s: &str) -> Self {
+        Self { text: s.to_string(), cursor: s.chars().count() }
+    }
+    fn char_count(&self) -> usize {
+        self.text.chars().count()
+    }
+    fn byte_at(&self, char_idx: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(char_idx)
+            .map(|(b, _)| b)
+            .unwrap_or(self.text.len())
+    }
+    fn insert_char(&mut self, c: char) {
+        let b = self.byte_at(self.cursor);
+        self.text.insert(b, c);
+        self.cursor += 1;
+    }
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let end = self.byte_at(self.cursor);
+        let start = self.byte_at(self.cursor - 1);
+        self.text.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+    fn delete(&mut self) {
+        if self.cursor >= self.char_count() {
+            return;
+        }
+        let start = self.byte_at(self.cursor);
+        let end = self.byte_at(self.cursor + 1);
+        self.text.replace_range(start..end, "");
+    }
+    fn left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+    fn right(&mut self) {
+        if self.cursor < self.char_count() {
+            self.cursor += 1;
+        }
+    }
+    fn home(&mut self) {
+        self.cursor = 0;
+    }
+    fn end(&mut self) {
+        self.cursor = self.char_count();
+    }
+    /// Try to handle a navigation/edit key. Returns true if consumed.
+    /// Char insertion is handled by the caller so it can layer chord logic.
+    fn handle_nav(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Left => { self.left(); true }
+            KeyCode::Right => { self.right(); true }
+            KeyCode::Home => { self.home(); true }
+            KeyCode::End => { self.end(); true }
+            KeyCode::Backspace => { self.backspace(); true }
+            KeyCode::Delete => { self.delete(); true }
+            _ => false,
+        }
+    }
+}
+
+/// State for the leader+space file picker overlay.
+#[derive(Clone, Default)]
+struct FilePicker {
+    query: TextInput,
+    cursor: usize,
+}
+
+impl FilePicker {
+    /// Filter `names` by fuzzy subsequence match against the query, ranked by
+    /// the span of the match (tighter is better). Empty query returns all.
+    fn matches<'a>(&self, names: &'a [String]) -> Vec<&'a String> {
+        if self.query.text.is_empty() {
+            return names.iter().collect();
+        }
+        let q: Vec<char> = self.query.text.to_lowercase().chars().collect();
+        let mut scored: Vec<(usize, &String)> = names
+            .iter()
+            .filter_map(|n| fuzzy_score(&q, n).map(|s| (s, n)))
+            .collect();
+        scored.sort_by_key(|(s, _)| *s);
+        scored.into_iter().map(|(_, n)| n).collect()
+    }
+}
+
+/// Subsequence match: returns Some(span) where span = last_idx - first_idx.
+/// Returns None if not all query chars appear in order.
+fn fuzzy_score(q: &[char], name: &str) -> Option<usize> {
+    let lower: Vec<char> = name.to_lowercase().chars().collect();
+    let mut qi = 0;
+    let mut first: Option<usize> = None;
+    let mut last = 0;
+    for (i, c) in lower.iter().enumerate() {
+        if qi < q.len() && *c == q[qi] {
+            if first.is_none() {
+                first = Some(i);
+            }
+            last = i;
+            qi += 1;
+        }
+    }
+    if qi == q.len() {
+        Some(last - first.unwrap_or(0))
+    } else {
+        None
+    }
 }
 
 pub struct TuiProvider;
@@ -95,6 +235,7 @@ async fn async_run(state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        SetCursorStyle::DefaultUserShape,
         PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         DisableMouseCapture
@@ -130,6 +271,7 @@ async fn run_loop(
     let main_config = load_main_config().ok().unwrap_or_default();
     let lsp_binary = main_config.editor.lsp_binary.clone();
     let mouse_scroll_lines = main_config.editor.mouse_scroll_lines;
+    let leader_char: char = main_config.editor.leader_key.chars().next().unwrap_or(' ');
     let mut lsp: Option<LspClient> = LspClient::start(&lsp_binary, None).await.ok();
     if let Some(ref mut client) = lsp {
         let _ = client.open_document(scratch_uri.clone(), "").await;
@@ -146,13 +288,19 @@ async fn run_loop(
     let mut last_completion_id: Option<i64> = None;
     let mut last_schema_completions: Vec<String> = Vec::new();
     let mut tick: u32 = 0;
-    let mut command_input: Option<String> = None;
+    let mut command_input: Option<TextInput> = None;
+    let mut rename_input: Option<TextInput> = None;
+    let mut file_picker: Option<FilePicker> = None;
+    let mut delete_confirm: Option<String> = None;
     let mut schema_search = SchemaSearch::from_initial(state.lock().unwrap().schema_search_query.clone());
     let mut editor_search: Option<String> = None;
     let mut last_editor_search: Option<String> = None;
 
     let mut toasts: Vec<(String, std::time::Instant)> = Vec::new();
     let mut last_esc_at: Option<std::time::Instant> = None;
+    // Leader-key chord state. Set when the leader is pressed in an eligible
+    // context; cleared when the next key resolves the chord or it times out.
+    let mut leader_pending_at: Option<std::time::Instant> = None;
     // Clipboard held alive for the session so the OS clipboard manager sees the content.
     let mut clipboard = Clipboard::new().ok();
     // Mouse drag tracking
@@ -215,7 +363,7 @@ async fn run_loop(
                 needs_redraw = true;
             }
             s.vim_mode = editor.vim_mode();
-            s.schema_search_query = schema_search.query.clone();
+            s.schema_search_query = schema_search.query().map(|q| q.to_string());
             if let Some(ref c) = content {
                 s.editor_content = c.clone();
                 editor_dirty = true;
@@ -316,6 +464,9 @@ async fn run_loop(
             tick = tick.wrapping_add(1);
             let tick_snap = tick;
             let cmd_snap = command_input.clone();
+            let rename_snap = rename_input.clone();
+            let picker_snap = file_picker.clone();
+            let delete_snap = delete_confirm.clone();
             let schema_search_snap = schema_search.clone();
             let editor_search_snap = editor_search.clone();
             let last_editor_search_snap = last_editor_search.clone();
@@ -327,13 +478,27 @@ async fn run_loop(
                     &s,
                     &mut editor,
                     tick_snap,
-                    cmd_snap.as_deref(),
+                    cmd_snap.as_ref(),
+                    rename_snap.as_ref(),
+                    picker_snap.as_ref(),
+                    delete_snap.as_deref(),
                     &schema_search_snap,
                     editor_search_snap.as_deref(),
                     last_editor_search_snap.as_deref(),
                     &toast_snap,
                 );
             })?;
+            // Apply the cursor shape requested by draw(). Hidden is handled by
+            // ratatui (no set_cursor_position call leaves the cursor hidden).
+            match last_draw_areas.cursor_shape {
+                CursorShape::Bar => {
+                    let _ = execute!(terminal.backend_mut(), SetCursorStyle::SteadyBar);
+                }
+                CursorShape::Block => {
+                    let _ = execute!(terminal.backend_mut(), SetCursorStyle::SteadyBlock);
+                }
+                CursorShape::Hidden => {}
+            }
             last_terminal_size = terminal.size()?;
         }
 
@@ -584,19 +749,103 @@ async fn run_loop(
                 let show_results = !matches!(s.results, sqeel_core::state::ResultsPane::Empty);
                 drop(s);
 
+                // ── Leader-key chord ─────────────────────────────────────────────
+                // Eligible context: no modal open, schema search box not focused,
+                // and either we're outside the editor or in Vim Normal mode.
+                let leader_eligible = command_input.is_none()
+                    && rename_input.is_none()
+                    && file_picker.is_none()
+                    && delete_confirm.is_none()
+                    && !show_switcher
+                    && !show_add
+                    && !show_help
+                    && !show_completions
+                    && !schema_search.focused
+                    && (focus != Focus::Editor || vim_mode == VimMode::Normal);
+
+                // Resolve a pending leader chord with the current key.
+                if let Some(t) = leader_pending_at {
+                    let expired = t.elapsed() > Duration::from_millis(1500);
+                    leader_pending_at = None;
+                    if !expired && key.modifiers == KeyModifiers::NONE {
+                        match key.code {
+                            KeyCode::Char('e') => {
+                                let mut s = state.lock().unwrap();
+                                s.sidebar_visible = !s.sidebar_visible;
+                                if !s.sidebar_visible && s.focus == Focus::Schema {
+                                    s.focus = Focus::Editor;
+                                } else if s.sidebar_visible {
+                                    s.focus = Focus::Schema;
+                                }
+                                continue;
+                            }
+                            KeyCode::Char('c') => {
+                                state.lock().unwrap().open_connection_switcher();
+                                continue;
+                            }
+                            KeyCode::Char('n') => {
+                                let content = {
+                                    let mut s = state.lock().unwrap();
+                                    s.new_tab();
+                                    s.tab_content_pending.take()
+                                };
+                                if let Some(c) = content {
+                                    editor.set_content(&c);
+                                    editor_dirty = false;
+                                }
+                                continue;
+                            }
+                            KeyCode::Char('r') => {
+                                let s = state.lock().unwrap();
+                                let current = s
+                                    .tabs
+                                    .get(s.active_tab)
+                                    .map(|t| t.name.clone())
+                                    .unwrap_or_default();
+                                drop(s);
+                                rename_input = Some(TextInput::from_str(&current));
+                                continue;
+                            }
+                            KeyCode::Char(c) if c == leader_char => {
+                                file_picker = Some(FilePicker::default());
+                                continue;
+                            }
+                            KeyCode::Char('d') => {
+                                let s = state.lock().unwrap();
+                                if let Some(name) =
+                                    s.tabs.get(s.active_tab).map(|t| t.name.clone())
+                                {
+                                    drop(s);
+                                    delete_confirm = Some(name);
+                                }
+                                continue;
+                            }
+                            KeyCode::Esc => continue,
+                            _ => {}
+                        }
+                    }
+                    // Unknown chord or expired — silently drop the second key so
+                    // the leader doesn't accidentally insert text.
+                    continue;
+                }
+
+                // Arm leader on press.
+                if leader_eligible
+                    && key.modifiers == KeyModifiers::NONE
+                    && matches!(key.code, KeyCode::Char(c) if c == leader_char)
+                {
+                    leader_pending_at = Some(std::time::Instant::now());
+                    continue;
+                }
+
                 // ── Command input mode ───────────────────────────────────────────
-                if command_input.is_some() {
+                if let Some(ref mut cmd) = command_input {
                     match (key.modifiers, key.code) {
                         (KeyModifiers::NONE, KeyCode::Esc) => {
                             command_input = None;
                         }
-                        (KeyModifiers::NONE, KeyCode::Backspace) => {
-                            if let Some(ref mut cmd) = command_input {
-                                cmd.pop();
-                            }
-                        }
                         (KeyModifiers::NONE, KeyCode::Enter) => {
-                            let cmd_str = command_input.take().unwrap_or_default();
+                            let cmd_str = command_input.take().unwrap_or_default().text;
                             let trimmed = cmd_str.trim();
                             if let Ok(line) = trimmed.parse::<usize>() {
                                 state.lock().unwrap().focus = Focus::Editor;
@@ -613,10 +862,101 @@ async fn run_loop(
                                 }
                             }
                         }
-                        (KeyModifiers::NONE, KeyCode::Char(c)) => {
-                            if let Some(ref mut cmd) = command_input {
-                                cmd.push(c);
+                        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                            cmd.insert_char(c);
+                        }
+                        (KeyModifiers::NONE, code) if cmd.handle_nav(code) => {}
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // ── Rename input mode ────────────────────────────────────────────
+                if let Some(ref mut name) = rename_input {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            rename_input = None;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            let name_str = rename_input.take().unwrap_or_default().text;
+                            let mut s = state.lock().unwrap();
+                            if let Err(e) = s.rename_active_tab(&name_str) {
+                                toasts.push((
+                                    format!("Rename failed: {e}"),
+                                    std::time::Instant::now(),
+                                ));
                             }
+                        }
+                        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                            name.insert_char(c);
+                        }
+                        (KeyModifiers::NONE, code) if name.handle_nav(code) => {}
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // ── Delete confirmation (leader+d) ───────────────────────────────
+                if delete_confirm.is_some() {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Char('y'))
+                        | (KeyModifiers::NONE, KeyCode::Enter) => {
+                            delete_confirm = None;
+                            let mut s = state.lock().unwrap();
+                            if let Err(e) = s.delete_active_tab() {
+                                toasts.push((
+                                    format!("Delete failed: {e}"),
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                        }
+                        _ => {
+                            // Any other key cancels (Esc, n, etc.).
+                            delete_confirm = None;
+                        }
+                    }
+                    continue;
+                }
+
+                // ── File picker (leader+space) ───────────────────────────────────
+                if let Some(ref mut picker) = file_picker {
+                    let names: Vec<String> = state
+                        .lock()
+                        .unwrap()
+                        .tabs
+                        .iter()
+                        .map(|t| t.name.clone())
+                        .collect();
+                    let matched: Vec<String> =
+                        picker.matches(&names).into_iter().cloned().collect();
+                    let max = matched.len().saturating_sub(1);
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            file_picker = None;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Down)
+                        | (KeyModifiers::CONTROL, KeyCode::Char('j' | 'n')) => {
+                            picker.cursor = (picker.cursor + 1).min(max);
+                        }
+                        (KeyModifiers::NONE, KeyCode::Up)
+                        | (KeyModifiers::CONTROL, KeyCode::Char('k' | 'p')) => {
+                            picker.cursor = picker.cursor.saturating_sub(1);
+                        }
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            if let Some(name) = matched.get(picker.cursor) {
+                                let mut s = state.lock().unwrap();
+                                if let Some(idx) = s.tabs.iter().position(|t| &t.name == name) {
+                                    s.switch_to_tab(idx);
+                                }
+                            }
+                            file_picker = None;
+                        }
+                        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                            picker.query.insert_char(c);
+                            picker.cursor = 0;
+                        }
+                        (mods, code) if mods == KeyModifiers::NONE && picker.query.handle_nav(code) => {
+                            picker.cursor = 0;
                         }
                         _ => {}
                     }
@@ -627,7 +967,6 @@ async fn run_loop(
                 if schema_search.focused {
                     match (key.modifiers, key.code) {
                         (KeyModifiers::NONE, KeyCode::Esc) => schema_search.clear(),
-                        (KeyModifiers::NONE, KeyCode::Backspace) => schema_search.pop(),
                         (KeyModifiers::NONE, KeyCode::Enter) => {
                             // Keep filter active, switch to list navigation mode.
                             schema_search.focused = false;
@@ -635,6 +974,7 @@ async fn run_loop(
                         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
                             schema_search.push(c);
                         }
+                        (KeyModifiers::NONE, code) if schema_search.handle_nav(code) => {}
                         // ctrl+hjkl: dismiss search and move focus.
                         (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
                             schema_search.clear();
@@ -706,10 +1046,7 @@ async fn run_loop(
                     match (key.modifiers, key.code) {
                         (
                             KeyModifiers::NONE,
-                            KeyCode::Esc
-                            | KeyCode::Char('q')
-                            | KeyCode::Char('?')
-                            | KeyCode::Char('.'),
+                            KeyCode::Esc,
                         ) => {
                             state.lock().unwrap().close_help();
                         }
@@ -744,7 +1081,22 @@ async fn run_loop(
                         (KeyModifiers::NONE, KeyCode::Backspace) => {
                             state.lock().unwrap().add_connection_backspace();
                         }
-                        (KeyModifiers::NONE, KeyCode::Char(ch)) => {
+                        (KeyModifiers::NONE, KeyCode::Delete) => {
+                            state.lock().unwrap().add_connection_delete();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Left) => {
+                            state.lock().unwrap().add_connection_left();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Right) => {
+                            state.lock().unwrap().add_connection_right();
+                        }
+                        (KeyModifiers::NONE, KeyCode::Home) => {
+                            state.lock().unwrap().add_connection_home();
+                        }
+                        (KeyModifiers::NONE, KeyCode::End) => {
+                            state.lock().unwrap().add_connection_end();
+                        }
+                        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(ch)) => {
                             state.lock().unwrap().add_connection_type_char(ch);
                         }
                         _ => {}
@@ -828,8 +1180,12 @@ async fn run_loop(
                 }
 
                 match (key.modifiers, key.code) {
-                    // Tab navigation (global, any mode)
-                    (KeyModifiers::CONTROL, KeyCode::Right) => {
+                    // Shift+H / Shift+L: prev / next tab. Active outside the
+                    // editor or when in Vim Normal mode so it doesn't shadow
+                    // typing in Insert mode.
+                    (KeyModifiers::SHIFT, KeyCode::Char('L'))
+                        if focus != Focus::Editor || vim_mode == VimMode::Normal =>
+                    {
                         let content = {
                             let mut s = state.lock().unwrap();
                             s.next_tab();
@@ -840,21 +1196,12 @@ async fn run_loop(
                             editor_dirty = false;
                         }
                     }
-                    (KeyModifiers::CONTROL, KeyCode::Left) => {
+                    (KeyModifiers::SHIFT, KeyCode::Char('H'))
+                        if focus != Focus::Editor || vim_mode == VimMode::Normal =>
+                    {
                         let content = {
                             let mut s = state.lock().unwrap();
                             s.prev_tab();
-                            s.tab_content_pending.take()
-                        };
-                        if let Some(c) = content {
-                            editor.set_content(&c);
-                            editor_dirty = false;
-                        }
-                    }
-                    (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-                        let content = {
-                            let mut s = state.lock().unwrap();
-                            s.new_tab();
                             s.tab_content_pending.take()
                         };
                         if let Some(c) = content {
@@ -866,31 +1213,13 @@ async fn run_loop(
                     (KeyModifiers::NONE, KeyCode::Char(':'))
                         if focus != Focus::Editor || vim_mode == VimMode::Normal =>
                     {
-                        command_input = Some(String::new());
+                        command_input = Some(TextInput::default());
                     }
-                    // Global quit in vim normal mode or schema/results pane
-                    (KeyModifiers::NONE, KeyCode::Char('q'))
-                        if focus != Focus::Editor || vim_mode == VimMode::Normal =>
-                    {
-                        break;
-                    }
-                    // Help: ? or .
-                    (KeyModifiers::NONE, KeyCode::Char('?' | '.'))
+                    // Help: ?
+                    (KeyModifiers::NONE, KeyCode::Char('?'))
                         if focus != Focus::Editor || vim_mode == VimMode::Normal =>
                     {
                         state.lock().unwrap().open_help();
-                    }
-                    // Open connection switcher: Ctrl+W
-                    (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
-                        state.lock().unwrap().open_connection_switcher();
-                    }
-                    // Toggle sidebar: Ctrl+\
-                    (KeyModifiers::CONTROL, KeyCode::Char('\\')) => {
-                        let mut s = state.lock().unwrap();
-                        s.sidebar_visible = !s.sidebar_visible;
-                        if !s.sidebar_visible && s.focus == Focus::Schema {
-                            s.focus = Focus::Editor;
-                        }
                     }
                     // Schema pane navigation
                     (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Schema => {
@@ -922,10 +1251,7 @@ async fn run_loop(
                         state.lock().unwrap().scroll_results_left();
                     }
                     // Dismiss results
-                    (KeyModifiers::CONTROL, KeyCode::Char('c'))
-                    | (KeyModifiers::NONE, KeyCode::Char('q'))
-                        if focus == Focus::Results =>
-                    {
+                    (KeyModifiers::NONE, KeyCode::Esc) if focus == Focus::Results => {
                         state.lock().unwrap().dismiss_results();
                     }
                     // Execute query: Ctrl+Enter
@@ -937,7 +1263,7 @@ async fn run_loop(
                         if !sent {
                             s.push_history(&content);
                             s.set_error(
-                                "No DB connected. Use --url / --connection or Ctrl+W to switch."
+                                "No DB connected. Use --url / --connection or <leader>c to switch."
                                     .into(),
                             );
                         }
@@ -1073,6 +1399,17 @@ fn diag_label(state: &AppState) -> Option<Span<'static>> {
     }
 }
 
+/// Desired terminal cursor shape after a draw. The TUI uses a thin vertical bar
+/// for any text-input context (insert mode, dialogs, schema search) and a thick
+/// block for editor normal mode, so cursors look consistent across the app.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CursorShape {
+    #[default]
+    Hidden,
+    Bar,
+    Block,
+}
+
 #[derive(Default, Clone, Copy)]
 struct DrawAreas {
     schema: Rect,
@@ -1083,6 +1420,7 @@ struct DrawAreas {
     editor: Rect,
     tab_bar: Rect,
     results: Option<Rect>,
+    cursor_shape: CursorShape,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1091,7 +1429,10 @@ fn draw(
     state: &AppState,
     editor: &mut Editor,
     tick: u32,
-    command_input: Option<&str>,
+    command_input: Option<&TextInput>,
+    rename_input: Option<&TextInput>,
+    file_picker: Option<&FilePicker>,
+    delete_confirm: Option<&str>,
     schema_search: &SchemaSearch,
     editor_search: Option<&str>,
     last_editor_search: Option<&str>,
@@ -1134,11 +1475,11 @@ fn draw(
     let results_focused = state.focus == Focus::Results;
 
     // Schema panel
-    let (schema_list_area, schema_list_offset, schema_list_count, schema_list_filtered) =
+    let (schema_list_area, schema_list_offset, schema_list_count, schema_list_filtered, schema_search_cursor) =
         if state.sidebar_visible {
             draw_schema(f, state, outer[0], schema_focused, tick, schema_search)
         } else {
-            (Rect::default(), 0, 0, false)
+            (Rect::default(), 0, 0, false, None)
         };
 
     let show_results = !matches!(state.results, ResultsPane::Empty);
@@ -1167,7 +1508,7 @@ fn draw(
         width: right_chunks[0].width,
         height: 1,
     };
-    let areas = DrawAreas {
+    let mut areas = DrawAreas {
         schema: outer[0],
         schema_list_area,
         schema_list_offset,
@@ -1180,6 +1521,7 @@ fn draw(
         } else {
             None
         },
+        cursor_shape: CursorShape::Hidden,
     };
 
     draw_editor(
@@ -1208,8 +1550,9 @@ fn draw(
     }
 
     // Add connection dialog (above switcher)
+    let mut add_connection_cursor: Option<(u16, u16)> = None;
     if state.show_add_connection {
-        draw_add_connection(f, state, area);
+        add_connection_cursor = Some(draw_add_connection(f, state, area));
     }
 
     // Help overlay (topmost)
@@ -1231,14 +1574,28 @@ fn draw(
     // Status bar (always at bottom)
     draw_status_bar(f, state, editor, status_area);
 
-    // Command bar overlays the status row when active
+    // Command palette: small centered dialog, no borders, 2-col + 1-row padding.
+    let mut dialog_cursor: Option<(u16, u16)> = None;
     if let Some(cmd) = command_input {
-        f.render_widget(Clear, status_area);
-        f.render_widget(
-            Paragraph::new(format!(":{cmd}_"))
-                .style(Style::default().fg(Color::White).bg(Color::Black)),
-            status_area,
-        );
+        dialog_cursor = Some(draw_input_dialog(f, area, ": ", cmd));
+    }
+
+    // Rename prompt: same shape as command palette.
+    if let Some(name) = rename_input {
+        dialog_cursor = Some(draw_input_dialog(f, area, "> ", name));
+    }
+
+    // Delete confirmation: centered borderless dialog.
+    if let Some(name) = delete_confirm {
+        draw_confirm_dialog(f, area, &format!("Delete '{name}'?  (y / n)"));
+    }
+
+    // File picker (leader+space): centered dialog with input + scrollable list.
+    if let Some(picker) = file_picker {
+        let names: Vec<String> = state.tabs.iter().map(|t| t.name.clone()).collect();
+        let matched: Vec<&String> = picker.matches(&names);
+        let active_name = state.tabs.get(state.active_tab).map(|t| t.name.as_str());
+        dialog_cursor = Some(draw_file_picker(f, area, picker, &matched, active_name));
     }
 
     // Toast notifications (top-right corner, stacked vertically).
@@ -1272,6 +1629,40 @@ fn draw(
         }
         y_off = y_off.saturating_add(height).saturating_add(1);
     }
+
+    // Pick the active cursor target: dialogs > add-connection > schema search >
+    // editor (when focused). Bar shape for any text-input context, Block for
+    // editor normal mode.
+    let (cursor_pos, shape) = if let Some(p) = dialog_cursor {
+        (Some(p), CursorShape::Bar)
+    } else if let Some(p) = add_connection_cursor {
+        (Some(p), CursorShape::Bar)
+    } else if let Some(p) = schema_search_cursor {
+        (Some(p), CursorShape::Bar)
+    } else if state.focus == Focus::Editor && !state.show_help && !state.show_connection_switcher {
+        // Reconstruct the textarea rect that draw_editor uses:
+        // top row is the tab bar, then a 1-col horizontal margin around the body.
+        let pane = right_chunks[0];
+        let textarea_rect = Rect {
+            x: pane.x.saturating_add(1),
+            y: pane.y.saturating_add(1),
+            width: pane.width.saturating_sub(2),
+            height: pane.height.saturating_sub(1),
+        };
+        let pos = editor.cursor_screen_pos(textarea_rect);
+        let shape = if state.vim_mode == VimMode::Insert {
+            CursorShape::Bar
+        } else {
+            CursorShape::Block
+        };
+        (pos, shape)
+    } else {
+        (None, CursorShape::Hidden)
+    };
+    if let Some((x, y)) = cursor_pos {
+        f.set_cursor_position((x, y));
+    }
+    areas.cursor_shape = shape;
 
     areas
 }
@@ -1480,7 +1871,7 @@ fn draw_schema(
     focused: bool,
     tick: u32,
     search: &SchemaSearch,
-) -> (Rect, usize, usize, bool) {
+) -> (Rect, usize, usize, bool, Option<(u16, u16)>) {
     let searching = search.focused;
     let search_cursor = search.cursor;
     const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
@@ -1520,10 +1911,16 @@ fn draw_schema(
 
     let query = search.query().unwrap_or("");
     let has_filter = !query.is_empty();
-    let input_text = if searching {
-        format!("{query}▌")
+    // Magnifier glyph + space prefix marks this as the search input.
+    let prefix = "🔍 ";
+    let input_text = format!("{prefix}{query}");
+    let text_cursor = search.query.as_ref().map(|q| q.cursor).unwrap_or(0);
+    // The magnifier emoji is 2 cells wide; total prefix width = 3 cells.
+    let prefix_cells: u16 = 3;
+    let search_cursor_pos = if searching {
+        Some((chunks[0].x + 1 + prefix_cells + text_cursor as u16, chunks[0].y + 1))
     } else {
-        query.to_string()
+        None
     };
     let search_block = Block::default()
         .title(title.clone())
@@ -1565,7 +1962,7 @@ fn draw_schema(
             }),
             list_area,
         );
-        return (list_area, 0, 0, has_filter);
+        return (list_area, 0, 0, has_filter, search_cursor_pos);
     }
 
     let list_items: Vec<ListItem> = items
@@ -1598,7 +1995,7 @@ fn draw_schema(
     let list = List::new(list_items).highlight_style(highlight_style);
     let mut list_state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, list_area, &mut list_state);
-    (list_area, list_state.offset(), item_count, has_filter)
+    (list_area, list_state.offset(), item_count, has_filter, search_cursor_pos)
 }
 
 fn draw_editor(
@@ -1683,13 +2080,9 @@ fn draw_editor(
     editor
         .textarea
         .set_cursor_line_style(Style::default().bg(cursor_line_bg));
-    editor.textarea.set_cursor_style(if !focused {
-        Style::default().bg(cursor_line_bg) // blend into cursor line, truly invisible
-    } else if state.vim_mode == VimMode::Insert {
-        Style::default().add_modifier(Modifier::UNDERLINED) // thin bar
-    } else {
-        Style::default().add_modifier(Modifier::REVERSED) // block
-    });
+    // Real terminal cursor handles all cursor rendering — hide the textarea's
+    // cell-based cursor by blending it into the cursor-line background.
+    editor.textarea.set_cursor_style(Style::default().bg(cursor_line_bg));
     // In Visual mode tui-textarea's Search boundary (rank 2) overrides Select (rank 1),
     // so syntax highlights would erase the selection color. Clear the pattern instead.
     if state.vim_mode == VimMode::Visual || state.vim_mode == VimMode::VisualLine {
@@ -1898,48 +2291,181 @@ fn draw_completions(
     );
 }
 
-fn draw_connection_switcher(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect) {
-    let conns = &state.available_connections;
-    let cursor = state.connection_switcher_cursor;
-
-    let items: Vec<ListItem> = if conns.is_empty() {
-        vec![ListItem::new("No connections configured")]
-    } else {
-        conns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let style = if i == cursor {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(format!("{} — {}", c.name, c.url)).style(style)
-            })
-            .collect()
-    };
-
-    let width = 60.min(area.width.saturating_sub(4));
-    let height = (items.len() as u16 + 2)
-        .min(20)
-        .min(area.height.saturating_sub(4));
+/// Small borderless centered dialog: 2-col horizontal padding, 1-row vertical
+/// padding, single line of input. Used by the command palette and rename.
+/// Borderless centered single-line input dialog. The caller supplies the
+/// prompt prefix (e.g. `> `, `: `) so cursor placement stays exact regardless
+/// of glyph width. Returns the terminal-space cursor position so the caller
+/// can place the real cursor.
+fn draw_input_dialog(
+    f: &mut ratatui::Frame<'_>,
+    area: Rect,
+    prefix: &str,
+    input: &TextInput,
+) -> (u16, u16) {
+    let bg = Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 45));
+    let content = format!("{prefix}{}", input.text);
+    let inner_w = (content.chars().count() as u16 + 1).max(20);
+    let width = (inner_w + 4).min(area.width.saturating_sub(4));
+    let height = 3u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
         width,
         height,
     };
-
     f.render_widget(Clear, popup);
+    f.render_widget(Block::default().style(bg), popup);
+    let line = Rect {
+        x: popup.x + 2,
+        y: popup.y + 1,
+        width: popup.width.saturating_sub(4),
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(content).style(bg), line);
+    (line.x + prefix.chars().count() as u16 + input.cursor as u16, line.y)
+}
+
+/// Borderless centered confirmation dialog with a single message line.
+fn draw_confirm_dialog(f: &mut ratatui::Frame<'_>, area: Rect, message: &str) {
+    let bg = Style::default().fg(Color::White).bg(Color::Rgb(80, 30, 30));
+    let inner_w = (message.chars().count() as u16).max(20);
+    let width = (inner_w + 4).min(area.width.saturating_sub(4));
+    let height = 3u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    f.render_widget(Block::default().style(bg), popup);
+    let line = Rect {
+        x: popup.x + 2,
+        y: popup.y + 1,
+        width: popup.width.saturating_sub(4),
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(message.to_string()).style(bg), line);
+}
+
+/// File picker dialog: borderless, padded, with input row + matching tab names.
+fn draw_file_picker(
+    f: &mut ratatui::Frame<'_>,
+    area: Rect,
+    picker: &FilePicker,
+    matched: &[&String],
+    active_name: Option<&str>,
+) -> (u16, u16) {
+    let bg = Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 45));
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let max_rows = 12u16;
+    let list_rows = (matched.len() as u16).min(max_rows).max(1);
+    // 1 row top pad + 1 row input + 1 row separator + N rows + 1 row bottom pad
+    let height = (list_rows + 4).min(area.height.saturating_sub(2));
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    f.render_widget(Block::default().style(bg), popup);
+
+    let inner_x = popup.x + 2;
+    let inner_w = popup.width.saturating_sub(4);
+
+    // Input row
+    let input_area = Rect { x: inner_x, y: popup.y + 1, width: inner_w, height: 1 };
     f.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title(" Connections (j/k  Enter connect  n new  e edit  d delete  Esc close) ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
-        ),
-        popup,
+        Paragraph::new(format!("> {}", picker.query.text)).style(bg),
+        input_area,
     );
+    let cursor_pos = (input_area.x + 2 + picker.query.cursor as u16, input_area.y);
+
+    // Results list
+    let list_y = popup.y + 3;
+    let cursor = picker.cursor.min(matched.len().saturating_sub(1));
+    for (i, name) in matched.iter().take(list_rows as usize).enumerate() {
+        let row = Rect { x: inner_x, y: list_y + i as u16, width: inner_w, height: 1 };
+        let is_cursor = i == cursor;
+        let is_active = active_name == Some(name.as_str());
+        let mut style = bg;
+        if is_cursor {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        let marker = if is_active { "* " } else { "  " };
+        f.render_widget(
+            Paragraph::new(format!("{marker}{name}")).style(style),
+            row,
+        );
+    }
+    if matched.is_empty() {
+        let row = Rect { x: inner_x, y: list_y, width: inner_w, height: 1 };
+        f.render_widget(
+            Paragraph::new("(no matches)").style(bg.add_modifier(Modifier::DIM)),
+            row,
+        );
+    }
+    cursor_pos
+}
+
+fn draw_connection_switcher(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect) {
+    let bg = Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 45));
+    let conns = &state.available_connections;
+    let cursor = state.connection_switcher_cursor;
+    let active_name = state.active_connection.as_deref();
+
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let max_rows = 12u16;
+    let list_rows = (conns.len() as u16).min(max_rows).max(1);
+    // 1 row top pad + 1 row header + 1 row separator + N rows + 1 row bottom pad
+    let height = (list_rows + 4).min(area.height.saturating_sub(2));
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    f.render_widget(Block::default().style(bg), popup);
+
+    let inner_x = popup.x + 2;
+    let inner_w = popup.width.saturating_sub(4);
+
+    // Header row
+    let header = Rect { x: inner_x, y: popup.y + 1, width: inner_w, height: 1 };
+    f.render_widget(
+        Paragraph::new("Connections  (Enter connect · n new · e edit · d delete)")
+            .style(bg.add_modifier(Modifier::DIM)),
+        header,
+    );
+
+    // List
+    let list_y = popup.y + 3;
+    if conns.is_empty() {
+        let row = Rect { x: inner_x, y: list_y, width: inner_w, height: 1 };
+        f.render_widget(
+            Paragraph::new("(no connections configured)").style(bg.add_modifier(Modifier::DIM)),
+            row,
+        );
+        return;
+    }
+    let cur = cursor.min(conns.len().saturating_sub(1));
+    for (i, c) in conns.iter().take(list_rows as usize).enumerate() {
+        let row = Rect { x: inner_x, y: list_y + i as u16, width: inner_w, height: 1 };
+        let is_cursor = i == cur;
+        let is_active = active_name == Some(c.name.as_str());
+        let mut style = bg;
+        if is_cursor {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        let marker = if is_active { "* " } else { "  " };
+        f.render_widget(
+            Paragraph::new(format!("{marker}{} — {}", c.name, c.url)).style(style),
+            row,
+        );
+    }
 }
 
 fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
@@ -1947,10 +2473,21 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
         (
             "Global",
             &[
-                ("?  /  .", "Open this help (normal mode)"),
+                ("?", "Open this help (normal mode)"),
                 ("Ctrl+Enter", "Execute query"),
-                ("Ctrl+W", "Connection switcher"),
-                ("q", "Quit (normal mode / schema / results)"),
+                (":q", "Quit"),
+                ("Esc Esc", "Dismiss all toasts"),
+            ],
+        ),
+        (
+            "Leader (default Space — config: editor.leader_key)",
+            &[
+                ("<leader> e", "Toggle schema sidebar"),
+                ("<leader> c", "Connection switcher"),
+                ("<leader> n", "New scratch tab"),
+                ("<leader> r", "Rename current tab"),
+                ("<leader> d", "Delete current tab (confirm)"),
+                ("<leader> <leader>", "Fuzzy file picker"),
             ],
         ),
         (
@@ -1973,15 +2510,18 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
             "Results Pane",
             &[
                 ("j / k", "Scroll down / up"),
-                ("q / Ctrl+C", "Dismiss results"),
+                ("Esc", "Dismiss results"),
             ],
         ),
         (
             "Tabs",
             &[
-                ("Ctrl+T", "New scratch tab"),
-                ("Ctrl+Right", "Next tab"),
-                ("Ctrl+Left", "Prev tab"),
+                ("<leader>n", "New scratch tab"),
+                ("Shift+L", "Next tab"),
+                ("Shift+H", "Prev tab"),
+                ("<leader>r", "Rename current tab"),
+                ("<leader>d", "Delete current tab"),
+                ("<leader><leader>", "Fuzzy switch tab"),
                 ("Click tab name", "Switch to tab"),
             ],
         ),
@@ -2066,7 +2606,7 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
     );
 }
 
-fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect) {
+fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect) -> (u16, u16) {
     let width = 64.min(area.width.saturating_sub(4));
     let height = 7;
     let popup = Rect {
@@ -2113,12 +2653,14 @@ fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect)
         Style::default()
     };
 
+    let name_label = "Name > ";
+    let url_label = "URL  > ";
     f.render_widget(
-        Paragraph::new(format!("Name : {}_", state.add_connection_name)).style(name_style),
+        Paragraph::new(format!("{name_label}{}", state.add_connection_name)).style(name_style),
         rows[0],
     );
     f.render_widget(
-        Paragraph::new(format!("URL  : {}_", state.add_connection_url)).style(url_style),
+        Paragraph::new(format!("{url_label}{}", state.add_connection_url)).style(url_style),
         rows[1],
     );
     f.render_widget(
@@ -2126,6 +2668,18 @@ fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect)
             .style(Style::default().fg(Color::DarkGray)),
         rows[2],
     );
+    match state.add_connection_field {
+        AddConnectionField::Name => (
+            rows[0].x + name_label.chars().count() as u16
+                + state.add_connection_name_cursor as u16,
+            rows[0].y,
+        ),
+        AddConnectionField::Url => (
+            rows[1].x + url_label.chars().count() as u16
+                + state.add_connection_url_cursor as u16,
+            rows[1].y,
+        ),
+    }
 }
 
 #[cfg(test)]

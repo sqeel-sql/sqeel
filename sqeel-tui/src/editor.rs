@@ -81,6 +81,25 @@ impl<'a> Editor<'a> {
         cursor.saturating_sub(top).min(height as usize - 1) as u16
     }
 
+    /// Returns the cursor's screen position `(x, y)` for `area` (the textarea
+    /// rect). Accounts for line-number gutter and viewport scroll. Returns
+    /// `None` if the cursor is outside the visible viewport.
+    pub fn cursor_screen_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let (row, col) = self.textarea.cursor();
+        let top_row = self.textarea.viewport_top_row();
+        let top_col = self.textarea.viewport_top_col();
+        if row < top_row || col < top_col {
+            return None;
+        }
+        let lnum_width = self.textarea.lines().len().to_string().len() as u16 + 2;
+        let dy = (row - top_row) as u16;
+        let dx = (col - top_col) as u16;
+        if dy >= area.height || dx + lnum_width >= area.width {
+            return None;
+        }
+        Some((area.x + lnum_width + dx, area.y + dy))
+    }
+
     pub fn vim_mode(&self) -> VimMode {
         match self.mode {
             Mode::Normal | Mode::Operator(_) => VimMode::Normal,

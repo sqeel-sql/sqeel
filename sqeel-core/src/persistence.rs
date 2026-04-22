@@ -92,6 +92,32 @@ pub fn save_query(conn_slug: &str, name: &str, content: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// Delete a saved SQL buffer from the connection's queries subdir.
+/// No-op if the file doesn't exist.
+pub fn delete_query(conn_slug: &str, name: &str) -> anyhow::Result<()> {
+    let dir =
+        queries_dir_for(conn_slug).ok_or_else(|| anyhow::anyhow!("cannot determine data dir"))?;
+    let path = dir.join(name);
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Rename a saved SQL buffer within the connection's queries subdir.
+/// Fails if the destination already exists.
+pub fn rename_query(conn_slug: &str, old: &str, new: &str) -> anyhow::Result<()> {
+    let dir =
+        queries_dir_for(conn_slug).ok_or_else(|| anyhow::anyhow!("cannot determine data dir"))?;
+    let from = dir.join(old);
+    let to = dir.join(new);
+    if to.exists() {
+        anyhow::bail!("A buffer named {new} already exists");
+    }
+    std::fs::rename(from, to)?;
+    Ok(())
+}
+
 /// Load a SQL buffer from the connection's queries subdir.
 pub fn load_query(conn_slug: &str, name: &str) -> anyhow::Result<String> {
     let dir =

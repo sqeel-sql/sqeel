@@ -104,7 +104,15 @@ fn main() -> anyhow::Result<()> {
             let focus = s.focus;
             let sidebar = s.sidebar_visible;
             let search = s.schema_search_query.clone();
+            let loading = s.schema_loading;
             drop(s);
+
+            // Skip while the schema is still loading: schema_nodes is partial,
+            // so schema_expanded_paths() would write a truncated set and clobber
+            // the user's saved expansion.
+            if loading {
+                continue;
+            }
 
             if conn.is_some()
                 && (conn != last_written_conn
@@ -175,22 +183,10 @@ async fn connect_and_spawn(
                 s.set_status(format!("Connected: {conn_name}"));
                 let slug = sanitize_conn_slug(&conn_name);
                 s.load_tabs_for_connection(&slug);
-                if let Some(name) = s
-                    .available_connections
-                    .iter()
-                    .find(|c| c.url == url)
-                    .map(|c| c.name.clone())
-                {
-                    let _ = save_session(
-                        &name,
-                        s.schema_cursor,
-                        s.schema_cursor_path_string(),
-                        s.schema_expanded_paths(),
-                        s.focus,
-                        s.sidebar_visible,
-                        s.schema_search_query.clone(),
-                    );
-                }
+                // Mark loading so the session watcher won't persist the
+                // empty schema_expanded_paths before the loader has had a
+                // chance to restore them from the session file.
+                s.schema_loading = true;
             }
             spawn_executor(
                 state.clone(),

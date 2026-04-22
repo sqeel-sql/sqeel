@@ -14,10 +14,16 @@ pub struct EditorConfig {
     pub lsp_binary: String,
     #[serde(default = "default_mouse_scroll_lines")]
     pub mouse_scroll_lines: usize,
+    #[serde(default = "default_leader_key")]
+    pub leader_key: String,
 }
 
 fn default_mouse_scroll_lines() -> usize {
     3
+}
+
+fn default_leader_key() -> String {
+    " ".to_string()
 }
 
 impl Default for EditorConfig {
@@ -26,6 +32,7 @@ impl Default for EditorConfig {
             keybindings: KeybindingMode::Vim,
             lsp_binary: "sqls".into(),
             mouse_scroll_lines: default_mouse_scroll_lines(),
+            leader_key: default_leader_key(),
         }
     }
 }
@@ -113,6 +120,10 @@ lsp_binary = "sqls"
 
 # Number of lines to scroll per mouse wheel tick (applies to all panes)
 mouse_scroll_lines = 3
+
+# Leader key for chord shortcuts (e.g. <leader>e toggles the schema sidebar).
+# Use a single character; " " for Space.
+leader_key = " "
 "#;
 
 pub fn load_main_config() -> anyhow::Result<MainConfig> {

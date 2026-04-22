@@ -101,6 +101,18 @@ pub enum ResultsPane {
     Error(String),
 }
 
+/// One entry in the results pane's tab bar — the query that produced it and
+/// either a result set or an error. `kind` is never `ResultsPane::Empty`.
+#[derive(Debug, Clone)]
+pub struct ResultsTab {
+    pub query: String,
+    pub kind: ResultsPane,
+    /// Per-tab vertical scroll position; preserved across tab switches.
+    pub scroll: usize,
+    /// Per-tab horizontal column scroll position.
+    pub col_scroll: usize,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub editor_content: Arc<String>,
@@ -139,6 +151,9 @@ pub struct AppState {
     pub add_connection_name: String,
     pub add_connection_url: String,
     pub add_connection_field: AddConnectionField,
+    /// Caret position (char index) within the active add-connection field.
+    pub add_connection_name_cursor: usize,
+    pub add_connection_url_cursor: usize,
     /// Original name when editing an existing connection (None when adding new).
     pub edit_connection_original_name: Option<String>,
     // Help overlay
@@ -482,6 +497,8 @@ impl AppState {
         self.show_add_connection = true;
         self.add_connection_name.clear();
         self.add_connection_url.clear();
+        self.add_connection_name_cursor = 0;
+        self.add_connection_url_cursor = 0;
         self.add_connection_field = AddConnectionField::Name;
         self.edit_connection_original_name = None;
     }
@@ -497,6 +514,8 @@ impl AppState {
         self.show_add_connection = true;
         self.add_connection_name = conn.name.clone();
         self.add_connection_url = conn.url.clone();
+        self.add_connection_name_cursor = self.add_connection_name.chars().count();
+        self.add_connection_url_cursor = self.add_connection_url.chars().count();
         self.add_connection_field = AddConnectionField::Name;
         self.edit_connection_original_name = Some(conn.name);
     }
@@ -523,22 +542,89 @@ impl AppState {
         };
     }
 
-    pub fn add_connection_type_char(&mut self, ch: char) {
+    fn add_connection_active(&mut self) -> (&mut String, &mut usize) {
         match self.add_connection_field {
-            AddConnectionField::Name => self.add_connection_name.push(ch),
-            AddConnectionField::Url => self.add_connection_url.push(ch),
+            AddConnectionField::Name => (
+                &mut self.add_connection_name,
+                &mut self.add_connection_name_cursor,
+            ),
+            AddConnectionField::Url => (
+                &mut self.add_connection_url,
+                &mut self.add_connection_url_cursor,
+            ),
         }
     }
 
+    pub fn add_connection_type_char(&mut self, ch: char) {
+        let (text, cur) = self.add_connection_active();
+        let byte = text
+            .char_indices()
+            .nth(*cur)
+            .map(|(b, _)| b)
+            .unwrap_or(text.len());
+        text.insert(byte, ch);
+        *cur += 1;
+    }
+
     pub fn add_connection_backspace(&mut self) {
-        match self.add_connection_field {
-            AddConnectionField::Name => {
-                self.add_connection_name.pop();
-            }
-            AddConnectionField::Url => {
-                self.add_connection_url.pop();
-            }
+        let (text, cur) = self.add_connection_active();
+        if *cur == 0 {
+            return;
         }
+        let end = text
+            .char_indices()
+            .nth(*cur)
+            .map(|(b, _)| b)
+            .unwrap_or(text.len());
+        let start = text
+            .char_indices()
+            .nth(*cur - 1)
+            .map(|(b, _)| b)
+            .unwrap_or(0);
+        text.replace_range(start..end, "");
+        *cur -= 1;
+    }
+
+    pub fn add_connection_delete(&mut self) {
+        let (text, cur) = self.add_connection_active();
+        let count = text.chars().count();
+        if *cur >= count {
+            return;
+        }
+        let start = text
+            .char_indices()
+            .nth(*cur)
+            .map(|(b, _)| b)
+            .unwrap_or(text.len());
+        let end = text
+            .char_indices()
+            .nth(*cur + 1)
+            .map(|(b, _)| b)
+            .unwrap_or(text.len());
+        text.replace_range(start..end, "");
+    }
+
+    pub fn add_connection_left(&mut self) {
+        let (_, cur) = self.add_connection_active();
+        *cur = cur.saturating_sub(1);
+    }
+
+    pub fn add_connection_right(&mut self) {
+        let (text, cur) = self.add_connection_active();
+        let count = text.chars().count();
+        if *cur < count {
+            *cur += 1;
+        }
+    }
+
+    pub fn add_connection_home(&mut self) {
+        let (_, cur) = self.add_connection_active();
+        *cur = 0;
+    }
+
+    pub fn add_connection_end(&mut self) {
+        let (text, cur) = self.add_connection_active();
+        *cur = text.chars().count();
     }
 
     /// Validate, persist, and register the connection. Handles both add and edit.
@@ -677,6 +763,56 @@ impl AppState {
     }
 
     /// Open a new scratch file and switch to it.
+    /// Rename the active tab's on-disk file and in-memory entry.
+    /// `new_name` is sanitized and forced to end in `.sql`.
+    pub fn rename_active_tab(&mut self, new_name: &str) -> anyhow::Result<()> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("Name cannot be empty");
+        }
+        let stem = trimmed.strip_suffix(".sql").unwrap_or(trimmed);
+        if !stem
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            anyhow::bail!("Name may only contain letters, digits, '-', '_', '.'");
+        }
+        let final_name = format!("{stem}.sql");
+        let slug =
+            persistence::sanitize_conn_slug(self.active_connection.as_deref().unwrap_or("default"));
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            anyhow::bail!("No active tab");
+        };
+        if tab.name == final_name {
+            return Ok(());
+        }
+        persistence::rename_query(&slug, &tab.name, &final_name)?;
+        tab.name = final_name;
+        Ok(())
+    }
+
+    /// Delete the active tab's on-disk file and drop the in-memory entry.
+    /// If this was the last tab, a fresh empty scratch tab is created so the
+    /// editor always has something to edit.
+    pub fn delete_active_tab(&mut self) -> anyhow::Result<()> {
+        let slug =
+            persistence::sanitize_conn_slug(self.active_connection.as_deref().unwrap_or("default"));
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            anyhow::bail!("No active tab");
+        };
+        let name = tab.name.clone();
+        persistence::delete_query(&slug, &name)?;
+        self.tabs.remove(self.active_tab);
+        if self.tabs.is_empty() {
+            self.new_tab();
+        } else {
+            let new_idx = self.active_tab.min(self.tabs.len() - 1);
+            self.active_tab = self.tabs.len(); // force switch_to_tab to reload
+            self.switch_to_tab(new_idx);
+        }
+        Ok(())
+    }
+
     pub fn new_tab(&mut self) {
         // Save current tab content before leaving
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {

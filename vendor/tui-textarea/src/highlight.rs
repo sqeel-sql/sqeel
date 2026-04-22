@@ -105,6 +105,9 @@ pub struct LineHighlighter<'a> {
     mask: Option<char>,
     select_at_end: bool,
     select_style: Style,
+    /// Per-byte-range base styles (e.g. tree-sitter syntax). Sorted by start,
+    /// non-overlapping. Cursor/Search/Select boundaries override via `patch`.
+    syntax_spans: Vec<(usize, usize, Style)>,
 }
 
 impl<'a> LineHighlighter<'a> {
@@ -126,7 +129,14 @@ impl<'a> LineHighlighter<'a> {
             mask,
             select_at_end: false,
             select_style,
+            syntax_spans: vec![],
         }
+    }
+
+    /// Provide per-byte-range styling for the line (e.g. from tree-sitter).
+    /// Spans must be sorted by `start` and must not overlap.
+    pub fn syntax(&mut self, spans: impl IntoIterator<Item = (usize, usize, Style)>) {
+        self.syntax_spans.extend(spans);
     }
 
     pub fn line_number(&mut self, row: usize, lnum_len: u8, style: Style) {
@@ -198,14 +208,12 @@ impl<'a> LineHighlighter<'a> {
             mask,
             select_at_end,
             select_style,
+            syntax_spans,
         } = self;
         let mut builder = DisplayTextBuilder::new(tab_len, mask);
 
         if boundaries.is_empty() {
-            let built = builder.build(line);
-            if !built.is_empty() {
-                spans.push(Span::styled(built, style_begin));
-            }
+            emit_with_syntax(&mut spans, &mut builder, line, 0, line.len(), style_begin, &syntax_spans);
             if cursor_at_end {
                 spans.push(Span::styled(" ", cursor_style));
             } else if select_at_end {
@@ -225,7 +233,7 @@ impl<'a> LineHighlighter<'a> {
 
         for (next_boundary, end) in boundaries {
             if start < end {
-                spans.push(Span::styled(builder.build(&line[start..end]), style));
+                emit_with_syntax(&mut spans, &mut builder, line, start, end, style, &syntax_spans);
             }
 
             style = if let Some(s) = next_boundary.style() {
@@ -238,7 +246,7 @@ impl<'a> LineHighlighter<'a> {
         }
 
         if start != line.len() {
-            spans.push(Span::styled(builder.build(&line[start..]), style));
+            emit_with_syntax(&mut spans, &mut builder, line, start, line.len(), style, &syntax_spans);
         }
 
         if cursor_at_end {
@@ -248,6 +256,57 @@ impl<'a> LineHighlighter<'a> {
         }
 
         Line::from(spans)
+    }
+}
+
+/// Emit `line[start..end]` to `spans`, sub-segmenting by `syntax_spans`. The
+/// overlay `style` (cursor / search / selection / cursor-line / default)
+/// patches over the syntax base so foreground colors are preserved when
+/// possible while bg/select still wins.
+fn emit_with_syntax<'a>(
+    spans: &mut Vec<Span<'a>>,
+    builder: &mut DisplayTextBuilder,
+    line: &'a str,
+    start: usize,
+    end: usize,
+    style: Style,
+    syntax_spans: &[(usize, usize, Style)],
+) {
+    if start >= end {
+        return;
+    }
+    if syntax_spans.is_empty() {
+        let built = builder.build(&line[start..end]);
+        if !built.is_empty() {
+            spans.push(Span::styled(built, style));
+        }
+        return;
+    }
+    let mut cursor = start;
+    while cursor < end {
+        let mut next_change = end;
+        let mut seg_style = style;
+        for &(s, e, sty) in syntax_spans {
+            if e <= cursor {
+                continue;
+            }
+            if s >= end {
+                break;
+            }
+            if s <= cursor && cursor < e {
+                seg_style = sty.patch(style);
+                next_change = next_change.min(e);
+                break;
+            } else if s > cursor {
+                next_change = next_change.min(s);
+                break;
+            }
+        }
+        let built = builder.build(&line[cursor..next_change]);
+        if !built.is_empty() {
+            spans.push(Span::styled(built, seg_style));
+        }
+        cursor = next_change;
     }
 }
 
