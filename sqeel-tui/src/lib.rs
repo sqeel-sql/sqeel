@@ -2556,7 +2556,16 @@ fn draw_results(
             f.render_widget(body, chunks[3]);
         }
         ResultsPane::Error(e) => {
-            let block = Block::default().title("Error").borders(Borders::NONE);
+            let title = if state.result_tabs.len() > 1 {
+                format!(
+                    "Result ({}/{})",
+                    state.active_result_tab + 1,
+                    state.result_tabs.len(),
+                )
+            } else {
+                "Result".into()
+            };
+            let block = Block::default().title(title).borders(Borders::NONE);
             f.render_widget(
                 Paragraph::new(e.as_str())
                     .style(Style::default().fg(Color::Red))
@@ -2568,7 +2577,17 @@ fn draw_results(
             const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
             let frame = SPINNER[(tick as usize) % SPINNER.len()];
             let msg = format!("{} Running query…", frame);
-            let block = Block::default().title("Results").borders(Borders::NONE);
+
+            let title = if state.result_tabs.len() > 1 {
+                format!(
+                    "Result ({}/{})",
+                    state.active_result_tab + 1,
+                    state.result_tabs.len(),
+                )
+            } else {
+                "Result".into()
+            };
+            let block = Block::default().title(title).borders(Borders::NONE);
             f.render_widget(
                 Paragraph::new(msg)
                     .style(Style::default().fg(Color::Yellow))
@@ -2615,8 +2634,6 @@ fn results_tab_bar(state: &AppState) -> Line<'static> {
             Style::default().fg(Color::Red)
         } else if is_loading {
             Style::default().fg(Color::Yellow)
-        } else if is_cancelled {
-            Style::default().fg(Color::DarkGray)
         } else {
             Style::default().fg(Color::DarkGray)
         };
