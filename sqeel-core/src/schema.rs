@@ -202,18 +202,26 @@ pub fn label_matches(label: &str, query_lower: &str) -> bool {
     query_lower.chars().all(|qc| chars.any(|lc| lc == qc))
 }
 
-/// Filter `all` to items whose label fuzzy-matches `query`, including all ancestors
-/// of matches so the tree stays navigable. Returns items in original order.
+/// Filter `all` to items whose label fuzzy-matches `query`, plus all ancestors
+/// (so the tree stays navigable) and all descendants of matches (so matching a
+/// table keeps its columns visible). Returns items in original order.
 pub fn filter_items<'a>(all: &'a [SchemaTreeItem], query: &str) -> Vec<&'a SchemaTreeItem> {
     let q = query.to_lowercase();
-    let mut needed: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+    let mut ancestors: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+    let mut matched: Vec<Vec<usize>> = Vec::new();
     for item in all.iter().filter(|it| label_matches(&it.label, &q)) {
         for len in 1..=item.node_path.len() {
-            needed.insert(item.node_path[..len].to_vec());
+            ancestors.insert(item.node_path[..len].to_vec());
         }
+        matched.push(item.node_path.clone());
     }
+    let is_descendant = |path: &[usize]| {
+        matched
+            .iter()
+            .any(|m| path.len() > m.len() && path[..m.len()] == m[..])
+    };
     all.iter()
-        .filter(|it| needed.contains(&it.node_path))
+        .filter(|it| ancestors.contains(&it.node_path) || is_descendant(&it.node_path))
         .collect()
 }
 
@@ -479,6 +487,17 @@ mod tests {
         let all = flatten_all(&sample_tree());
         let filtered = filter_items(&all, "id");
         // Match on "id" column must pull in mydb + users ancestors.
+        assert_eq!(filtered.len(), 3);
+        assert!(filtered[0].label.contains("mydb"));
+        assert!(filtered[1].label.contains("users"));
+        assert!(filtered[2].label.contains("id"));
+    }
+
+    #[test]
+    fn filter_items_includes_descendants_of_match() {
+        let all = flatten_all(&sample_tree());
+        let filtered = filter_items(&all, "users");
+        // Match on "users" table must keep its "id" column visible too.
         assert_eq!(filtered.len(), 3);
         assert!(filtered[0].label.contains("mydb"));
         assert!(filtered[1].label.contains("users"));

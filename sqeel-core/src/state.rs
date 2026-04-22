@@ -965,6 +965,53 @@ impl AppState {
         }
     }
 
+    /// When sidebar search matches a table/database whose children are not yet
+    /// loaded, fire lazy-load requests so the filtered tree can populate on the
+    /// next tick. Dedup'd via `request_schema_load`.
+    pub fn lazy_load_for_schema_search(&mut self, query: &str) {
+        if query.is_empty() {
+            return;
+        }
+        let q = query.to_lowercase();
+        let ttl = self.schema_ttl;
+        let mut reqs: Vec<SchemaLoadRequest> = Vec::new();
+        for node in &self.schema_nodes {
+            let SchemaNode::Database {
+                name: db,
+                tables,
+                tables_loaded_at,
+                ..
+            } = node
+            else {
+                continue;
+            };
+            let db_matches = crate::schema::label_matches(db, &q);
+            if db_matches && !crate::schema::is_fresh(*tables_loaded_at, ttl) {
+                reqs.push(SchemaLoadRequest::Tables { db: db.clone() });
+            }
+            for t in tables {
+                let SchemaNode::Table {
+                    name: table,
+                    columns_loaded_at,
+                    ..
+                } = t
+                else {
+                    continue;
+                };
+                let matches = db_matches || crate::schema::label_matches(table, &q);
+                if matches && !crate::schema::is_fresh(*columns_loaded_at, ttl) {
+                    reqs.push(SchemaLoadRequest::Columns {
+                        db: db.clone(),
+                        table: table.clone(),
+                    });
+                }
+            }
+        }
+        for req in reqs {
+            self.request_schema_load(req);
+        }
+    }
+
     /// Collect all identifier names from the schema tree (databases, tables, columns),
     /// filter by case-insensitive prefix, deduplicate, and return sorted.
     pub fn schema_identifier_completions(&self, prefix: &str) -> Vec<String> {

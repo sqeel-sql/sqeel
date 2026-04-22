@@ -1185,8 +1185,15 @@ async fn run_loop(
                         }
                         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
                             schema_search.push(c);
+                            if let Some(q) = schema_search.query() {
+                                state.lock().unwrap().lazy_load_for_schema_search(q);
+                            }
                         }
-                        (KeyModifiers::NONE, code) if schema_search.handle_nav(code) => {}
+                        (KeyModifiers::NONE, code) if schema_search.handle_nav(code) => {
+                            if let Some(q) = schema_search.query() {
+                                state.lock().unwrap().lazy_load_for_schema_search(q);
+                            }
+                        }
                         // ctrl+hjkl: dismiss search and move focus.
                         (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
                             schema_search.clear();
