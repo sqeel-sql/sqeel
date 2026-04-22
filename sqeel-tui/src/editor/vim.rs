@@ -1366,7 +1366,22 @@ fn run_operator_over_range(
 
 fn non_empty_yank(ed: &Editor<'_>) -> Option<String> {
     let y = ed.textarea.yank_text();
-    if y.is_empty() { None } else { Some(y) }
+    if y.is_empty() {
+        return None;
+    }
+    // Line-wise yanks — even on the final line of the buffer — must end
+    // with `\n` so pasting into another app lands the text as a full line
+    // (matches vim's convention).
+    if ed.vim.yank_linewise {
+        let trimmed = y.trim_start_matches('\n');
+        if trimmed.ends_with('\n') {
+            Some(trimmed.to_string())
+        } else {
+            Some(format!("{trimmed}\n"))
+        }
+    } else {
+        Some(y)
+    }
 }
 
 fn order(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize)) {
@@ -1480,6 +1495,9 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
         Mode::Visual => {
             // tui-textarea selection is exclusive of end; include cursor char.
             ed.textarea.move_cursor(CursorMove::Forward);
+            // Reset linewise flag before copy/cut so non_empty_yank doesn't
+            // mistakenly add a trailing newline from a prior linewise op.
+            ed.vim.yank_linewise = false;
             match op {
                 Operator::Yank => {
                     ed.textarea.copy();
@@ -1505,7 +1523,6 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                     begin_insert_noundo(ed, 1, InsertReason::AfterChange);
                 }
             }
-            ed.vim.yank_linewise = false;
         }
         _ => {}
     }
@@ -2336,6 +2353,46 @@ mod tests {
         assert_eq!(e.textarea.cursor(), (1, 0));
         run_keys(&mut e, "j");
         assert_eq!(e.textarea.cursor(), (2, 0));
+    }
+
+    #[test]
+    fn visual_line_yank_includes_trailing_newline() {
+        let mut e = editor_with("aaa\nbbb\nccc");
+        run_keys(&mut e, "Vjy");
+        // Two lines yanked — must be `aaa\nbbb\n`, trailing newline preserved.
+        assert_eq!(e.last_yank.as_deref(), Some("aaa\nbbb\n"));
+    }
+
+    #[test]
+    fn visual_line_yank_last_line_trailing_newline() {
+        let mut e = editor_with("aaa\nbbb\nccc");
+        // Move to the last line and yank with V (final buffer line).
+        run_keys(&mut e, "jj");
+        run_keys(&mut e, "Vy");
+        assert_eq!(e.last_yank.as_deref(), Some("ccc\n"));
+    }
+
+    #[test]
+    fn yy_on_last_line_has_trailing_newline() {
+        let mut e = editor_with("aaa\nbbb\nccc");
+        run_keys(&mut e, "jj");
+        run_keys(&mut e, "yy");
+        assert_eq!(e.last_yank.as_deref(), Some("ccc\n"));
+    }
+
+    #[test]
+    fn yy_in_middle_has_trailing_newline() {
+        let mut e = editor_with("aaa\nbbb\nccc");
+        run_keys(&mut e, "j");
+        run_keys(&mut e, "yy");
+        assert_eq!(e.last_yank.as_deref(), Some("bbb\n"));
+    }
+
+    #[test]
+    fn visual_char_yank_preserves_raw_text() {
+        let mut e = editor_with("hello world");
+        run_keys(&mut e, "vllly");
+        assert_eq!(e.last_yank.as_deref(), Some("hell"));
     }
 
     #[test]
