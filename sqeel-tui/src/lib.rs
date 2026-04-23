@@ -3860,22 +3860,27 @@ fn apply_marker_overlay(
         Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
     };
     let markers = scan_markers(line);
+    // Keep the `--` sigil itself untouched — tint only the text that
+    // follows it.
+    let body_start = comment_byte + 2;
 
     // Continuation line — inherit the previous marker's colour across
-    // the whole comment body if we have one.
+    // the comment body if we have one.
     if markers.is_empty() {
         if let Some(c) = active_color
-            && comment_byte < line.len()
+            && body_start < line.len()
         {
-            overlay_span(row_spans, comment_byte, line.len(), tail_style(c));
+            overlay_span(row_spans, body_start, line.len(), tail_style(c));
         }
         return active_color;
     }
 
-    let mut cursor = comment_byte;
+    let mut cursor = body_start;
     let mut current = active_color;
     for m in &markers {
-        let label_start = m.word_start.saturating_sub(1);
+        // Include the one char before the marker in the label, but
+        // never swallow the `--` sigil.
+        let label_start = m.word_start.saturating_sub(1).max(body_start);
         // Region between last cursor and this marker's label: tint with
         // the currently-active colour (if any) so inherited coloring
         // carries into the same line before the first marker and between
@@ -4712,7 +4717,8 @@ mod tests {
             .iter()
             .find(|(_, _, st)| st.fg == Some(u.sql_marker_warn))
             .unwrap();
-        assert_eq!(tinted.0, 0);
+        // Tint starts *after* the `--` sigil.
+        assert_eq!(tinted.0, 2);
         assert_eq!(tinted.1, "-- this is a warning".len());
     }
 
