@@ -51,34 +51,16 @@
 //!   depth cap (e.g. 100) to avoid runaway loops.
 //! - TODO: ensure recording doesn't capture the initial `q{a-z}` itself.
 //!
-//! ## P5 — Visual block (`Ctrl-V`)
-//!
-//! - TODO: new `Mode::VisualBlock` with `(anchor_row, anchor_col)`;
-//!   j/k extends rows, h/l extends columns.
-//! - TODO: block-aware operators:
-//!     - `d` / `x` cut the column range from every covered row.
-//!     - `c` cuts + enters insert mode; typed text repeats on every row
-//!       when Esc finishes (multi-cursor effect).
-//!     - `I` inserts before the block on every row; `A` after.
-//!     - `r{ch}` replaces every cell in the block with `ch`.
-//!     - `y` yanks the block with a `MotionKind::Block` classification
-//!       so paste rebuilds columns rather than lines.
-//!
-//! ## P6 — Polish
+//! ## P6 — Polish (still outstanding)
 //!
 //! - TODO: indent operators `>` / `<` (with line + text-object targets).
 //! - TODO: format operator `=` — map to whatever SQL formatter we wire
 //!   up; for now stub that returns the range unchanged with a toast.
 //! - TODO: case operators `gU` / `gu` / `g~` on a range (already have
 //!   single-char `~`).
-//! - TODO: proper `ge` / `gE` (backward-word-end) instead of the current
-//!   "WordBack then WordEnd" approximation in `handle_after_g`.
 //! - TODO: screen motions `H` / `M` / `L` once we track the render
 //!   viewport height inside Editor.
 //! - TODO: scroll-to-cursor motions `zz` / `zt` / `zb`.
-//! - TODO: `gJ` (join lines without inserting a space) variant of `J`.
-//! - TODO: `Y` == `y$` (vim 8 default; currently falls through as
-//!   "unknown").
 //!
 //! ## Known substrate / divergence notes
 //!
@@ -164,6 +146,10 @@ pub enum Motion {
     BigWordBack,
     WordEnd,
     BigWordEnd,
+    /// `ge` — backward word end.
+    WordEndBack,
+    /// `gE` — backward WORD end.
+    BigWordEndBack,
     LineStart,
     FirstNonBlank,
     LineEnd,
@@ -936,6 +922,14 @@ fn apply_motion_cursor(ed: &mut Editor<'_>, motion: &Motion, count: usize) {
             let (r, c) = big_word_end(ed, count);
             ed.textarea.move_cursor(CursorMove::Jump(r, c));
         }
+        Motion::WordEndBack => {
+            let (r, c) = word_end_back(ed, false, count);
+            ed.textarea.move_cursor(CursorMove::Jump(r, c));
+        }
+        Motion::BigWordEndBack => {
+            let (r, c) = word_end_back(ed, true, count);
+            ed.textarea.move_cursor(CursorMove::Jump(r, c));
+        }
         Motion::LineStart => ed.textarea.move_cursor(CursorMove::Head),
         Motion::FirstNonBlank => move_first_non_whitespace(ed),
         Motion::LineEnd => {
@@ -1117,6 +1111,66 @@ fn big_word_end(ed: &Editor<'_>, count: usize) -> (usize, usize) {
         }
     }
     (row, col)
+}
+
+/// `ge` / `gE` — move cursor backward to the end of the previous word
+/// (or WORD). `big = true` treats any run of non-whitespace as one
+/// WORD; `big = false` distinguishes word-chars (alnum / `_`) from
+/// separators the way vim does. Skips blank lines.
+fn word_end_back(ed: &Editor<'_>, big: bool, count: usize) -> (usize, usize) {
+    let lines = ed.textarea.lines();
+    let (mut row, mut col) = ed.textarea.cursor();
+    for _ in 0..count.max(1) {
+        loop {
+            if !step_back(lines, &mut row, &mut col) {
+                return (row, col);
+            }
+            if is_ws_at(lines, row, col) {
+                continue;
+            }
+            // Stop when `(row, col)` is the end of a (WORD-)word run —
+            // the char immediately after it has a different class. For
+            // `big = true` everything non-whitespace is the same class.
+            let cur = char_class_at(lines, row, col);
+            let next = char_class_after(lines, row, col);
+            let same = if big {
+                cur != CharClass::Ws && next != CharClass::Ws
+            } else {
+                cur == next
+            };
+            if !same {
+                break;
+            }
+        }
+    }
+    (row, col)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Ws,
+    Word,
+    Sep,
+}
+
+fn char_class_at(lines: &[String], row: usize, col: usize) -> CharClass {
+    match lines.get(row).and_then(|l| l.chars().nth(col)) {
+        Some(c) if c.is_whitespace() => CharClass::Ws,
+        Some(c) if c.is_alphanumeric() || c == '_' => CharClass::Word,
+        Some(_) => CharClass::Sep,
+        None => CharClass::Ws,
+    }
+}
+
+fn char_class_after(lines: &[String], row: usize, col: usize) -> CharClass {
+    let line_len = lines.get(row).map(|l| l.chars().count()).unwrap_or(0);
+    if col + 1 < line_len {
+        char_class_at(lines, row, col + 1)
+    } else {
+        // Newline / end-of-buffer — treat as whitespace so the current
+        // position counts as an end-of-word.
+        CharClass::Ws
+    }
 }
 
 fn move_first_non_whitespace(ed: &mut Editor<'_>) {
@@ -1387,19 +1441,25 @@ fn handle_after_op(ed: &mut Editor<'_>, input: Input, op: Operator, count1: usiz
 }
 
 fn handle_op_after_g(ed: &mut Editor<'_>, input: Input, op: Operator, count1: usize) -> bool {
-    if input.key == Key::Char('g') && !input.ctrl {
-        let count2 = take_count(&mut ed.vim);
-        let total = count1.max(1) * count2.max(1);
-        apply_op_with_motion(ed, op, &Motion::FileTop, total);
-        if !ed.vim.replaying && op_is_change(op) {
-            ed.vim.last_change = Some(LastChange::OpMotion {
-                op,
-                motion: Motion::FileTop,
-                count: total,
-                inserted: None,
-            });
-        }
+    if input.ctrl {
         return true;
+    }
+    let count2 = take_count(&mut ed.vim);
+    let total = count1.max(1) * count2.max(1);
+    let motion = match input.key {
+        Key::Char('g') => Motion::FileTop,
+        Key::Char('e') => Motion::WordEndBack,
+        Key::Char('E') => Motion::BigWordEndBack,
+        _ => return true,
+    };
+    apply_op_with_motion(ed, op, &motion, total);
+    if !ed.vim.replaying && op_is_change(op) {
+        ed.vim.last_change = Some(LastChange::OpMotion {
+            op,
+            motion,
+            count: total,
+            inserted: None,
+        });
     }
     true
 }
@@ -1416,13 +1476,19 @@ fn handle_after_g(ed: &mut Editor<'_>, input: Input) -> bool {
             }
             move_first_non_whitespace(ed);
         }
-        Key::Char('e') => {
-            // Approximation of `ge` — WordBack then WordEnd (good enough
-            // for most cases; exact vim semantics land in a polish pass).
+        Key::Char('e') => execute_motion(ed, Motion::WordEndBack, count),
+        Key::Char('E') => execute_motion(ed, Motion::BigWordEndBack, count),
+        Key::Char('J') => {
+            // `gJ` — join line below without inserting a space.
             for _ in 0..count.max(1) {
-                ed.textarea.move_cursor(CursorMove::WordBack);
+                ed.push_undo();
+                join_line_raw(ed);
             }
-            ed.textarea.move_cursor(CursorMove::WordEnd);
+            if !ed.vim.replaying {
+                ed.vim.last_change = Some(LastChange::JoinLine {
+                    count: count.max(1),
+                });
+            }
         }
         _ => {}
     }
@@ -1677,6 +1743,11 @@ fn handle_normal_only(ed: &mut Editor<'_>, input: &Input, count: usize) -> bool 
             }
             true
         }
+        Key::Char('Y') => {
+            // Vim 8 default: `Y` yanks to end of line (same as `y$`).
+            apply_op_with_motion(ed, Operator::Yank, &Motion::LineEnd, count.max(1));
+            true
+        }
         Key::Char('C') => {
             ed.push_undo();
             ed.mutate(|t| t.delete_line_by_end());
@@ -1782,7 +1853,9 @@ fn motion_kind(motion: &Motion) -> MotionKind {
     match motion {
         Motion::Up | Motion::Down => MotionKind::Linewise,
         Motion::FileTop | Motion::FileBottom => MotionKind::Linewise,
-        Motion::WordEnd | Motion::BigWordEnd => MotionKind::Inclusive,
+        Motion::WordEnd | Motion::BigWordEnd | Motion::WordEndBack | Motion::BigWordEndBack => {
+            MotionKind::Inclusive
+        }
         Motion::Find { .. } => MotionKind::Inclusive,
         Motion::MatchBracket => MotionKind::Inclusive,
         // `$` now lands on the last char — operator ranges include it.
@@ -2076,6 +2149,8 @@ fn update_block_vcol(ed: &mut Editor<'_>, motion: &Motion) {
         | Motion::BigWordBack
         | Motion::WordEnd
         | Motion::BigWordEnd
+        | Motion::WordEndBack
+        | Motion::BigWordEndBack
         | Motion::LineStart
         | Motion::FirstNonBlank
         | Motion::LineEnd
@@ -2602,6 +2677,17 @@ fn join_line(ed: &mut Editor<'_>) {
         ed.mutate(|t| t.insert_char(' '));
         ed.textarea.move_cursor(CursorMove::Back);
     }
+}
+
+/// `gJ` — join the next line onto the current one without inserting a
+/// separating space or stripping leading whitespace.
+fn join_line_raw(ed: &mut Editor<'_>) {
+    let (row, _) = ed.textarea.cursor();
+    if row + 1 >= ed.textarea.lines().len() {
+        return;
+    }
+    ed.textarea.move_cursor(CursorMove::End);
+    ed.mutate(|t| t.delete_next_char());
 }
 
 fn do_paste(ed: &mut Editor<'_>, before: bool, count: usize) {
@@ -3935,6 +4021,84 @@ mod tests {
             e.textarea.lines(),
             &["f!oo".to_string(), "b!ar".to_string(), "b!az".to_string()]
         );
+    }
+
+    // ─── P6 quick wins (Y, gJ, ge / gE) ──────────────────────────────────
+
+    #[test]
+    fn big_y_yanks_to_end_of_line() {
+        let mut e = editor_with("hello world");
+        e.textarea.move_cursor(CursorMove::Jump(0, 6));
+        run_keys(&mut e, "Y");
+        assert_eq!(e.last_yank.as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn big_y_from_line_start_yanks_full_line() {
+        let mut e = editor_with("hello world");
+        run_keys(&mut e, "Y");
+        assert_eq!(e.last_yank.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn gj_joins_without_inserting_space() {
+        let mut e = editor_with("hello\n    world");
+        run_keys(&mut e, "gJ");
+        // No space inserted, leading whitespace preserved.
+        assert_eq!(e.textarea.lines(), &["hello    world".to_string()]);
+    }
+
+    #[test]
+    fn gj_noop_on_last_line() {
+        let mut e = editor_with("only");
+        run_keys(&mut e, "gJ");
+        assert_eq!(e.textarea.lines(), &["only".to_string()]);
+    }
+
+    #[test]
+    fn ge_jumps_to_previous_word_end() {
+        let mut e = editor_with("foo bar baz");
+        e.textarea.move_cursor(CursorMove::Jump(0, 5));
+        run_keys(&mut e, "ge");
+        assert_eq!(e.textarea.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn ge_respects_word_class() {
+        // Small-word `ge` treats `-` as its own word, so from mid-"bar"
+        // it lands on the `-` rather than end of "foo".
+        let mut e = editor_with("foo-bar baz");
+        e.textarea.move_cursor(CursorMove::Jump(0, 5));
+        run_keys(&mut e, "ge");
+        assert_eq!(e.textarea.cursor(), (0, 3));
+    }
+
+    #[test]
+    fn big_ge_treats_hyphens_as_part_of_word() {
+        // `gE` uses WORD (whitespace-delimited) semantics so it skips
+        // over the `-` and lands on the end of "foo-bar".
+        let mut e = editor_with("foo-bar baz");
+        e.textarea.move_cursor(CursorMove::Jump(0, 10));
+        run_keys(&mut e, "gE");
+        assert_eq!(e.textarea.cursor(), (0, 6));
+    }
+
+    #[test]
+    fn ge_crosses_line_boundary() {
+        let mut e = editor_with("foo\nbar");
+        e.textarea.move_cursor(CursorMove::Jump(1, 0));
+        run_keys(&mut e, "ge");
+        assert_eq!(e.textarea.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn dge_deletes_to_end_of_previous_word() {
+        let mut e = editor_with("foo bar baz");
+        e.textarea.move_cursor(CursorMove::Jump(0, 8));
+        // d + ge from 'b' of "baz": range is ge → col 6 ('r' of bar),
+        // inclusive, so cols 6-8 ("r b") are cut.
+        run_keys(&mut e, "dge");
+        assert_eq!(e.textarea.lines()[0], "foo baaz");
     }
 
     #[test]
