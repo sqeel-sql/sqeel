@@ -395,16 +395,15 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
     if input.key == Key::Esc {
         finish_insert_session(ed);
         ed.vim.mode = Mode::Normal;
-        // Capture the insert-mode final column *before* the vim-style
-        // Back step — this column is the user's last expressed intent
-        // (typed chars + any arrow-key moves) and should drive the next
-        // vertical motion via sticky_col. The visible cursor still
-        // pulls back one to match vim's normal-mode convention.
-        let final_col = ed.textarea.cursor().1;
-        if final_col > 0 {
+        // Vim convention: pull the cursor back one cell on exit when
+        // possible. Sticky column then mirrors the *visible* post-Back
+        // column so the next vertical motion lands where the user
+        // actually sees the cursor — not one cell to the right.
+        let col = ed.textarea.cursor().1;
+        if col > 0 {
             ed.textarea.move_cursor(CursorMove::Back);
         }
-        ed.vim.sticky_col = Some(final_col);
+        ed.vim.sticky_col = Some(ed.textarea.cursor().1);
         return true;
     }
 
@@ -3641,10 +3640,10 @@ mod tests {
     }
 
     #[test]
-    fn esc_from_insert_backs_one_but_sticky_tracks_final_col() {
-        // Cursor at col 12, press I (moves to col 4), type "X" (col 5),
-        // Esc. Visible cursor pulls back to col 4 (vim convention), but
-        // sticky_col = 5 so the next j lands on col 5, not col 12.
+    fn esc_from_insert_sticky_matches_visible_cursor() {
+        // Cursor at col 12, I (moves to col 4), type "X" (col 5), Esc
+        // backs to col 4 — sticky must mirror that visible col so j
+        // lands at col 4 of the next row, not col 5 or col 12.
         let mut e = editor_with("    this is a line\n    another one of a similar size");
         e.textarea.move_cursor(CursorMove::Jump(0, 12));
         run_keys(&mut e, "I");
@@ -3652,25 +3651,21 @@ mod tests {
         run_keys(&mut e, "X<Esc>");
         assert_eq!(e.textarea.cursor(), (0, 4));
         run_keys(&mut e, "j");
-        assert_eq!(e.textarea.cursor(), (1, 5));
+        assert_eq!(e.textarea.cursor(), (1, 4));
     }
 
     #[test]
     fn esc_from_insert_sticky_tracks_inserted_chars() {
-        // i at col 0, type "abc" (cursor at col 3 after typing), Esc
-        // backs the cursor to col 2 but sticky remembers col 3.
         let mut e = editor_with("xxxxxxx\nyyyyyyy");
         run_keys(&mut e, "i");
         run_keys(&mut e, "abc<Esc>");
         assert_eq!(e.textarea.cursor(), (0, 2));
         run_keys(&mut e, "j");
-        assert_eq!(e.textarea.cursor(), (1, 3));
+        assert_eq!(e.textarea.cursor(), (1, 2));
     }
 
     #[test]
     fn esc_from_insert_sticky_tracks_arrow_nav() {
-        // i at col 0, type "abc" (col 3), Left Left (col 1), Esc.
-        // Cursor backs to col 0 (1-1) but sticky = 1.
         let mut e = editor_with("xxxxxx\nyyyyyy");
         run_keys(&mut e, "i");
         run_keys(&mut e, "abc");
@@ -3680,7 +3675,25 @@ mod tests {
         run_keys(&mut e, "<Esc>");
         assert_eq!(e.textarea.cursor(), (0, 0));
         run_keys(&mut e, "j");
-        assert_eq!(e.textarea.cursor(), (1, 1));
+        assert_eq!(e.textarea.cursor(), (1, 0));
+    }
+
+    #[test]
+    fn esc_from_insert_at_col_14_followed_by_j() {
+        // User-reported regression: cursor at col 14, i, type "test "
+        // (5 chars → col 19), Esc → col 18. j must land at col 18.
+        let line = "x".repeat(30);
+        let buf = format!("{line}\n{line}");
+        let mut e = editor_with(&buf);
+        e.textarea.move_cursor(CursorMove::Jump(0, 14));
+        run_keys(&mut e, "i");
+        for c in "test ".chars() {
+            e.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        run_keys(&mut e, "<Esc>");
+        assert_eq!(e.textarea.cursor(), (0, 18));
+        run_keys(&mut e, "j");
+        assert_eq!(e.textarea.cursor(), (1, 18));
     }
 
     #[test]
