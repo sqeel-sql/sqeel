@@ -68,6 +68,9 @@ impl LspClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            // SIGKILL the server if we drop the handle without explicit
+            // shutdown — prevents orphaned sqls processes on crash / kill.
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to spawn LSP: {binary}"))?;
 
@@ -166,6 +169,14 @@ impl LspClient {
             }),
         )
         .await
+    }
+
+    /// Graceful LSP shutdown: `shutdown` request + `exit` notification.
+    /// Follows the shutdown with a short wait so well-behaved servers can
+    /// exit on their own before `kill_on_drop` fires.
+    pub async fn shutdown(&mut self) {
+        let _ = self.request("shutdown", Value::Null).await;
+        let _ = self.notify("exit", Value::Null).await;
     }
 
     async fn request(&mut self, method: &'static str, params: Value) -> anyhow::Result<i64> {

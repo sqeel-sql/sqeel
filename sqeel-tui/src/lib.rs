@@ -1856,6 +1856,12 @@ async fn run_loop(
             _ => {} // FocusGained, FocusLost, Paste — ignore
         } // match event
     }
+    // Graceful LSP shutdown.  `kill_on_drop(true)` is the ultimate
+    // backstop for crashes / SIGKILL; this path lets a well-behaved
+    // server clean up on clean exits.
+    if let Some(mut client) = lsp.take() {
+        client.shutdown().await;
+    }
     Ok(())
 }
 
