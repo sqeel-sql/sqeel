@@ -119,3 +119,11 @@ sql_comment  = "comment"
 sql_operator = "yellow"
 sql_ident    = "fg"
 sql_plain    = "fg_dark"
+
+# Comment markers (TODO / FIXME / FIX / NOTE / WARN / INFO) — rendered
+# as label-style badges: fg on a solid marker-color background.
+sql_marker_fg    = "black"
+sql_marker_todo  = "cyan"
+sql_marker_fixme = "red"
+sql_marker_note  = "green"
+sql_marker_warn  = "orange"

@@ -202,6 +202,11 @@ ui_colors!(
     sql_operator,
     sql_ident,
     sql_plain,
+    sql_marker_fg,
+    sql_marker_todo,
+    sql_marker_fixme,
+    sql_marker_note,
+    sql_marker_warn,
 );
 
 #[cfg(test)]

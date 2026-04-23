@@ -353,6 +353,11 @@ async fn run_loop(
     // to `usize::MAX` so the first iteration always triggers an initial
     // window highlight.
     let mut last_highlight_top: usize = usize::MAX;
+    // Cached last highlight result so we can re-apply marker overlays
+    // when the cursor line or insert-mode flips, without re-parsing.
+    let mut last_highlight_result: Option<HighlightResult> = None;
+    let mut last_marker_cursor_row: usize = usize::MAX;
+    let mut last_marker_insert_mode: bool = false;
     let mut doc_version: i32 = 0;
     // Buffers larger than this are not streamed to the LSP — sqls (and most
     // SQL LSPs) re-parse the whole document on every `didChange` and balloon
@@ -429,6 +434,7 @@ async fn run_loop(
             if let Some(content) = pending {
                 editor.set_content(&content);
                 editor_dirty = false;
+                last_highlight_top = usize::MAX;
                 needs_redraw = true;
             }
         }
@@ -511,22 +517,56 @@ async fn run_loop(
             // whole buffer on the main thread.
             if let Some(result) = highlight_thread.try_recv() {
                 let row_count = editor.textarea.lines().len();
-                apply_window_spans(&mut editor.textarea, &result, row_count);
-                s.set_highlights(result.spans);
+                let insert_mode = s.vim_mode == VimMode::Insert;
+                let cursor_row = editor.textarea.cursor().0;
+                apply_window_spans(
+                    &mut editor.textarea,
+                    &result,
+                    row_count,
+                    insert_mode,
+                    cursor_row,
+                );
+                s.set_highlights(result.spans.clone());
+                last_highlight_result = Some(result);
+                last_marker_cursor_row = cursor_row;
+                last_marker_insert_mode = insert_mode;
                 needs_redraw = true;
+            } else {
+                // Cursor moved onto a different row, or mode flipped:
+                // re-apply the cached highlight so the cursor-line /
+                // insert-mode-aware marker tweaks update without paying
+                // another tree-sitter parse.
+                let insert_mode = s.vim_mode == VimMode::Insert;
+                let cursor_row = editor.textarea.cursor().0;
+                let stale = (cursor_row != last_marker_cursor_row
+                    || insert_mode != last_marker_insert_mode)
+                    && last_highlight_result.is_some();
+                if stale && let Some(result) = last_highlight_result.as_ref() {
+                    let row_count = editor.textarea.lines().len();
+                    apply_window_spans(
+                        &mut editor.textarea,
+                        result,
+                        row_count,
+                        insert_mode,
+                        cursor_row,
+                    );
+                    last_marker_cursor_row = cursor_row;
+                    last_marker_insert_mode = insert_mode;
+                    needs_redraw = true;
+                }
             }
         }
         // Highlight the viewport window (with margin) rather than the
-        // whole buffer.  Triggered on any content publish or when the
-        // viewport has scrolled past half the margin since last submit —
-        // keeps highlighting responsive during pure scrolling with zero
-        // typing.
+        // whole buffer.  Triggered on any edit or when the viewport has
+        // scrolled past half the margin since last submit — bounded cost
+        // regardless of buffer size, so no heavy-pipeline gate here.
+        // The highlight thread coalesces (latest-wins) so bursts are cheap.
         const HIGHLIGHT_WINDOW_MARGIN: usize = 500;
         let viewport_top = editor.textarea.viewport_top_row();
         let viewport_height = editor.viewport_height_value() as usize;
         let viewport_scrolled = last_highlight_top == usize::MAX
             || viewport_top.abs_diff(last_highlight_top) >= HIGHLIGHT_WINDOW_MARGIN / 2;
-        if (content.is_some() || viewport_scrolled) && viewport_height > 0 {
+        if (content_changed || viewport_scrolled) && viewport_height > 0 {
             let lines = editor.textarea.lines();
             if !lines.is_empty() {
                 let start = viewport_top.saturating_sub(HIGHLIGHT_WINDOW_MARGIN);
@@ -823,6 +863,7 @@ async fn run_loop(
                                 if let Some(c) = content {
                                     editor.set_content(&c);
                                     editor_dirty = false;
+                                    last_highlight_top = usize::MAX;
                                 }
                             } else {
                                 state.lock().unwrap().focus = Focus::Editor;
@@ -1091,6 +1132,7 @@ async fn run_loop(
                                 if let Some(c) = content {
                                     editor.set_content(&c);
                                     editor_dirty = false;
+                                    last_highlight_top = usize::MAX;
                                 }
                                 continue;
                             }
@@ -1598,6 +1640,7 @@ async fn run_loop(
                         if let Some(c) = content {
                             editor.set_content(&c);
                             editor_dirty = false;
+                            last_highlight_top = usize::MAX;
                         }
                     }
                     (KeyModifiers::SHIFT, KeyCode::Char('H'))
@@ -1616,6 +1659,7 @@ async fn run_loop(
                         if let Some(c) = content {
                             editor.set_content(&c);
                             editor_dirty = false;
+                            last_highlight_top = usize::MAX;
                         }
                     }
                     // Command mode
@@ -1874,6 +1918,7 @@ async fn run_loop(
                         let recalled = state.lock().unwrap().history_prev().map(|s| s.to_owned());
                         if let Some(q) = recalled {
                             editor.set_content(&q);
+                            last_highlight_top = usize::MAX;
                         }
                     }
                     (KeyModifiers::CONTROL, KeyCode::Char('n')) if focus == Focus::Editor => {
@@ -1883,6 +1928,7 @@ async fn run_loop(
                         } else {
                             editor.set_content("");
                         }
+                        last_highlight_top = usize::MAX;
                     }
                     // Pane focus — forward to tmux when already at the edge pane
                     (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
@@ -3693,6 +3739,8 @@ fn apply_window_spans(
     textarea: &mut tui_textarea::TextArea<'_>,
     result: &HighlightResult,
     buffer_rows: usize,
+    insert_mode: bool,
+    cursor_row: usize,
 ) {
     let mut by_row = textarea.take_syntax_spans();
     if by_row.len() < buffer_rows {
@@ -3726,11 +3774,232 @@ fn apply_window_spans(
             }
         }
     }
+    // Overlay TODO-family comment markers: parse each row's text, splice
+    // marker spans in so they override any covering tree-sitter comment
+    // span. `line_spans` picks the first matching span for a given byte,
+    // so we have to split overlapping spans around the marker rather than
+    // just pushing on top.
+    //
+    // Active colour inheritance: a comment line without its own marker
+    // inherits the most recent marker colour from the contiguous comment
+    // block above it. A non-comment line resets the inheritance. Seed the
+    // state by scanning backwards from `window_start` until we hit either
+    // a marker or a non-comment line (capped so huge files don't pay).
+    let mut active_color = seed_active_color(textarea, window_start, insert_mode);
+    for (row, row_spans) in by_row
+        .iter_mut()
+        .enumerate()
+        .take(window_end)
+        .skip(window_start)
+    {
+        let line = &textarea.lines()[row];
+        let on_cursor_line = row == cursor_row;
+        active_color =
+            apply_marker_overlay(row_spans, line, active_color, insert_mode, on_cursor_line);
+    }
     // Sort each touched row so `line_spans` sees them in start-byte order.
     for row_spans in by_row.iter_mut().take(window_end).skip(window_start) {
         row_spans.sort_by_key(|&(s, _, _)| s);
     }
     textarea.set_syntax_spans(by_row);
+}
+
+/// A located TODO-family marker: the byte span of the marker word and
+/// the color associated with it.
+struct Marker {
+    word_start: usize,
+    word_end: usize,
+    color: Color,
+}
+
+/// Find every TODO / FIXME / FIX / NOTE / WARN / INFO marker inside the
+/// `--` comment on `line`. Results are in byte-offset order.
+fn scan_markers(line: &str) -> Vec<Marker> {
+    let Some(comment_byte) = line.find("--") else {
+        return Vec::new();
+    };
+    let u = ui();
+    let words: [(&str, Color); 6] = [
+        ("TODO", u.sql_marker_todo),
+        ("FIXME", u.sql_marker_fixme),
+        ("FIX", u.sql_marker_fixme),
+        ("NOTE", u.sql_marker_note),
+        ("INFO", u.sql_marker_note),
+        ("WARN", u.sql_marker_warn),
+    ];
+    let bytes = &line.as_bytes()[comment_byte..];
+    let mut out = Vec::new();
+    for (word, color) in words {
+        let wbytes = word.as_bytes();
+        let mut i = 0usize;
+        while i + wbytes.len() <= bytes.len() {
+            if &bytes[i..i + wbytes.len()] == wbytes {
+                // Word-boundary checks: neither side is alphanumeric, so
+                // `XTODO`, `TODOS` etc. don't match.
+                let left_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+                let right_byte = bytes.get(i + wbytes.len()).copied();
+                let right_ok = right_byte
+                    .map(|b| !b.is_ascii_alphanumeric())
+                    .unwrap_or(true);
+                if left_ok && right_ok {
+                    out.push(Marker {
+                        word_start: comment_byte + i,
+                        word_end: comment_byte + i + wbytes.len(),
+                        color,
+                    });
+                    i += wbytes.len();
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    out.sort_by_key(|m| m.word_start);
+    out
+}
+
+/// Emit marker / tail spans for one line onto `row_spans`, honouring
+/// `active_color` inherited from the previous comment line. Returns the
+/// active colour for the *next* line — which is:
+/// - `None` if this line is not a `--` comment (block break),
+/// - the last marker colour seen on this line, or
+/// - the inherited colour passed in (no new marker).
+fn apply_marker_overlay(
+    row_spans: &mut Vec<(usize, usize, Style)>,
+    line: &str,
+    active_color: Option<Color>,
+    insert_mode: bool,
+    on_cursor_line: bool,
+) -> Option<Color> {
+    let comment_byte = line.find("--")?;
+    let u = ui();
+    let tail_style = |fg| Style::default().fg(fg).add_modifier(Modifier::ITALIC);
+    // On the cursor row we blend the marker WORD into its badge by
+    // matching fg = bg, so the edit line stays visually calm while the
+    // badge colour is still visible.
+    let label_style = |bg| {
+        let fg = if on_cursor_line { bg } else { u.sql_marker_fg };
+        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+    };
+    let markers = scan_markers(line);
+
+    // Continuation line — inherit the previous marker's colour across
+    // the whole comment body if we have one.
+    if markers.is_empty() {
+        if let Some(c) = active_color
+            && comment_byte < line.len()
+        {
+            overlay_span(row_spans, comment_byte, line.len(), tail_style(c));
+        }
+        return active_color;
+    }
+
+    let mut cursor = comment_byte;
+    let mut current = active_color;
+    for m in &markers {
+        let label_start = m.word_start.saturating_sub(1);
+        // Region between last cursor and this marker's label: tint with
+        // the currently-active colour (if any) so inherited coloring
+        // carries into the same line before the first marker and between
+        // two markers.
+        if let Some(c) = current
+            && cursor < label_start
+        {
+            overlay_span(row_spans, cursor, label_start, tail_style(c));
+        }
+        overlay_span(row_spans, label_start, m.word_end, label_style(m.color));
+        // Trailing char — `:` gets fg = bg in normal mode so it blends
+        // into the label badge but stays legible while editing.
+        let trail_end = if m.word_end < line.len() {
+            let next = line.as_bytes()[m.word_end];
+            let trail_fg = if next == b':' && !insert_mode {
+                m.color
+            } else {
+                u.sql_marker_fg
+            };
+            let style = Style::default()
+                .fg(trail_fg)
+                .bg(m.color)
+                .add_modifier(Modifier::BOLD);
+            overlay_span(row_spans, m.word_end, m.word_end + 1, style);
+            m.word_end + 1
+        } else {
+            m.word_end
+        };
+        cursor = trail_end;
+        current = Some(m.color);
+    }
+    // Tail after the last marker: carries the last marker's colour.
+    if let Some(c) = current
+        && cursor < line.len()
+    {
+        overlay_span(row_spans, cursor, line.len(), tail_style(c));
+    }
+    current
+}
+
+/// Walk backward from `window_start` to seed the inherited marker colour
+/// for the first row of the window. Stops at the nearest non-comment
+/// line (reset) or the nearest comment line that carries its own marker
+/// (inherit that colour). Capped so huge buffers pay at most a bounded
+/// cost per highlight refresh.
+fn seed_active_color(
+    textarea: &tui_textarea::TextArea<'_>,
+    window_start: usize,
+    _insert_mode: bool,
+) -> Option<Color> {
+    const SEED_SCAN_CAP: usize = 500;
+    if window_start == 0 {
+        return None;
+    }
+    let lines = textarea.lines();
+    let start = window_start.saturating_sub(SEED_SCAN_CAP);
+    // Walk down from the cap toward `window_start - 1`, updating the
+    // active colour the same way the forward pass does. This gives the
+    // correct seed even when the cap is hit mid-block.
+    let mut active: Option<Color> = None;
+    for line in &lines[start..window_start] {
+        if line.find("--").is_none() {
+            active = None;
+        } else {
+            let markers = scan_markers(line);
+            if let Some(last) = markers.last() {
+                active = Some(last.color);
+            }
+            // else: inherit active unchanged.
+        }
+    }
+    active
+}
+
+#[cfg(test)]
+fn find_comment_markers(line: &str, insert_mode: bool) -> Vec<(usize, usize, Style)> {
+    let mut row: Vec<(usize, usize, Style)> = Vec::new();
+    apply_marker_overlay(&mut row, line, None, insert_mode, false);
+    row.sort_by_key(|&(s, _, _)| s);
+    row
+}
+
+/// Insert a marker span `[ms, me)` with `style` into `row`, trimming /
+/// splitting any existing span that overlaps so the marker isn't masked
+/// by an outer tree-sitter comment span.
+fn overlay_span(row: &mut Vec<(usize, usize, Style)>, ms: usize, me: usize, style: Style) {
+    let mut trimmed: Vec<(usize, usize, Style)> = Vec::with_capacity(row.len() + 2);
+    for &(s, e, sty) in row.iter() {
+        if e <= ms || s >= me {
+            trimmed.push((s, e, sty));
+        } else if s < ms && e > me {
+            trimmed.push((s, ms, sty));
+            trimmed.push((me, e, sty));
+        } else if s < ms {
+            trimmed.push((s, ms, sty));
+        } else if e > me {
+            trimmed.push((me, e, sty));
+        }
+        // else: span fully inside marker — drop it.
+    }
+    trimmed.push((ms, me, style));
+    *row = trimmed;
 }
 
 /// Convert a `(row, col)` character position into a byte offset in the
@@ -4371,5 +4640,150 @@ mod tests {
         assert_eq!(url, Some("mysql://localhost/mydb".into()));
         assert_eq!(s.pending_reconnect, Some("mysql://localhost/mydb".into()));
         assert!(!s.show_connection_switcher);
+    }
+
+    #[test]
+    fn comment_markers_detected_inside_comment() {
+        let line = "SELECT 1; -- TODO: backfill nulls";
+        let ranges: Vec<(usize, usize)> = super::find_comment_markers(line, false)
+            .into_iter()
+            .map(|(s, e, _)| (s, e))
+            .collect();
+        // Label body (space + TODO) = 12..17, trailing `:` = 17..18,
+        // tail (rest of line) = 18..33.
+        assert_eq!(ranges, vec![(12, 17), (17, 18), (18, 33)]);
+    }
+
+    #[test]
+    fn comment_markers_without_colon_still_get_label_and_trailing_space() {
+        let line = "-- TODO backfill";
+        let ranges: Vec<(usize, usize)> = super::find_comment_markers(line, false)
+            .into_iter()
+            .map(|(s, e, _)| (s, e))
+            .collect();
+        // " TODO" label at 2..7, trailing space 7..8, tail 8..16.
+        assert_eq!(ranges, vec![(2, 7), (7, 8), (8, 16)]);
+    }
+
+    #[test]
+    fn comment_markers_skip_lines_without_dashdash() {
+        assert!(super::find_comment_markers("TODO: not in a comment", false).is_empty());
+    }
+
+    #[test]
+    fn comment_markers_respect_word_boundary_both_sides() {
+        // `XTODO:` — left-boundary fails.
+        assert!(super::find_comment_markers("-- XTODO: nope", false).is_empty());
+        // `TODOS` — right-boundary fails (S is alphanumeric).
+        assert!(super::find_comment_markers("-- TODOS nope", false).is_empty());
+    }
+
+    #[test]
+    fn comment_markers_multiple_on_one_line() {
+        let line = "-- FIX: bar WARN: baz";
+        let ranges: Vec<(usize, usize)> = super::find_comment_markers(line, false)
+            .into_iter()
+            .map(|(s, e, _)| (s, e))
+            .collect();
+        // " FIX" (2..6) + ":" (6..7); " WARN" (11..16) + ":" (16..17).
+        assert!(ranges.contains(&(2, 6)));
+        assert!(ranges.contains(&(6, 7)));
+        assert!(ranges.contains(&(11, 16)));
+        assert!(ranges.contains(&(16, 17)));
+    }
+
+    #[test]
+    fn comment_marker_colon_fg_matches_bg_in_normal_mode() {
+        let line = "-- TODO: x";
+        let spans = super::find_comment_markers(line, false);
+        // Trailing `:` is at 7..8.
+        let colon = spans.iter().find(|(s, e, _)| *s == 7 && *e == 8).unwrap();
+        let u = super::theme::ui();
+        assert_eq!(colon.2.fg, Some(u.sql_marker_todo));
+        assert_eq!(colon.2.bg, Some(u.sql_marker_todo));
+    }
+
+    #[test]
+    fn comment_marker_colon_visible_in_insert_mode() {
+        let line = "-- TODO: x";
+        let spans = super::find_comment_markers(line, true);
+        let colon = spans.iter().find(|(s, e, _)| *s == 7 && *e == 8).unwrap();
+        let u = super::theme::ui();
+        assert_eq!(colon.2.fg, Some(u.sql_marker_fg));
+        assert_eq!(colon.2.bg, Some(u.sql_marker_todo));
+    }
+
+    #[test]
+    fn marker_word_invisible_on_cursor_line() {
+        use ratatui::style::Style;
+        let mut row: Vec<(usize, usize, Style)> = Vec::new();
+        super::apply_marker_overlay(&mut row, "-- TODO: x", None, false, true);
+        let u = super::theme::ui();
+        // Label body at [2, 7] — leading space + "TODO". On the cursor
+        // line the WORD fg blends into its own bg.
+        let label = row.iter().find(|(s, e, _)| *s == 2 && *e == 7).unwrap();
+        assert_eq!(label.2.fg, Some(u.sql_marker_todo));
+        assert_eq!(label.2.bg, Some(u.sql_marker_todo));
+    }
+
+    #[test]
+    fn marker_word_visible_off_cursor_line() {
+        use ratatui::style::Style;
+        let mut row: Vec<(usize, usize, Style)> = Vec::new();
+        super::apply_marker_overlay(&mut row, "-- TODO: x", None, false, false);
+        let u = super::theme::ui();
+        let label = row.iter().find(|(s, e, _)| *s == 2 && *e == 7).unwrap();
+        assert_eq!(label.2.fg, Some(u.sql_marker_fg));
+        assert_eq!(label.2.bg, Some(u.sql_marker_todo));
+    }
+
+    #[test]
+    fn continuation_comment_inherits_active_color() {
+        use ratatui::style::Style;
+        let mut row: Vec<(usize, usize, Style)> = Vec::new();
+        let u = super::theme::ui();
+        let new = super::apply_marker_overlay(
+            &mut row,
+            "-- this is a warning",
+            Some(u.sql_marker_warn),
+            false,
+            false,
+        );
+        assert_eq!(new, Some(u.sql_marker_warn));
+        // Full comment body tinted with the inherited colour.
+        let tinted = row
+            .iter()
+            .find(|(_, _, st)| st.fg == Some(u.sql_marker_warn))
+            .unwrap();
+        assert_eq!(tinted.0, 0);
+        assert_eq!(tinted.1, "-- this is a warning".len());
+    }
+
+    #[test]
+    fn non_comment_line_resets_inherited_color() {
+        use ratatui::style::Style;
+        let mut row: Vec<(usize, usize, Style)> = Vec::new();
+        let u = super::theme::ui();
+        let new = super::apply_marker_overlay(
+            &mut row,
+            "SELECT 1;",
+            Some(u.sql_marker_warn),
+            false,
+            false,
+        );
+        assert_eq!(new, None);
+        assert!(row.is_empty());
+    }
+
+    #[test]
+    fn overlay_splits_outer_span_around_marker() {
+        use ratatui::style::Style;
+        let base = Style::default();
+        let marker = Style::default();
+        let mut row = vec![(0usize, 30usize, base)];
+        super::overlay_span(&mut row, 10, 15, marker);
+        row.sort_by_key(|&(s, _, _)| s);
+        let ranges: Vec<(usize, usize)> = row.iter().map(|&(s, e, _)| (s, e)).collect();
+        assert_eq!(ranges, vec![(0, 10), (10, 15), (15, 30)]);
     }
 }

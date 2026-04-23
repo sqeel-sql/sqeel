@@ -17,6 +17,7 @@ pub struct HighlightRequest {
 /// window `(start_row, row_count)` that was submitted with the request,
 /// so the caller can re-anchor the spans into buffer coordinates and
 /// know which rows to clear.
+#[derive(Clone)]
 pub struct HighlightResult {
     pub spans: Vec<HighlightSpan>,
     pub start_row: usize,
