@@ -2203,18 +2203,23 @@ fn reset_textarea_lines(ed: &mut Editor<'_>, lines: Vec<String>) {
 
 /// Rebuild the VisualLine selection after the cursor moved.
 ///
-/// Cursor always lands at column 0 of the active row (matches vim's
-/// "beginning of line" convention for V mode). The anchor end is pinned
-/// to the far side of the opposite row so rows between the anchor and
-/// cursor are fully highlighted. The active row shows only the cursor
-/// indicator at col 0 — tui-textarea's single-range selection can't
-/// simultaneously place the cursor at col 0 *and* extend the highlight
-/// to the end of that same row when extending down.
+/// Cursor lands at column 0 of the active row (matches vim's "beginning
+/// of line" convention for V mode) when the selection spans at least
+/// two rows. When only a single row is selected there's nothing between
+/// anchor and cursor for tui-textarea to fill, so we park the cursor at
+/// end of line instead — the one-range selection then covers the whole
+/// line. As soon as the user extends to another row the normal
+/// split-corner layout takes over.
 fn refresh_visual_line_selection(ed: &mut Editor<'_>) {
     let (cursor_row, _) = ed.textarea.cursor();
     let anchor_row = ed.vim.visual_line_anchor;
     ed.textarea.cancel_selection();
-    if cursor_row >= anchor_row {
+    if cursor_row == anchor_row {
+        ed.textarea.move_cursor(CursorMove::Jump(anchor_row, 0));
+        ed.textarea.start_selection();
+        ed.textarea.move_cursor(CursorMove::Jump(cursor_row, 0));
+        ed.textarea.move_cursor(CursorMove::End);
+    } else if cursor_row > anchor_row {
         // Extending down: anchor at start of anchor row, cursor at start of active row.
         ed.textarea.move_cursor(CursorMove::Jump(anchor_row, 0));
         ed.textarea.start_selection();
@@ -3028,8 +3033,13 @@ mod tests {
         let mut e = editor_with("aaa\nbbb\nccc\nddd");
         run_keys(&mut e, "V");
         assert_eq!(e.vim_mode(), VimMode::VisualLine);
-        assert_eq!(e.textarea.cursor(), (0, 0));
+        // Single-line V selects the full line — cursor parks at
+        // end-of-line so tui-textarea's range covers the whole row.
+        assert_eq!(e.textarea.cursor(), (0, 3));
         run_keys(&mut e, "j");
+        // Once the selection covers multiple rows, the split-corner
+        // layout kicks in and the cursor lands at col 0 of the active
+        // row.
         assert_eq!(e.textarea.cursor(), (1, 0));
         run_keys(&mut e, "j");
         assert_eq!(e.textarea.cursor(), (2, 0));
@@ -3184,11 +3194,23 @@ mod tests {
     }
 
     #[test]
+    fn single_line_visual_line_selects_full_line_on_yank() {
+        let mut e = editor_with("hello world\nbye");
+        run_keys(&mut e, "V");
+        // Yank the selection — should include the full line + trailing
+        // newline (linewise yank convention).
+        run_keys(&mut e, "y");
+        assert_eq!(e.last_yank.as_deref(), Some("hello world\n"));
+    }
+
+    #[test]
     fn visual_line_extending_up_keeps_cursor_at_col_zero() {
         let mut e = editor_with("aaa\nbbb\nccc\nddd");
         run_keys(&mut e, "jjj");
         run_keys(&mut e, "V");
-        assert_eq!(e.textarea.cursor(), (3, 0));
+        // Single-line V: cursor sits past end-of-line so the full line
+        // is highlighted via tui-textarea's char-range selection.
+        assert_eq!(e.textarea.cursor(), (3, 3));
         run_keys(&mut e, "k");
         assert_eq!(e.textarea.cursor(), (2, 0));
         run_keys(&mut e, "k");
