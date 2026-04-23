@@ -449,15 +449,36 @@ async fn run_loop(
         // past the threshold.  The 50 ms event-poll timeout guarantees we
         // revisit this branch quickly even while the user is idle.
         const CONTENT_PUBLISH_DEBOUNCE: Duration = Duration::from_millis(75);
+        // Above this total-byte size we stop running the heavy pipeline
+        // entirely — no `editor.content()` join, no highlight submit, no
+        // completion context parse.  Syntax spans already applied stay
+        // rendered; the editor keeps working as a plain text buffer.
+        const HEAVY_PIPELINE_MAX_BYTES: usize = 2 * 1024 * 1024;
         let should_publish = content_dirty_since
             .map(|t| t.elapsed() >= CONTENT_PUBLISH_DEBOUNCE)
             .unwrap_or(false);
-        let content: Option<Arc<String>> = if should_publish {
-            content_dirty_since = None;
-            Some(Arc::new(editor.content()))
+        let buffer_bytes = if should_publish {
+            let lines = editor.textarea.lines();
+            lines.iter().map(|l| l.len()).sum::<usize>() + lines.len()
         } else {
-            None
+            0
         };
+        let content: Option<Arc<String>> =
+            if should_publish && buffer_bytes <= HEAVY_PIPELINE_MAX_BYTES {
+                content_dirty_since = None;
+                Some(Arc::new(editor.content()))
+            } else if should_publish {
+                // Over the size gate — clear the dirty timer so we don't
+                // re-enter every iteration, and drop any completion popup so
+                // the user isn't staring at stale suggestions.
+                content_dirty_since = None;
+                state.lock().unwrap().dismiss_completions();
+                last_completion_id = None;
+                last_completion_ctx = None;
+                None
+            } else {
+                None
+            };
         {
             let mut s = state.lock().unwrap();
             // Coalesce any pending schema-cache rebuilds triggered by background
