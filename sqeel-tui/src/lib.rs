@@ -2832,6 +2832,9 @@ fn draw_editor(
         let _ = editor.textarea.set_search_pattern("");
     }
 
+    // Publish the editor rect's text height so scroll helpers can clamp
+    // the cursor without recomputing layout.
+    editor.set_viewport_height(chunks[1].height);
     f.render_widget(&editor.textarea, chunks[1]);
 
     // All three visual modes paint their highlight as a post-render

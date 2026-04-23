@@ -10,7 +10,8 @@ use crate::vim::{self, VimState};
 use crate::{KeybindingMode, VimMode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-use tui_textarea::{CursorMove, Input, Key, TextArea};
+use std::sync::atomic::{AtomicU16, Ordering};
+use tui_textarea::{CursorMove, Input, Key, Scrolling, TextArea};
 
 pub struct Editor<'a> {
     pub textarea: TextArea<'a>,
@@ -25,6 +26,11 @@ pub struct Editor<'a> {
     pub(super) redo_stack: Vec<(Vec<String>, (usize, usize))>,
     /// Set whenever the buffer content changes; cleared by `take_dirty`.
     pub(super) content_dirty: bool,
+    /// Last rendered viewport height (text rows only, no chrome). Written
+    /// by the draw path via [`set_viewport_height`] so the scroll helpers
+    /// can clamp the cursor to stay visible without plumbing the height
+    /// through every call.
+    pub(super) viewport_height: AtomicU16,
 }
 
 impl<'a> Editor<'a> {
@@ -39,7 +45,14 @@ impl<'a> Editor<'a> {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             content_dirty: false,
+            viewport_height: AtomicU16::new(0),
         }
+    }
+
+    /// Host apps call this each draw with the current text area height so
+    /// scroll helpers can clamp the cursor without recomputing layout.
+    pub fn set_viewport_height(&self, height: u16) {
+        self.viewport_height.store(height, Ordering::Relaxed);
     }
 
     /// Calls `f` on the textarea and marks the content dirty.
@@ -182,15 +195,48 @@ impl<'a> Editor<'a> {
         self.textarea.set_yank_text(text);
     }
 
+    /// Scroll the viewport down by `rows`. The cursor stays on its
+    /// absolute line (vim convention) unless the scroll would take it
+    /// off-screen — in that case it's clamped to the first row still
+    /// visible.
     pub fn scroll_down(&mut self, rows: i16) {
-        for _ in 0..rows {
-            self.textarea.move_cursor(CursorMove::Down);
-        }
+        self.scroll_viewport(rows);
     }
 
+    /// Scroll the viewport up by `rows`. Cursor stays unless it would
+    /// fall off the bottom of the new viewport, then clamp to the
+    /// bottom-most visible row.
     pub fn scroll_up(&mut self, rows: i16) {
-        for _ in 0..rows {
-            self.textarea.move_cursor(CursorMove::Up);
+        self.scroll_viewport(-rows);
+    }
+
+    fn scroll_viewport(&mut self, delta: i16) {
+        if delta == 0 {
+            return;
+        }
+        self.textarea.scroll(Scrolling::Delta {
+            rows: delta,
+            cols: 0,
+        });
+        let (cur_row, cur_col) = self.textarea.cursor();
+        let top = self.textarea.viewport_top_row();
+        let height = self.viewport_height.load(Ordering::Relaxed) as usize;
+        if height == 0 {
+            return;
+        }
+        let bot_inclusive = top + height.saturating_sub(1);
+        let new_row = cur_row.clamp(top, bot_inclusive);
+        if new_row != cur_row {
+            let line_len = self
+                .textarea
+                .lines()
+                .get(new_row)
+                .map(|l| l.chars().count())
+                .unwrap_or(0);
+            let line_len = line_len.saturating_sub(1).max(0);
+            let new_col = cur_col.min(line_len);
+            self.textarea
+                .move_cursor(CursorMove::Jump(new_row, new_col));
         }
     }
 
