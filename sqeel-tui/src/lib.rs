@@ -345,6 +345,16 @@ async fn run_loop(
     // Prompt asking the user whether to save dirty buffers before exit.
     let mut quit_prompt: Option<()> = None;
     let mut doc_version: i32 = 0;
+    // Buffers larger than this are not streamed to the LSP — sqls (and most
+    // SQL LSPs) re-parse the whole document on every `didChange` and balloon
+    // to multi-GB RAM on huge dumps / seed files.  We still highlight +
+    // offer schema completions locally; only the LSP-sourced completions +
+    // diagnostics go dark above the threshold.
+    const LSP_MAX_BYTES: usize = 512 * 1024;
+    // True when we've sent an empty `didChange` to release the LSP's copy
+    // of the document after crossing the size threshold.  Reset when we
+    // drop back below the threshold so the server re-syncs the real text.
+    let mut lsp_suspended = false;
     let mut last_completion_id: Option<i64> = None;
     let mut last_schema_completions: Vec<String> = Vec::new();
     // Last completion context + prefix, stashed so we can re-run the query
@@ -510,14 +520,30 @@ async fn run_loop(
                 completion_thread.submit(prefix, Arc::new(pool));
 
                 if let Some(ref mut client) = lsp {
-                    let _ = client
-                        .change_document(scratch_uri.clone(), doc_version, content)
-                        .await;
-                    if let Ok(id) = client
-                        .request_completion(scratch_uri.clone(), row as u32, col as u32)
-                        .await
-                    {
-                        last_completion_id = Some(id);
+                    let too_big = content.len() > LSP_MAX_BYTES;
+                    if too_big {
+                        // First crossing: release the LSP's in-memory copy
+                        // once so sqls can free whatever it parsed, then go
+                        // silent until the buffer shrinks again.
+                        if !lsp_suspended {
+                            let _ = client
+                                .change_document(scratch_uri.clone(), doc_version, "")
+                                .await;
+                            lsp_suspended = true;
+                        }
+                    } else {
+                        if lsp_suspended {
+                            lsp_suspended = false;
+                        }
+                        let _ = client
+                            .change_document(scratch_uri.clone(), doc_version, content)
+                            .await;
+                        if let Ok(id) = client
+                            .request_completion(scratch_uri.clone(), row as u32, col as u32)
+                            .await
+                        {
+                            last_completion_id = Some(id);
+                        }
                     }
                 }
             }
