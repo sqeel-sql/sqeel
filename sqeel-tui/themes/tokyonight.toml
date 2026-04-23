@@ -44,6 +44,7 @@ schema_icon_table      = "cyan"
 schema_icon_column     = "green"
 schema_icon_pk         = "yellow"
 schema_type_fg         = "magenta"
+schema_placeholder_fg  = "comment"
 
 # Results pane
 results_col_active_bg      = "bg_highlight"

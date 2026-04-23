@@ -71,7 +71,14 @@ impl SchemaNode {
 pub enum SchemaItemKind {
     Database,
     Table,
-    Column { type_name: String, is_pk: bool },
+    Column {
+        type_name: String,
+        is_pk: bool,
+    },
+    /// Non-interactive hint row emitted under an expanded node with no
+    /// children — e.g. "(no tables)" for an empty database or
+    /// "(loading…)" before the lazy loader replies.
+    Placeholder,
 }
 
 /// Flat list of visible tree items for rendering.
@@ -194,31 +201,76 @@ fn flatten_nodes(
             SchemaNode::Database {
                 expanded: true,
                 tables,
+                tables_loaded_at,
                 ..
             } => {
-                flatten_nodes(
-                    tables,
-                    depth + 1,
-                    &node_path,
-                    &child_ancestor_is_last,
-                    items,
-                );
+                if tables.is_empty() {
+                    items.push(placeholder_item(
+                        depth + 1,
+                        &node_path,
+                        tables_loaded_at.is_some(),
+                        "tables",
+                    ));
+                } else {
+                    flatten_nodes(
+                        tables,
+                        depth + 1,
+                        &node_path,
+                        &child_ancestor_is_last,
+                        items,
+                    );
+                }
             }
             SchemaNode::Table {
                 expanded: true,
                 columns,
+                columns_loaded_at,
                 ..
             } => {
-                flatten_nodes(
-                    columns,
-                    depth + 1,
-                    &node_path,
-                    &child_ancestor_is_last,
-                    items,
-                );
+                if columns.is_empty() {
+                    items.push(placeholder_item(
+                        depth + 1,
+                        &node_path,
+                        columns_loaded_at.is_some(),
+                        "columns",
+                    ));
+                } else {
+                    flatten_nodes(
+                        columns,
+                        depth + 1,
+                        &node_path,
+                        &child_ancestor_is_last,
+                        items,
+                    );
+                }
             }
             _ => {}
         }
+    }
+}
+
+fn placeholder_item(
+    depth: usize,
+    parent_path: &[usize],
+    loaded: bool,
+    what: &str,
+) -> SchemaTreeItem {
+    let indent = " ".repeat(1 + depth * 2);
+    let text = if loaded {
+        format!("(no {what})")
+    } else {
+        format!("(loading {what}…)")
+    };
+    // Sentinel path that won't match any real node — toggle_node /
+    // path_to_string safely no-op on out-of-range indices.
+    let mut node_path = parent_path.to_vec();
+    node_path.push(usize::MAX);
+    SchemaTreeItem {
+        label: format!("{indent}{text}"),
+        depth,
+        node_path,
+        name: text.clone(),
+        kind: SchemaItemKind::Placeholder,
     }
 }
 
@@ -499,6 +551,52 @@ mod tests {
         let items = flatten_tree(&tree);
         assert_eq!(items.len(), 3);
         assert!(items[2].label.contains("id"));
+    }
+
+    #[test]
+    fn expanded_empty_database_shows_no_tables_placeholder() {
+        let tree = vec![SchemaNode::Database {
+            name: "empty".into(),
+            expanded: true,
+            tables: vec![],
+            tables_loaded_at: Some(std::time::Instant::now()),
+        }];
+        let items = flatten_tree(&tree);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[1].kind, SchemaItemKind::Placeholder));
+        assert!(items[1].label.contains("no tables"));
+    }
+
+    #[test]
+    fn expanded_loading_database_shows_loading_placeholder() {
+        let tree = vec![SchemaNode::Database {
+            name: "loading".into(),
+            expanded: true,
+            tables: vec![],
+            tables_loaded_at: None,
+        }];
+        let items = flatten_tree(&tree);
+        assert_eq!(items.len(), 2);
+        assert!(items[1].label.contains("loading"));
+    }
+
+    #[test]
+    fn expanded_empty_table_shows_no_columns_placeholder() {
+        let tree = vec![SchemaNode::Database {
+            name: "db".into(),
+            expanded: true,
+            tables: vec![SchemaNode::Table {
+                name: "empty".into(),
+                expanded: true,
+                columns: vec![],
+                columns_loaded_at: Some(std::time::Instant::now()),
+            }],
+            tables_loaded_at: Some(std::time::Instant::now()),
+        }];
+        let items = flatten_tree(&tree);
+        assert_eq!(items.len(), 3);
+        assert!(items[2].label.contains("no columns"));
+        assert!(matches!(items[2].kind, SchemaItemKind::Placeholder));
     }
 
     #[test]

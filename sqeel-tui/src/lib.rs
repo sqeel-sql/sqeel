@@ -2549,11 +2549,25 @@ fn draw_status_bar(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor
 
 fn schema_item_line(item: &SchemaTreeItem, u: &theme::UiColors) -> Line<'static> {
     let indent = " ".repeat(1 + item.depth * 2);
+    if matches!(item.kind, SchemaItemKind::Placeholder) {
+        // Greyed-out hint row; no icon so it's visibly distinct from
+        // real tree entries.
+        return Line::from(vec![
+            Span::raw(indent),
+            Span::styled(
+                item.name.clone(),
+                Style::default()
+                    .fg(u.schema_placeholder_fg)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]);
+    }
     let (icon, icon_color) = match &item.kind {
         SchemaItemKind::Database => ("󰆼", u.schema_icon_db),
         SchemaItemKind::Table => ("󰓫", u.schema_icon_table),
         SchemaItemKind::Column { is_pk: true, .. } => ("󰌆", u.schema_icon_pk),
         SchemaItemKind::Column { .. } => ("󱘚", u.schema_icon_column),
+        SchemaItemKind::Placeholder => unreachable!("handled above"),
     };
     let mut spans = vec![
         Span::raw(indent),

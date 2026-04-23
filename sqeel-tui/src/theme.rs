@@ -143,6 +143,7 @@ ui_colors!(
     schema_icon_column,
     schema_icon_pk,
     schema_type_fg,
+    schema_placeholder_fg,
     results_col_active_bg,
     results_col_inactive_bg,
     results_cursor_active_bg,
