@@ -2136,10 +2136,16 @@ fn draw(
         draw_results(f, state, right_chunks[1], results_focused);
     }
 
-    // Completion popup (overlay)
+    // Completion popup (overlay).  Use viewport-relative coordinates so
+    // the popup stays inside the editor even when the cursor lives deep
+    // in a long file.
     if state.show_completions && !state.completions.is_empty() {
         let (cur_row, cur_col) = editor.textarea.cursor();
-        draw_completions(f, state, right_chunks[0], cur_row, cur_col);
+        let top_row = editor.textarea.viewport_top_row();
+        let top_col = editor.textarea.viewport_top_col();
+        let screen_row = cur_row.saturating_sub(top_row);
+        let screen_col = cur_col.saturating_sub(top_col);
+        draw_completions(f, state, right_chunks[0], screen_row, screen_col);
     }
 
     // Connection switcher modal (top-level overlay)
