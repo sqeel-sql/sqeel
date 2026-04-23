@@ -396,11 +396,14 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
         finish_insert_session(ed);
         ed.vim.mode = Mode::Normal;
         // Vim leaves the cursor one column to the left on exit when possible.
-        let (row, col) = ed.textarea.cursor();
+        let (_row, col) = ed.textarea.cursor();
         if col > 0 {
-            let _ = row;
             ed.textarea.move_cursor(CursorMove::Back);
         }
+        // Re-sync the sticky column to wherever the insert session left
+        // the cursor so the next vertical motion aims at the new column
+        // rather than where the user was before entering insert mode.
+        ed.vim.sticky_col = Some(ed.textarea.cursor().1);
         return true;
     }
 
@@ -3634,6 +3637,24 @@ mod tests {
         assert_eq!(e.textarea.cursor(), (1, 1));
         run_keys(&mut e, "j");
         assert_eq!(e.textarea.cursor(), (2, 7));
+    }
+
+    #[test]
+    fn esc_from_insert_resyncs_sticky_column() {
+        // Cursor at col 12, press I (moves to first non-blank col 4),
+        // make edits, Esc. Next j should aim for the post-insert column,
+        // not the pre-insert col 12.
+        let mut e =
+            editor_with(&("    this is a line\n    another one of a similar size".to_string()));
+        e.textarea.move_cursor(CursorMove::Jump(0, 12));
+        run_keys(&mut e, "I");
+        assert_eq!(e.textarea.cursor(), (0, 4));
+        run_keys(&mut e, "X<Esc>");
+        // After Esc, cursor is one back from the insertion (standard vim).
+        assert_eq!(e.textarea.cursor(), (0, 4));
+        run_keys(&mut e, "j");
+        // Should land at col 4 of row 1 — sticky sync'd at Esc.
+        assert_eq!(e.textarea.cursor(), (1, 4));
     }
 
     #[test]
