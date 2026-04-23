@@ -15,6 +15,16 @@ use std::time::{Duration, Instant};
 
 use spinner::frame as spinner_frame;
 
+/// Run the pending autosave on a blocking task so large-file disk
+/// writes never stall the TUI event loop. Accepts an already-computed
+/// job; the in-memory tab state is updated by the caller's
+/// `AppState::autosave()` call synchronously.
+fn spawn_autosave(job: AutosaveJob) {
+    tokio::task::spawn_blocking(move || {
+        let _ = persistence::save_query(&job.slug, &job.name, &job.content);
+    });
+}
+
 use completion_thread::CompletionThread;
 use crossterm::{
     cursor::SetCursorStyle,
@@ -44,8 +54,11 @@ use sqeel_core::{
         statement_at_byte, statement_ranges, strip_sql_comments,
     },
     lsp::{LspClient, LspEvent},
+    persistence,
     schema::{self, SchemaItemKind, SchemaTreeItem},
-    state::{AddConnectionField, Focus, KeybindingMode, ResultsCursor, ResultsPane, VimMode},
+    state::{
+        AddConnectionField, AutosaveJob, Focus, KeybindingMode, ResultsCursor, ResultsPane, VimMode,
+    },
 };
 use sqeel_vim::{Editor, paint_block_overlay, paint_char_overlay, paint_line_overlay};
 use theme::ui;
@@ -458,7 +471,9 @@ async fn run_loop(
                 needs_redraw = true;
             }
             if editor_dirty && last_save_time.elapsed() >= Duration::from_millis(1000) {
-                s.autosave();
+                if let Some(job) = s.autosave() {
+                    spawn_autosave(job);
+                }
                 editor_dirty = false;
                 last_save_time = Instant::now();
             }
@@ -716,7 +731,9 @@ async fn run_loop(
                                     s.focus = Focus::Editor;
                                     if editor_dirty {
                                         s.editor_content = Arc::new(editor.content());
-                                        s.autosave();
+                                        if let Some(job) = s.autosave() {
+                                            spawn_autosave(job);
+                                        }
                                         editor_dirty = false;
                                         last_save_time = Instant::now();
                                     }
@@ -1053,14 +1070,18 @@ async fn run_loop(
                                     if save && editor_dirty {
                                         let mut s = state.lock().unwrap();
                                         s.editor_content = Arc::new(editor.content());
-                                        s.autosave();
+                                        if let Some(job) = s.autosave() {
+                                            spawn_autosave(job);
+                                        }
                                     }
                                     break;
                                 }
                                 editor::ex::ExEffect::Save => {
                                     let mut s = state.lock().unwrap();
                                     s.editor_content = Arc::new(editor.content());
-                                    s.autosave();
+                                    if let Some(job) = s.autosave() {
+                                        spawn_autosave(job);
+                                    }
                                     editor_dirty = false;
                                     last_save_time = Instant::now();
                                     toasts.push((
@@ -1185,7 +1206,9 @@ async fn run_loop(
                                 if let Some(idx) = s.tabs.iter().position(|t| &t.name == name) {
                                     if editor_dirty {
                                         s.editor_content = Arc::new(editor.content());
-                                        s.autosave();
+                                        if let Some(job) = s.autosave() {
+                                            spawn_autosave(job);
+                                        }
                                         editor_dirty = false;
                                         last_save_time = Instant::now();
                                     }
@@ -1433,7 +1456,9 @@ async fn run_loop(
                             let mut s = state.lock().unwrap();
                             if editor_dirty {
                                 s.editor_content = Arc::new(editor.content());
-                                s.autosave();
+                                if let Some(job) = s.autosave() {
+                                    spawn_autosave(job);
+                                }
                                 editor_dirty = false;
                                 last_save_time = Instant::now();
                             }
@@ -1452,7 +1477,9 @@ async fn run_loop(
                             let mut s = state.lock().unwrap();
                             if editor_dirty {
                                 s.editor_content = Arc::new(editor.content());
-                                s.autosave();
+                                if let Some(job) = s.autosave() {
+                                    spawn_autosave(job);
+                                }
                                 editor_dirty = false;
                                 last_save_time = Instant::now();
                             }

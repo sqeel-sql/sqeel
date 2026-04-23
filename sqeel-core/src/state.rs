@@ -1,4 +1,14 @@
 use crate::completion_ctx::CompletionCtx;
+
+/// Payload returned by [`AppState::autosave`] describing where the
+/// current editor buffer should be written. The caller performs the
+/// disk write (typically on a background task).
+#[derive(Debug, Clone)]
+pub struct AutosaveJob {
+    pub slug: String,
+    pub name: String,
+    pub content: Arc<String>,
+}
 use crate::config::ConnectionConfig;
 use crate::ddl::DdlEffect;
 use crate::highlight::HighlightSpan;
@@ -2088,27 +2098,37 @@ impl AppState {
         }
     }
 
-    /// Auto-save editor content to the active tab on disk.
-    pub fn autosave(&mut self) {
+    /// Auto-save editor content to the active tab. Updates the in-memory
+    /// tab state synchronously and returns the slug / name / content the
+    /// caller should persist to disk — typically via a background task
+    /// so large-file writes don't stall the TUI event loop. Returns
+    /// `None` when there's nothing to save.
+    pub fn autosave(&mut self) -> Option<AutosaveJob> {
         if !self.editor_content_synced {
-            return;
+            return None;
         }
         let slug =
             persistence::sanitize_conn_slug(self.active_connection.as_deref().unwrap_or("default"));
         if self.tabs.is_empty() {
-            if let Ok(name) = persistence::next_scratch_name(&slug) {
-                let _ = persistence::save_query(&slug, &name, &self.editor_content);
-                self.tabs
-                    .push(TabEntry::open(name, (*self.editor_content).clone()));
-                self.active_tab = 0;
-            }
-            return;
+            let name = persistence::next_scratch_name(&slug).ok()?;
+            let content: String = (*self.editor_content).clone();
+            self.tabs
+                .push(TabEntry::open(name.clone(), content.clone()));
+            self.active_tab = 0;
+            return Some(AutosaveJob {
+                slug,
+                name,
+                content: Arc::new(content),
+            });
         }
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            tab.content = Some((*self.editor_content).clone());
-            tab.last_accessed = Some(Instant::now());
-            let _ = persistence::save_query(&slug, &tab.name, &self.editor_content);
-        }
+        let tab = self.tabs.get_mut(self.active_tab)?;
+        tab.content = Some((*self.editor_content).clone());
+        tab.last_accessed = Some(Instant::now());
+        Some(AutosaveJob {
+            slug,
+            name: tab.name.clone(),
+            content: self.editor_content.clone(),
+        })
     }
 
     /// Persist every open tab's cached content to disk. The active tab is
