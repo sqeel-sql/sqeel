@@ -240,7 +240,7 @@ impl<'a> Editor<'a> {
                 .get(new_row)
                 .map(|l| l.chars().count())
                 .unwrap_or(0);
-            let line_len = line_len.saturating_sub(1).max(0);
+            let line_len = line_len.saturating_sub(1);
             let new_col = cur_col.min(line_len);
             self.textarea
                 .move_cursor(CursorMove::Jump(new_row, new_col));

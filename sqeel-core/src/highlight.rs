@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +26,10 @@ pub struct HighlightSpan {
 pub struct Highlighter {
     parser: Parser,
     old_tree: Option<Tree>,
-    old_source: String,
+    // Held as `Arc<String>` so retaining a reference across highlight calls
+    // is a ref-count bump instead of a full-buffer `String::clone` — which
+    // on multi-MB buffers was the hottest allocation in the highlight loop.
+    old_source: Option<Arc<String>>,
 }
 
 impl Highlighter {
@@ -35,29 +39,47 @@ impl Highlighter {
         Ok(Self {
             parser,
             old_tree: None,
-            old_source: String::new(),
+            old_source: None,
         })
     }
 
+    /// Highlight a borrowed source string.  Callers that already have an
+    /// `Arc<String>` should prefer [`Self::highlight_shared`] — this entry
+    /// point has to allocate an `Arc<String>` copy to cache for the next
+    /// diff.
     pub fn highlight(&mut self, source: &str) -> Vec<HighlightSpan> {
         if source.is_empty() {
             self.old_tree = None;
-            self.old_source.clear();
+            self.old_source = None;
+            return vec![];
+        }
+        self.highlight_shared(&Arc::new(source.to_owned()))
+    }
+
+    /// Highlight a shared source buffer.  The `Arc<String>` is retained
+    /// (ref-count bumped) for use as the incremental-edit diff base on
+    /// the next call — avoids the multi-MB `String::clone` the old design
+    /// paid on every highlight of a huge file.
+    pub fn highlight_shared(&mut self, source: &Arc<String>) -> Vec<HighlightSpan> {
+        if source.is_empty() {
+            self.old_tree = None;
+            self.old_source = None;
             return vec![];
         }
 
         // Apply edit info to old tree so tree-sitter can reuse unchanged nodes.
         if let Some(tree) = &mut self.old_tree
-            && let Some(edit) = compute_input_edit(&self.old_source, source)
+            && let Some(old) = self.old_source.as_deref()
+            && let Some(edit) = compute_input_edit(old, source)
         {
             tree.edit(&edit);
         }
 
-        let tree = match self.parser.parse(source, self.old_tree.as_ref()) {
+        let tree = match self.parser.parse(source.as_str(), self.old_tree.as_ref()) {
             Some(t) => t,
             None => {
                 self.old_tree = None;
-                self.old_source.clear();
+                self.old_source = None;
                 return vec![];
             }
         };
@@ -66,7 +88,7 @@ impl Highlighter {
         let mut spans = Vec::new();
         collect_spans(tree.root_node(), source_bytes, &mut spans);
 
-        self.old_source = source.to_owned();
+        self.old_source = Some(Arc::clone(source));
         self.old_tree = Some(tree);
 
         spans
