@@ -3644,8 +3644,7 @@ mod tests {
         // Cursor at col 12, press I (moves to first non-blank col 4),
         // make edits, Esc. Next j should aim for the post-insert column,
         // not the pre-insert col 12.
-        let mut e =
-            editor_with(&("    this is a line\n    another one of a similar size".to_string()));
+        let mut e = editor_with("    this is a line\n    another one of a similar size");
         e.textarea.move_cursor(CursorMove::Jump(0, 12));
         run_keys(&mut e, "I");
         assert_eq!(e.textarea.cursor(), (0, 4));
