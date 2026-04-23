@@ -2801,33 +2801,32 @@ fn draw_editor(
         let _ = editor.textarea.set_search_pattern("");
     }
 
-    // Visual-block mode: paint the rectangle as syntax spans since
-    // tui-textarea's real selection can only cover a single char range.
-    // We rebuild the per-row span table from state.highlight_spans so
-    // leaving block mode cleanly drops the overlay on the next draw.
+    // Always rebuild syntax spans from state.highlight_spans so the
+    // block-mode overlay is dropped as soon as the user leaves the mode
+    // (spans would otherwise linger until the next highlight_thread
+    // update). In block mode we append a reversed-modifier span per
+    // covered row — `Modifier::REVERSED` merges with cursor-line /
+    // cursor styles instead of being overridden by them (tui-textarea
+    // does `syntax_style.patch(overlay_style)`, which lets the overlay
+    // win on any field the overlay sets).
+    let row_count = editor.textarea.lines().len();
+    let mut by_row = syntax_spans_by_row(&state.highlight_spans, row_count);
     if let Some((top, bot, left, right)) = editor.block_highlight() {
-        let row_count = editor.textarea.lines().len();
-        let mut by_row = syntax_spans_by_row(&state.highlight_spans, row_count);
-        let block_style = Style::default()
-            .bg(ui().editor_search_bg)
-            .fg(ui().editor_search_fg);
+        let block_style = Style::default().add_modifier(Modifier::REVERSED);
         let lines_snapshot: Vec<String> = editor.textarea.lines().to_vec();
-        for (r, line) in lines_snapshot.iter().enumerate().take(bot + 1).skip(top) {
-            let line_len = line.chars().count();
-            let start = left.min(line_len);
-            let end = (right + 1).min(line_len.max(1));
-            let end = end.max(start + 1).min(line_len.max(start + 1));
-            if start < line_len {
+        for r in top..=bot.min(row_count.saturating_sub(1)) {
+            let line_len = lines_snapshot[r].chars().count();
+            if line_len == 0 {
+                continue;
+            }
+            let start = left.min(line_len - 1);
+            let end = (right + 1).min(line_len);
+            if start < end {
                 by_row[r].push((start, end, block_style));
-            } else {
-                // Block extends past end of line — paint a single-cell
-                // strip at the line's end so the user sees the column
-                // corner even when no text sits there.
-                by_row[r].push((line_len, line_len + 1, block_style));
             }
         }
-        editor.textarea.set_syntax_spans(by_row);
     }
+    editor.textarea.set_syntax_spans(by_row);
 
     f.render_widget(&editor.textarea, chunks[1]);
 
