@@ -284,6 +284,14 @@ pub struct VimState {
     /// separately and use it for block bounds / insert-column
     /// computations. Updated by h/l only.
     pub(super) block_vcol: usize,
+    /// Vim's "sticky column" (curswant). `None` before the first
+    /// motion — the next vertical motion bootstraps from the current
+    /// cursor column. Horizontal motions refresh this to the new
+    /// cursor column; vertical motions *read* it to restore the
+    /// cursor on the destination row when that row is long enough,
+    /// so bouncing through a shorter or empty line doesn't drag the
+    /// cursor back to column 0.
+    sticky_col: Option<usize>,
     /// Track whether the last yank/cut was linewise (drives `p`/`P` layout).
     pub(super) yank_linewise: bool,
     /// Set while replaying `.` / last-change so we don't re-record it.
@@ -833,7 +841,41 @@ fn execute_motion(ed: &mut Editor<'_>, motion: Motion, count: usize) {
         },
         other => other,
     };
+    let pre_col = ed.textarea.cursor().1;
     apply_motion_cursor(ed, &motion, count);
+    apply_sticky_col(ed, &motion, pre_col);
+}
+
+/// Restore the cursor to the sticky column after vertical motions and
+/// sync the sticky column to the current column after horizontal ones.
+/// `pre_col` is the cursor column captured *before* the motion — used
+/// to bootstrap the sticky value on the very first motion.
+fn apply_sticky_col(ed: &mut Editor<'_>, motion: &Motion, pre_col: usize) {
+    if is_vertical_motion(motion) {
+        let want = ed.vim.sticky_col.unwrap_or(pre_col);
+        // Record the desired column so the next vertical motion sees
+        // it even if we currently clamped to a shorter row.
+        ed.vim.sticky_col = Some(want);
+        let (row, _) = ed.textarea.cursor();
+        let line_len = ed.textarea.lines()[row].chars().count();
+        // Clamp to the last char on non-empty lines (vim normal-mode
+        // never parks the cursor one past end of line). Empty lines
+        // collapse to col 0.
+        let max_col = line_len.saturating_sub(1);
+        let target = want.min(max_col);
+        ed.textarea.move_cursor(CursorMove::Jump(row, target));
+    } else {
+        // Horizontal motion or non-motion: sticky column tracks the
+        // new cursor column so the *next* vertical motion aims there.
+        ed.vim.sticky_col = Some(ed.textarea.cursor().1);
+    }
+}
+
+fn is_vertical_motion(motion: &Motion) -> bool {
+    // Only j / k preserve the sticky column. Everything else (search,
+    // gg / G, word jumps, etc.) lands at the match's own column so the
+    // sticky value should sync to the new cursor column.
+    matches!(motion, Motion::Up | Motion::Down)
 }
 
 fn apply_motion_cursor(ed: &mut Editor<'_>, motion: &Motion, count: usize) {
@@ -3507,6 +3549,45 @@ mod tests {
         // After the command completes, back in insert.
         assert_eq!(e.vim_mode(), VimMode::Insert);
         assert_eq!(e.textarea.lines()[0], "world");
+    }
+
+    // ─── Sticky column across vertical motion ────────────────────────────
+
+    #[test]
+    fn j_through_empty_line_preserves_column() {
+        let mut e = editor_with("hello world\n\nanother line");
+        // Park cursor at col 6 on row 0.
+        run_keys(&mut e, "llllll");
+        assert_eq!(e.textarea.cursor(), (0, 6));
+        // j into the empty line — cursor clamps to (1, 0) visually, but
+        // sticky col stays at 6.
+        run_keys(&mut e, "j");
+        assert_eq!(e.textarea.cursor(), (1, 0));
+        // j onto a longer row — sticky col restores us to col 6.
+        run_keys(&mut e, "j");
+        assert_eq!(e.textarea.cursor(), (2, 6));
+    }
+
+    #[test]
+    fn j_through_shorter_line_preserves_column() {
+        let mut e = editor_with("hello world\nhi\nanother line");
+        run_keys(&mut e, "lllllll"); // col 7
+        run_keys(&mut e, "j"); // short line — clamps to col 1
+        assert_eq!(e.textarea.cursor(), (1, 1));
+        run_keys(&mut e, "j");
+        assert_eq!(e.textarea.cursor(), (2, 7));
+    }
+
+    #[test]
+    fn horizontal_motion_resyncs_sticky_column() {
+        // Starting col 6 on row 0, go back to col 3, then down through
+        // an empty row. The sticky col should be 3 (from the last `h`
+        // sequence), not 6.
+        let mut e = editor_with("hello world\n\nanother line");
+        run_keys(&mut e, "llllll"); // col 6
+        run_keys(&mut e, "hhh"); // col 3
+        run_keys(&mut e, "jj");
+        assert_eq!(e.textarea.cursor(), (2, 3));
     }
 
     // ─── Visual block ────────────────────────────────────────────────────
