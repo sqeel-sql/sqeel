@@ -45,21 +45,8 @@ impl TabEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum KeybindingMode {
-    #[default]
-    Vim,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum VimMode {
-    #[default]
-    Normal,
-    Insert,
-    Visual,
-    VisualLine,
-    VisualBlock,
-}
+// Re-exported from sqeel-vim so app code can keep `use sqeel_core::state::{KeybindingMode, VimMode}`.
+pub use sqeel_vim::{KeybindingMode, VimMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AddConnectionField {

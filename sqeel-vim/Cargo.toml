@@ -1,0 +1,16 @@
+[package]
+name = "sqeel-vim"
+version = "0.1.0"
+edition = "2024"
+description = "Vim-mode engine + ex commands used by sqeel. Designed for eventual extraction into a standalone crate."
+
+[dependencies]
+ratatui = "0.29.0"
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+tui-textarea = { version = "0.7.0", features = ["search"] }
+regex = "1"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]

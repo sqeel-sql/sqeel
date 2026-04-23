@@ -6,15 +6,11 @@
 //! [`vim`] and communicates with Editor through a small internal API
 //! exposed via `pub(super)` fields and helper methods.
 
-pub mod ex;
-pub mod vim;
-
+use crate::vim::{self, VimState};
+use crate::{KeybindingMode, VimMode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-use sqeel_core::state::{KeybindingMode, VimMode};
 use tui_textarea::{CursorMove, Input, Key, TextArea};
-
-use vim::VimState;
 
 pub struct Editor<'a> {
     pub textarea: TextArea<'a>,

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 sqeel-core = { path = "../sqeel-core" }
+sqeel-vim = { path = "../sqeel-vim" }
 anyhow = "1"
 ratatui = "0.29.0"
 crossterm = { version = "0.28.1", features = ["event-stream"] }

@@ -6,7 +6,7 @@
 //! applied in-place against `Editor`; quit / save / unknown are returned
 //! to the caller so the TUI loop can run them.
 
-use super::Editor;
+use crate::editor::Editor;
 use tui_textarea::CursorMove;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,8 +287,8 @@ impl<'a> Editor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KeybindingMode;
     use crate::editor::Editor;
-    use sqeel_core::state::KeybindingMode;
 
     fn new(content: &str) -> Editor<'static> {
         let mut e = Editor::new(KeybindingMode::Vim);

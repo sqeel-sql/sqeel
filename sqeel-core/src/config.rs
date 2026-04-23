@@ -135,19 +135,6 @@ pub struct SessionData {
     pub active_result_tab: usize,
 }
 
-impl serde::Serialize for KeybindingMode {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str("vim")
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for KeybindingMode {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let _ = String::deserialize(d)?;
-        Ok(KeybindingMode::Vim)
-    }
-}
-
 pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("sqeel"))
 }

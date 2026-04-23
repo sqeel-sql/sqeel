@@ -89,10 +89,10 @@
 //!   The plan calls for moving them into the editor (so the editor owns
 //!   `last_search_pattern` rather than the TUI loop). Safe to defer.
 
-use sqeel_core::state::VimMode;
+use crate::VimMode;
 use tui_textarea::{CursorMove, Input, Key, Scrolling};
 
-use super::Editor;
+use crate::editor::Editor;
 
 // ─── Modes & parser state ───────────────────────────────────────────────────
 
@@ -2815,8 +2815,8 @@ fn extract_inserted(before: &str, after: &str) -> String {
 mod tests {
     use super::*;
     use crate::editor::Editor;
+    use crate::{KeybindingMode, VimMode};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use sqeel_core::state::{KeybindingMode, VimMode};
 
     fn run_keys(e: &mut Editor<'_>, keys: &str) {
         // Minimal notation:
