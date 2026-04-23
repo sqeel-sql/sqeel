@@ -273,6 +273,10 @@ pub struct VimState {
     last_change: Option<LastChange>,
     /// Captured on insert-mode entry: count, buffer snapshot, entry kind.
     insert_session: Option<InsertSession>,
+    /// (row, col) anchor for char-wise Visual mode. Set on entry, used
+    /// to compute the highlight range and the operator range without
+    /// relying on tui-textarea's live selection.
+    pub(super) visual_anchor: (usize, usize),
     /// Row anchor for VisualLine mode.
     pub(super) visual_line_anchor: usize,
     /// (row, col) anchor for VisualBlock mode. The live cursor is the
@@ -357,7 +361,8 @@ impl VimState {
         self.mode == Mode::Visual
     }
 
-    pub fn enter_visual(&mut self) {
+    pub fn enter_visual(&mut self, anchor: (usize, usize)) {
+        self.visual_anchor = anchor;
         self.mode = Mode::Visual;
     }
 }
@@ -573,7 +578,8 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
             return true;
         }
         Key::Char('v') if !input.ctrl && ed.vim.mode == Mode::Normal => {
-            ed.textarea.start_selection();
+            ed.textarea.cancel_selection();
+            ed.vim.visual_anchor = ed.textarea.cursor();
             ed.vim.mode = Mode::Visual;
             return true;
         }
@@ -586,7 +592,7 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
         }
         Key::Char('v') if !input.ctrl && ed.vim.mode == Mode::VisualLine => {
             ed.textarea.cancel_selection();
-            ed.textarea.start_selection();
+            ed.vim.visual_anchor = ed.textarea.cursor();
             ed.vim.mode = Mode::Visual;
             return true;
         }
@@ -1526,8 +1532,9 @@ fn handle_visual_text_obj(ed: &mut Editor<'_>, input: Input, inner: bool) -> boo
     let Some((start, end, kind)) = text_object_range(ed, obj, inner) else {
         return true;
     };
-    // Build a visual selection spanning start..end. `end` is exclusive,
-    // so the cursor (last included cell) is one position before end.
+    // Anchor + cursor position the char-wise highlight / operator range;
+    // for linewise text-objects we switch into VisualLine with the
+    // appropriate row anchor.
     ed.textarea.cancel_selection();
     match kind {
         MotionKind::Linewise => {
@@ -1538,8 +1545,7 @@ fn handle_visual_text_obj(ed: &mut Editor<'_>, input: Input, inner: bool) -> boo
         }
         _ => {
             ed.vim.mode = Mode::Visual;
-            ed.textarea.move_cursor(CursorMove::Jump(start.0, start.1));
-            ed.textarea.start_selection();
+            ed.vim.visual_anchor = (start.0, start.1);
             let (er, ec) = retreat_one(ed, end);
             ed.textarea.move_cursor(CursorMove::Jump(er, ec));
         }
@@ -2002,8 +2008,7 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
             }
         }
         Mode::Visual => {
-            // tui-textarea selection is exclusive of end; include cursor char.
-            ed.textarea.move_cursor(CursorMove::Forward);
+            finalize_visual_char_selection(ed);
             // Reset linewise flag before copy/cut so non_empty_yank doesn't
             // mistakenly add a trailing newline from a prior linewise op.
             ed.vim.yank_linewise = false;
@@ -2013,6 +2018,7 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                     if let Some(y) = non_empty_yank(ed) {
                         ed.last_yank = Some(y);
                     }
+                    ed.textarea.cancel_selection();
                     ed.vim.mode = Mode::Normal;
                 }
                 Operator::Delete => {
@@ -2201,36 +2207,34 @@ fn reset_textarea_lines(ed: &mut Editor<'_>, lines: Vec<String>) {
 
 // ─── Visual-line helpers ───────────────────────────────────────────────────
 
-/// Rebuild the VisualLine selection after the cursor moved.
-///
-/// Cursor lands at column 0 of the active row (matches vim's "beginning
-/// of line" convention for V mode) when the selection spans at least
-/// two rows. When only a single row is selected there's nothing between
-/// anchor and cursor for tui-textarea to fill, so we park the cursor at
-/// end of line instead — the one-range selection then covers the whole
-/// line. As soon as the user extends to another row the normal
-/// split-corner layout takes over.
-fn refresh_visual_line_selection(ed: &mut Editor<'_>) {
-    let (cursor_row, _) = ed.textarea.cursor();
-    let anchor_row = ed.vim.visual_line_anchor;
-    ed.textarea.cancel_selection();
-    if cursor_row == anchor_row {
-        ed.textarea.move_cursor(CursorMove::Jump(anchor_row, 0));
-        ed.textarea.start_selection();
-        ed.textarea.move_cursor(CursorMove::Jump(cursor_row, 0));
-        ed.textarea.move_cursor(CursorMove::End);
-    } else if cursor_row > anchor_row {
-        // Extending down: anchor at start of anchor row, cursor at start of active row.
-        ed.textarea.move_cursor(CursorMove::Jump(anchor_row, 0));
-        ed.textarea.start_selection();
-        ed.textarea.move_cursor(CursorMove::Jump(cursor_row, 0));
+/// Build a tui-textarea selection from the stored visual anchor to the
+/// live cursor, inclusive of the cell under the cursor. Called just
+/// before copy / cut for the char-wise Visual operator — between
+/// operators we keep the cursor free and paint the highlight through
+/// the render overlay.
+fn finalize_visual_char_selection(ed: &mut Editor<'_>) {
+    let (ar, ac) = ed.vim.visual_anchor;
+    let (cr, cc) = ed.textarea.cursor();
+    let (start, end) = if (ar, ac) <= (cr, cc) {
+        ((ar, ac), (cr, cc))
     } else {
-        // Extending up: anchor at end of anchor row, cursor at start of active row.
-        ed.textarea.move_cursor(CursorMove::Jump(anchor_row, 0));
-        ed.textarea.move_cursor(CursorMove::End);
-        ed.textarea.start_selection();
-        ed.textarea.move_cursor(CursorMove::Jump(cursor_row, 0));
-    }
+        ((cr, cc), (ar, ac))
+    };
+    ed.textarea.cancel_selection();
+    ed.textarea.move_cursor(CursorMove::Jump(start.0, start.1));
+    ed.textarea.start_selection();
+    ed.textarea.move_cursor(CursorMove::Jump(end.0, end.1));
+    // Char-wise visual is inclusive of the cursor cell; tui-textarea
+    // selection is exclusive-end, so step one forward.
+    ed.textarea.move_cursor(CursorMove::Forward);
+}
+
+/// VisualLine keeps no live tui-textarea selection — the cursor is free
+/// to sit wherever the user moved it, and the full-line highlight is
+/// painted as a post-render overlay by the draw path. Operators build
+/// a selection on demand via [`finalize_visual_line_selection`].
+fn refresh_visual_line_selection(ed: &mut Editor<'_>) {
+    ed.textarea.cancel_selection();
 }
 
 fn finalize_visual_line_selection(ed: &mut Editor<'_>) {
@@ -3029,20 +3033,16 @@ mod tests {
     }
 
     #[test]
-    fn visual_line_cursor_stays_on_active_row_at_col_zero() {
-        let mut e = editor_with("aaa\nbbb\nccc\nddd");
+    fn visual_line_preserves_cursor_column() {
+        // V should never drag the cursor off its natural column — the
+        // highlight is painted as a post-render overlay instead.
+        let mut e = editor_with("hello world\nanother one\nbye");
+        run_keys(&mut e, "lllll"); // col 5
         run_keys(&mut e, "V");
         assert_eq!(e.vim_mode(), VimMode::VisualLine);
-        // Single-line V selects the full line — cursor parks at
-        // end-of-line so tui-textarea's range covers the whole row.
-        assert_eq!(e.textarea.cursor(), (0, 3));
+        assert_eq!(e.textarea.cursor(), (0, 5));
         run_keys(&mut e, "j");
-        // Once the selection covers multiple rows, the split-corner
-        // layout kicks in and the cursor lands at col 0 of the active
-        // row.
-        assert_eq!(e.textarea.cursor(), (1, 0));
-        run_keys(&mut e, "j");
-        assert_eq!(e.textarea.cursor(), (2, 0));
+        assert_eq!(e.textarea.cursor(), (1, 5));
     }
 
     #[test]
@@ -3204,17 +3204,47 @@ mod tests {
     }
 
     #[test]
-    fn visual_line_extending_up_keeps_cursor_at_col_zero() {
+    fn visual_line_extends_both_directions() {
         let mut e = editor_with("aaa\nbbb\nccc\nddd");
-        run_keys(&mut e, "jjj");
+        run_keys(&mut e, "jjj"); // row 3, col 0
         run_keys(&mut e, "V");
-        // Single-line V: cursor sits past end-of-line so the full line
-        // is highlighted via tui-textarea's char-range selection.
-        assert_eq!(e.textarea.cursor(), (3, 3));
+        assert_eq!(e.textarea.cursor(), (3, 0));
         run_keys(&mut e, "k");
+        // Cursor is free to sit on its natural column — no forced Jump.
         assert_eq!(e.textarea.cursor(), (2, 0));
         run_keys(&mut e, "k");
         assert_eq!(e.textarea.cursor(), (1, 0));
+    }
+
+    #[test]
+    fn visual_char_preserves_cursor_column() {
+        let mut e = editor_with("hello world");
+        run_keys(&mut e, "lllll"); // col 5
+        run_keys(&mut e, "v");
+        assert_eq!(e.textarea.cursor(), (0, 5));
+        run_keys(&mut e, "ll");
+        assert_eq!(e.textarea.cursor(), (0, 7));
+    }
+
+    #[test]
+    fn visual_char_highlight_bounds_order() {
+        let mut e = editor_with("abcdef");
+        run_keys(&mut e, "lll"); // col 3
+        run_keys(&mut e, "v");
+        run_keys(&mut e, "hh"); // col 1
+        // Anchor (0, 3), cursor (0, 1). Bounds ordered: start=(0,1) end=(0,3).
+        assert_eq!(e.char_highlight(), Some(((0, 1), (0, 3))));
+    }
+
+    #[test]
+    fn visual_line_highlight_bounds() {
+        let mut e = editor_with("a\nb\nc");
+        run_keys(&mut e, "V");
+        assert_eq!(e.line_highlight(), Some((0, 0)));
+        run_keys(&mut e, "j");
+        assert_eq!(e.line_highlight(), Some((0, 1)));
+        run_keys(&mut e, "j");
+        assert_eq!(e.line_highlight(), Some((0, 2)));
     }
 
     // ─── Basic motions ─────────────────────────────────────────────────────

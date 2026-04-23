@@ -93,6 +93,34 @@ impl<'a> Editor<'a> {
     /// Bounds of the active visual-block rectangle as
     /// `(top_row, bot_row, left_col, right_col)` — all inclusive.
     /// `None` when we're not in VisualBlock mode.
+    /// Start/end `(row, col)` of the active char-wise Visual selection
+    /// (inclusive on both ends, positionally ordered). `None` when not
+    /// in Visual mode.
+    pub fn char_highlight(&self) -> Option<((usize, usize), (usize, usize))> {
+        if self.vim_mode() != VimMode::Visual {
+            return None;
+        }
+        let anchor = self.vim.visual_anchor;
+        let cursor = self.textarea.cursor();
+        let (start, end) = if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        };
+        Some((start, end))
+    }
+
+    /// Top/bottom rows of the active VisualLine selection (inclusive).
+    /// `None` when we're not in VisualLine mode.
+    pub fn line_highlight(&self) -> Option<(usize, usize)> {
+        if self.vim_mode() != VimMode::VisualLine {
+            return None;
+        }
+        let anchor = self.vim.visual_line_anchor;
+        let cursor = self.textarea.cursor().0;
+        Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+
     pub fn block_highlight(&self) -> Option<(usize, usize, usize, usize)> {
         if self.vim_mode() != VimMode::VisualBlock {
             return None;
@@ -203,8 +231,7 @@ impl<'a> Editor<'a> {
     pub fn mouse_begin_drag(&mut self) {
         if !self.vim.is_visual_char() {
             self.textarea.cancel_selection();
-            self.textarea.start_selection();
-            self.vim.enter_visual();
+            self.vim.enter_visual(self.textarea.cursor());
         }
     }
 
