@@ -2801,34 +2801,16 @@ fn draw_editor(
         let _ = editor.textarea.set_search_pattern("");
     }
 
-    // Always rebuild syntax spans from state.highlight_spans so the
-    // block-mode overlay is dropped as soon as the user leaves the mode
-    // (spans would otherwise linger until the next highlight_thread
-    // update). In block mode we append a reversed-modifier span per
-    // covered row — `Modifier::REVERSED` merges with cursor-line /
-    // cursor styles instead of being overridden by them (tui-textarea
-    // does `syntax_style.patch(overlay_style)`, which lets the overlay
-    // win on any field the overlay sets).
-    let row_count = editor.textarea.lines().len();
-    let mut by_row = syntax_spans_by_row(&state.highlight_spans, row_count);
-    if let Some((top, bot, left, right)) = editor.block_highlight() {
-        let block_style = Style::default().add_modifier(Modifier::REVERSED);
-        let lines_snapshot: Vec<String> = editor.textarea.lines().to_vec();
-        for r in top..=bot.min(row_count.saturating_sub(1)) {
-            let line_len = lines_snapshot[r].chars().count();
-            if line_len == 0 {
-                continue;
-            }
-            let start = left.min(line_len - 1);
-            let end = (right + 1).min(line_len);
-            if start < end {
-                by_row[r].push((start, end, block_style));
-            }
-        }
-    }
-    editor.textarea.set_syntax_spans(by_row);
-
     f.render_widget(&editor.textarea, chunks[1]);
+
+    // Visual-block selection is painted as a buffer-level overlay so it
+    // lands on top of any tree-sitter styling. Trying to do this via
+    // tui-textarea's per-row syntax spans doesn't work: `emit_with_syntax`
+    // picks the *first* span that contains the cursor position, so a
+    // second (block) span over an already-styled keyword is ignored.
+    if let Some((top, bot, left, right)) = editor.block_highlight() {
+        paint_block_overlay(f, &editor.textarea, chunks[1], top, bot, left, right);
+    }
 
     if let Some(msg) = diag_line {
         f.render_widget(
@@ -3478,6 +3460,69 @@ fn token_kind_style(kind: TokenKind) -> Option<Style> {
 /// Convert tree-sitter spans (row+col are byte offsets within the row) into
 /// the per-row `(start_byte, end_byte, style)` shape tui-textarea expects.
 /// Multi-row spans are split per row. Spans with no styling are skipped.
+/// Paint a reversed-style overlay for the `(top, bot, left, right)`
+/// document rectangle (all inclusive) directly into the frame buffer.
+/// Runs *after* the textarea renders so the modifier lands on whatever
+/// colors tree-sitter + the cursor-line style painted underneath.
+fn paint_block_overlay(
+    f: &mut ratatui::Frame<'_>,
+    textarea: &tui_textarea::TextArea<'_>,
+    area: Rect,
+    top: usize,
+    bot: usize,
+    left: usize,
+    right: usize,
+) {
+    let top_row = textarea.viewport_top_row();
+    let top_col = textarea.viewport_top_col();
+    let lnum_width = textarea.lines().len().to_string().len() as u16 + 2;
+    // Content rect: skip the line-number gutter and any outer block borders.
+    let content_x = area.x.saturating_add(lnum_width);
+    let content_y = area.y;
+    let content_w = area.width.saturating_sub(lnum_width);
+    let content_h = area.height;
+
+    let buf = f.buffer_mut();
+    for doc_row in top..=bot {
+        if doc_row < top_row {
+            continue;
+        }
+        let screen_dy = (doc_row - top_row) as u16;
+        if screen_dy >= content_h {
+            break;
+        }
+        let screen_y = content_y + screen_dy;
+        let row_left = left.max(top_col);
+        let row_right = right;
+        if row_right < row_left {
+            continue;
+        }
+        // Clamp against the actual line length — painting past EOL would
+        // reverse background cells that aren't part of any text.
+        let line_len = textarea
+            .lines()
+            .get(doc_row)
+            .map(|l| l.chars().count())
+            .unwrap_or(0);
+        if line_len == 0 {
+            continue;
+        }
+        let effective_right = row_right.min(line_len - 1);
+        if effective_right < row_left {
+            continue;
+        }
+        for doc_col in row_left..=effective_right {
+            let screen_dx = (doc_col - top_col) as u16;
+            if screen_dx >= content_w {
+                break;
+            }
+            let screen_x = content_x + screen_dx;
+            let cell = &mut buf[(screen_x, screen_y)];
+            cell.modifier.insert(Modifier::REVERSED);
+        }
+    }
+}
+
 fn syntax_spans_by_row(
     spans: &[HighlightSpan],
     row_count: usize,
