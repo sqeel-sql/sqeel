@@ -2815,7 +2815,10 @@ async fn run_loop(
                 // clears it on the second `g`. Anything else lands here
                 // with results_count == 0 already, except where the
                 // user hit a non-nav key between digits — flush it.
-                let keep_results_g = focus == Focus::Results
+                // Both Results and Hover use the same chord tracker;
+                // include both panes here or a `g` in hover would be
+                // wiped before the second keystroke can complete `gg`.
+                let keep_results_g = matches!(focus, Focus::Results | Focus::Hover)
                     && key.modifiers == KeyModifiers::NONE
                     && matches!(key.code, KeyCode::Char('g'))
                     && results_g_pending;
