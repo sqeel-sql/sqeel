@@ -3734,8 +3734,6 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
                     let mut st = header_style;
                     if cursor == Some(ResultsCursor::Header(i)) {
                         st = st.bg(cursor_bg);
-                    } else if active_col == Some(i) {
-                        st = st.bg(col_bg);
                     }
                     spans.push(Span::styled(format!(" {:<inner$}", c, inner = inner), st));
                     if i + 1 < r.columns.len() {
@@ -3759,7 +3757,7 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
                     });
                     let bg_style = if is_cursor {
                         Some(cursor_bg)
-                    } else if is_selected || active_col == Some(i) {
+                    } else if is_selected {
                         Some(col_bg)
                     } else {
                         None
