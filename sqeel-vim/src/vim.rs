@@ -143,6 +143,14 @@ pub enum Operator {
     /// (character at the cursor for the single-char `~` command stays
     /// its own code path in normal mode).
     ToggleCase,
+    /// `>{motion}` — indent the line range by `shiftwidth` spaces.
+    /// Always linewise, even when the motion is char-wise — mirrors
+    /// vim's behaviour where `>w` indents the current line, not the
+    /// word on it.
+    Indent,
+    /// `<{motion}` — outdent the line range (remove up to
+    /// `shiftwidth` leading spaces per line).
+    Outdent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -512,6 +520,30 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
                 // normal-mode command, then come back.
                 ed.vim.one_shot_normal = true;
                 ed.vim.mode = Mode::Normal;
+                return true;
+            }
+            Key::Char('t') => {
+                // Insert-mode indent: prepend one shiftwidth to the
+                // current line's leading whitespace. Cursor shifts
+                // right by the same amount so the user keeps typing
+                // at their logical position.
+                let (row, col) = ed.textarea.cursor();
+                indent_rows(ed, row, row, 1);
+                ed.textarea
+                    .move_cursor(CursorMove::Jump(row, col + SHIFTWIDTH));
+                return true;
+            }
+            Key::Char('d') => {
+                // Insert-mode outdent: drop up to one shiftwidth of
+                // leading whitespace. Cursor shifts left by the amount
+                // actually stripped.
+                let (row, col) = ed.textarea.cursor();
+                let before_len = ed.textarea.lines()[row].len();
+                outdent_rows(ed, row, row, 1);
+                let after_len = ed.textarea.lines()[row].len();
+                let stripped = before_len.saturating_sub(after_len);
+                let new_col = col.saturating_sub(stripped);
+                ed.textarea.move_cursor(CursorMove::Jump(row, new_col));
                 return true;
             }
             _ => {}
@@ -897,6 +929,8 @@ fn char_to_operator(c: char) -> Option<Operator> {
         'd' => Some(Operator::Delete),
         'c' => Some(Operator::Change),
         'y' => Some(Operator::Yank),
+        '>' => Some(Operator::Indent),
+        '<' => Some(Operator::Outdent),
         _ => None,
     }
 }
@@ -913,6 +947,9 @@ fn visual_operator(input: &Input) -> Option<Operator> {
         Key::Char('U') => Some(Operator::Uppercase),
         Key::Char('u') => Some(Operator::Lowercase),
         Key::Char('~') => Some(Operator::ToggleCase),
+        // Indent operators on selection.
+        Key::Char('>') => Some(Operator::Indent),
+        Key::Char('<') => Some(Operator::Outdent),
         _ => None,
     }
 }
@@ -1494,11 +1531,13 @@ fn handle_after_op(ed: &mut Editor<'_>, input: Input, op: Operator, count1: usiz
         return true;
     }
 
-    // Same-letter: dd / cc / yy / gUU / guu / g~~.
+    // Same-letter: dd / cc / yy / gUU / guu / g~~ / >> / <<.
     let double_ch = match op {
         Operator::Delete => 'd',
         Operator::Change => 'c',
         Operator::Yank => 'y',
+        Operator::Indent => '>',
+        Operator::Outdent => '<',
         Operator::Uppercase => 'U',
         Operator::Lowercase => 'u',
         Operator::ToggleCase => '~',
@@ -2139,6 +2178,18 @@ fn run_operator_over_range(
         Operator::Uppercase | Operator::Lowercase | Operator::ToggleCase => {
             apply_case_op_to_selection(ed, op, top);
         }
+        Operator::Indent | Operator::Outdent => {
+            // Indent / outdent are always linewise even when triggered
+            // by a char-wise motion (e.g. `>w` indents the whole line).
+            ed.push_undo();
+            ed.textarea.cancel_selection();
+            if op == Operator::Indent {
+                indent_rows(ed, top.0, bot.0, 1);
+            } else {
+                outdent_rows(ed, top.0, bot.0, 1);
+            }
+            ed.vim.mode = Mode::Normal;
+        }
     }
 }
 
@@ -2169,6 +2220,53 @@ fn apply_case_op_to_selection(ed: &mut Editor<'_>, op: Operator, top: (usize, us
     ed.textarea.set_yank_text(saved_yank);
     ed.vim.yank_linewise = saved_yank_linewise;
     ed.vim.mode = Mode::Normal;
+}
+
+/// Shift-width for indent operators / insert-mode indent helpers.
+/// Vim is configurable via `:set shiftwidth`; we hard-code a reasonable
+/// SQL default for now. 2 spaces matches the style in the existing
+/// test fixtures.
+pub(super) const SHIFTWIDTH: usize = 2;
+
+/// Prepend `count * SHIFTWIDTH` spaces to each row in `[top, bot]`.
+/// Rows that are empty are skipped (vim leaves blank lines alone when
+/// indenting).
+fn indent_rows(ed: &mut Editor<'_>, top: usize, bot: usize, count: usize) {
+    let width = SHIFTWIDTH * count.max(1);
+    let pad: String = " ".repeat(width);
+    let mut lines: Vec<String> = ed.textarea.lines().to_vec();
+    let bot = bot.min(lines.len().saturating_sub(1));
+    for line in lines.iter_mut().take(bot + 1).skip(top) {
+        if !line.is_empty() {
+            line.insert_str(0, &pad);
+        }
+    }
+    // Restore cursor to first non-blank of the top row so the next
+    // vertical motion aims sensibly — matches vim's `>>` convention.
+    ed.restore(lines, (top, 0));
+    move_first_non_whitespace(ed);
+}
+
+/// Remove up to `count * SHIFTWIDTH` leading spaces (or tabs) from
+/// each row in `[top, bot]`. Rows with less leading whitespace have
+/// all their indent stripped, not clipped to zero length.
+fn outdent_rows(ed: &mut Editor<'_>, top: usize, bot: usize, count: usize) {
+    let width = SHIFTWIDTH * count.max(1);
+    let mut lines: Vec<String> = ed.textarea.lines().to_vec();
+    let bot = bot.min(lines.len().saturating_sub(1));
+    for line in lines.iter_mut().take(bot + 1).skip(top) {
+        let strip: usize = line
+            .chars()
+            .take(width)
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
+        if strip > 0 {
+            let byte_len: usize = line.chars().take(strip).map(|c| c.len_utf8()).sum();
+            line.drain(..byte_len);
+        }
+    }
+    ed.restore(lines, (top, 0));
+    move_first_non_whitespace(ed);
 }
 
 fn toggle_case_str(s: &str) -> String {
@@ -2321,6 +2419,16 @@ fn execute_line_op(ed: &mut Editor<'_>, op: Operator, count: usize) {
             // the first non-blank of the starting line.
             move_first_non_whitespace(ed);
         }
+        Operator::Indent | Operator::Outdent => {
+            // `>>` / `N>>` / `<<` / `N<<` — linewise indent / outdent.
+            ed.push_undo();
+            if op == Operator::Indent {
+                indent_rows(ed, row, end_row, 1);
+            } else {
+                outdent_rows(ed, row, end_row, 1);
+            }
+            ed.vim.mode = Mode::Normal;
+        }
     }
 }
 
@@ -2369,6 +2477,18 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                     apply_case_op_to_selection(ed, op, (top, 0));
                     move_first_non_whitespace(ed);
                 }
+                Operator::Indent | Operator::Outdent => {
+                    ed.push_undo();
+                    ed.textarea.cancel_selection();
+                    let (cursor_row, _) = ed.textarea.cursor();
+                    let bot = cursor_row.max(ed.vim.visual_line_anchor);
+                    if op == Operator::Indent {
+                        indent_rows(ed, top, bot, 1);
+                    } else {
+                        outdent_rows(ed, top, bot, 1);
+                    }
+                    ed.vim.mode = Mode::Normal;
+                }
             }
         }
         Mode::Visual => {
@@ -2407,6 +2527,19 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                     let cursor = ed.textarea.cursor();
                     let (top, _) = order(anchor, cursor);
                     apply_case_op_to_selection(ed, op, top);
+                }
+                Operator::Indent | Operator::Outdent => {
+                    ed.push_undo();
+                    ed.textarea.cancel_selection();
+                    let anchor = ed.vim.visual_anchor;
+                    let cursor = ed.textarea.cursor();
+                    let (top, bot) = order(anchor, cursor);
+                    if op == Operator::Indent {
+                        indent_rows(ed, top.0, bot.0, 1);
+                    } else {
+                        outdent_rows(ed, top.0, bot.0, 1);
+                    }
+                    ed.vim.mode = Mode::Normal;
                 }
             }
         }
@@ -2513,6 +2646,18 @@ fn apply_block_operator(ed: &mut Editor<'_>, op: Operator) {
             transform_block_case(ed, op, top, bot, left, right);
             ed.vim.mode = Mode::Normal;
             ed.textarea.move_cursor(CursorMove::Jump(top, left));
+        }
+        Operator::Indent | Operator::Outdent => {
+            // VisualBlock `>` / `<` falls back to linewise indent over
+            // the block's row range — vim does the same (column-wise
+            // indent/outdent doesn't make sense).
+            ed.push_undo();
+            if op == Operator::Indent {
+                indent_rows(ed, top, bot, 1);
+            } else {
+                outdent_rows(ed, top, bot, 1);
+            }
+            ed.vim.mode = Mode::Normal;
         }
     }
 }
@@ -3306,6 +3451,10 @@ mod tests {
                     "Down" => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
                     "Left" => KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
                     "Right" => KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                    // Vim-style literal `<` escape so tests can type
+                    // the outdent operator without colliding with the
+                    // `<tag>` notation this helper uses for special keys.
+                    "lt" => KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE),
                     s if s.starts_with("C-") => {
                         let ch = s.chars().nth(2).unwrap();
                         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
@@ -3570,6 +3719,108 @@ mod tests {
         assert_eq!(e.textarea.lines()[1], "TWO");
         assert_eq!(e.textarea.lines()[2], "THREE");
         assert_eq!(e.textarea.lines()[3], "four");
+    }
+
+    #[test]
+    fn double_gt_indents_current_line() {
+        let mut e = editor_with("hello");
+        run_keys(&mut e, ">>");
+        assert_eq!(e.textarea.lines()[0], "  hello");
+        // Cursor lands on first non-blank.
+        assert_eq!(e.textarea.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn double_lt_outdents_current_line() {
+        let mut e = editor_with("    hello");
+        run_keys(&mut e, "<lt><lt>");
+        assert_eq!(e.textarea.lines()[0], "  hello");
+        assert_eq!(e.textarea.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn count_double_gt_indents_multiple_lines() {
+        let mut e = editor_with("a\nb\nc\nd");
+        // `3>>` indents 3 lines starting at cursor.
+        run_keys(&mut e, "3>>");
+        assert_eq!(e.textarea.lines()[0], "  a");
+        assert_eq!(e.textarea.lines()[1], "  b");
+        assert_eq!(e.textarea.lines()[2], "  c");
+        assert_eq!(e.textarea.lines()[3], "d");
+    }
+
+    #[test]
+    fn outdent_clips_ragged_leading_whitespace() {
+        // Only one space of indent — outdent should strip what's
+        // there, not leave anything negative.
+        let mut e = editor_with(" x");
+        run_keys(&mut e, "<lt><lt>");
+        assert_eq!(e.textarea.lines()[0], "x");
+    }
+
+    #[test]
+    fn indent_motion_is_always_linewise() {
+        // `>w` indents the current line (linewise) — it doesn't
+        // insert spaces into the middle of the word.
+        let mut e = editor_with("foo bar");
+        run_keys(&mut e, ">w");
+        assert_eq!(e.textarea.lines()[0], "  foo bar");
+    }
+
+    #[test]
+    fn indent_text_object_extends_over_paragraph() {
+        let mut e = editor_with("a\nb\n\nc\nd");
+        // `>ap` indents the whole paragraph (rows 0..=1).
+        run_keys(&mut e, ">ap");
+        assert_eq!(e.textarea.lines()[0], "  a");
+        assert_eq!(e.textarea.lines()[1], "  b");
+        assert_eq!(e.textarea.lines()[2], "");
+        assert_eq!(e.textarea.lines()[3], "c");
+    }
+
+    #[test]
+    fn visual_line_indent_shifts_selected_rows() {
+        let mut e = editor_with("x\ny\nz");
+        // Vj selects rows 0..=1 linewise; `>` indents.
+        run_keys(&mut e, "Vj>");
+        assert_eq!(e.textarea.lines()[0], "  x");
+        assert_eq!(e.textarea.lines()[1], "  y");
+        assert_eq!(e.textarea.lines()[2], "z");
+    }
+
+    #[test]
+    fn outdent_empty_line_is_noop() {
+        let mut e = editor_with("\nfoo");
+        run_keys(&mut e, "<lt><lt>");
+        assert_eq!(e.textarea.lines()[0], "");
+    }
+
+    #[test]
+    fn indent_skips_empty_lines() {
+        // Vim convention: `>>` on an empty line doesn't pad it with
+        // trailing whitespace.
+        let mut e = editor_with("");
+        run_keys(&mut e, ">>");
+        assert_eq!(e.textarea.lines()[0], "");
+    }
+
+    #[test]
+    fn insert_ctrl_t_indents_current_line() {
+        let mut e = editor_with("x");
+        // Enter insert, Ctrl-t indents the line; cursor advances too.
+        run_keys(&mut e, "i<C-t>");
+        assert_eq!(e.textarea.lines()[0], "  x");
+        // After insert-mode start `i` cursor was at (0, 0); Ctrl-t
+        // shifts it by SHIFTWIDTH=2.
+        assert_eq!(e.textarea.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn insert_ctrl_d_outdents_current_line() {
+        let mut e = editor_with("    x");
+        // Enter insert-at-end `A`, Ctrl-d outdents by shiftwidth.
+        run_keys(&mut e, "A<C-d>");
+        assert_eq!(e.textarea.lines()[0], "  x");
     }
 
     #[test]
