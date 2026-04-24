@@ -479,6 +479,12 @@ async fn run_loop(
     let mut last_schema_loading = false;
     // Pending first `g` for the schema-pane `gg` chord. Cleared by any other key.
     let mut schema_g_pending = false;
+    // Pending first `g` for the results-pane `gg` chord.
+    let mut results_g_pending = false;
+    // Running count prefix for results-pane nav (digits before j/k/h/l).
+    // `0` is context-dependent: a leading `0` is "row start", an `0` mid-
+    // count is a digit. Cleared after the next nav keystroke.
+    let mut results_count: usize = 0;
     loop {
         let mut needs_redraw = event_triggered_redraw;
         event_triggered_redraw = false;
@@ -2140,38 +2146,105 @@ async fn run_loop(
                     (KeyModifiers::NONE, KeyCode::Char('/')) if focus == Focus::Schema => {
                         schema_search.start();
                     }
+                    // Results pane: digit count prefix. `0` only counts
+                    // as a digit when a count is already in progress —
+                    // otherwise it's the `0` row-start binding below.
+                    (KeyModifiers::NONE, KeyCode::Char(c @ '0'..='9'))
+                        if focus == Focus::Results
+                            && (c != '0' || results_count > 0)
+                            && state.lock().unwrap().active_ddl_text().is_none() =>
+                    {
+                        results_count = results_count
+                            .saturating_mul(10)
+                            .saturating_add((c as u8 - b'0') as usize);
+                    }
                     // Results pane navigation
                     (KeyModifiers::NONE, KeyCode::Char('j')) if focus == Focus::Results => {
+                        let n = results_count.max(1);
+                        results_count = 0;
                         let mut s = state.lock().unwrap();
                         if s.active_ddl_text().is_some() {
-                            s.scroll_results_down();
+                            for _ in 0..n {
+                                s.scroll_results_down();
+                            }
                         } else {
-                            s.results_cursor_down();
+                            for _ in 0..n {
+                                s.results_cursor_down();
+                            }
                         }
                     }
                     (KeyModifiers::NONE, KeyCode::Char('k')) if focus == Focus::Results => {
+                        let n = results_count.max(1);
+                        results_count = 0;
                         let mut s = state.lock().unwrap();
                         if s.active_ddl_text().is_some() {
-                            s.scroll_results_up();
+                            for _ in 0..n {
+                                s.scroll_results_up();
+                            }
                         } else {
-                            s.results_cursor_up();
+                            for _ in 0..n {
+                                s.results_cursor_up();
+                            }
                         }
                     }
                     (KeyModifiers::NONE, KeyCode::Char('l')) if focus == Focus::Results => {
+                        let n = results_count.max(1);
+                        results_count = 0;
                         let mut s = state.lock().unwrap();
                         if s.active_ddl_text().is_some() {
-                            s.scroll_results_right();
+                            for _ in 0..n {
+                                s.scroll_results_right();
+                            }
                         } else {
-                            s.results_cursor_right();
+                            for _ in 0..n {
+                                s.results_cursor_right();
+                            }
                         }
                     }
                     (KeyModifiers::NONE, KeyCode::Char('h')) if focus == Focus::Results => {
+                        let n = results_count.max(1);
+                        results_count = 0;
                         let mut s = state.lock().unwrap();
                         if s.active_ddl_text().is_some() {
-                            s.scroll_results_left();
+                            for _ in 0..n {
+                                s.scroll_results_left();
+                            }
                         } else {
-                            s.results_cursor_left();
+                            for _ in 0..n {
+                                s.results_cursor_left();
+                            }
                         }
+                    }
+                    // `gg` chord → first row.
+                    (KeyModifiers::NONE, KeyCode::Char('g')) if focus == Focus::Results => {
+                        if results_g_pending {
+                            state.lock().unwrap().results_cursor_first_row();
+                            results_count = 0;
+                            results_g_pending = false;
+                        } else {
+                            results_g_pending = true;
+                        }
+                    }
+                    // `G` → last row.
+                    (KeyModifiers::SHIFT, KeyCode::Char('G'))
+                    | (KeyModifiers::NONE, KeyCode::Char('G'))
+                        if focus == Focus::Results =>
+                    {
+                        state.lock().unwrap().results_cursor_last_row();
+                        results_count = 0;
+                    }
+                    // `0` → first column of current row. Shadowed by
+                    // digit-count arm above when a count is in progress.
+                    (KeyModifiers::NONE, KeyCode::Char('0')) if focus == Focus::Results => {
+                        state.lock().unwrap().results_cursor_row_start();
+                        results_count = 0;
+                    }
+                    // `$` → last column of current row.
+                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char('$'))
+                        if focus == Focus::Results =>
+                    {
+                        state.lock().unwrap().results_cursor_row_end();
+                        results_count = 0;
                     }
                     // Enter visual-line / visual-block selection in results.
                     (KeyModifiers::SHIFT, KeyCode::Char('V'))
@@ -2447,6 +2520,25 @@ async fn run_loop(
                 }
                 if !keep_schema_g_pending {
                     schema_g_pending = false;
+                }
+                // Clear pending `g` and digit count once any key that
+                // wasn't part of the chord/count consumed its turn.
+                // Count arms above reset to 0 when they fire; `gg`
+                // clears it on the second `g`. Anything else lands here
+                // with results_count == 0 already, except where the
+                // user hit a non-nav key between digits — flush it.
+                let keep_results_g = focus == Focus::Results
+                    && key.modifiers == KeyModifiers::NONE
+                    && matches!(key.code, KeyCode::Char('g'))
+                    && results_g_pending;
+                if !keep_results_g {
+                    results_g_pending = false;
+                }
+                let keep_results_count = focus == Focus::Results
+                    && key.modifiers == KeyModifiers::NONE
+                    && matches!(key.code, KeyCode::Char('0'..='9'));
+                if !keep_results_count {
+                    results_count = 0;
                 }
             } // Event::Key
             Event::Resize(_, _) => {
@@ -5086,8 +5178,10 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
         (
             "Results Pane",
             &[
-                ("j / k", "Scroll down / up"),
-                ("h / l", "Scroll left / right"),
+                ("j / k", "Down / up (count prefix)"),
+                ("h / l", "Left / right (count prefix)"),
+                ("gg / G", "First / last row"),
+                ("0 / $", "First / last column"),
                 ("H / L", "Prev / next result tab"),
                 ("V", "Visual-line select rows"),
                 ("v / Ctrl+V", "Visual-block select rectangle"),

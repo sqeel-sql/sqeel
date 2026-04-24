@@ -891,6 +891,90 @@ impl AppState {
         });
     }
 
+    /// `gg` — jump to the first body row, keeping the current column.
+    pub fn results_cursor_first_row(&mut self) {
+        self.with_active_tab(|t| {
+            t.cursor = match (&t.kind, t.cursor) {
+                (ResultsPane::Results(r), ResultsCursor::Cell { col, .. })
+                    if !r.rows.is_empty() =>
+                {
+                    ResultsCursor::Cell { row: 0, col }
+                }
+                (ResultsPane::Results(r), ResultsCursor::Header(c)) if !r.rows.is_empty() => {
+                    ResultsCursor::Cell { row: 0, col: c }
+                }
+                (ResultsPane::Error(_), _) | (ResultsPane::Cancelled, _) => {
+                    ResultsCursor::MessageLine(0)
+                }
+                (_, c) => c,
+            };
+        });
+    }
+
+    /// `G` — jump to the last body row, keeping the current column.
+    pub fn results_cursor_last_row(&mut self) {
+        self.with_active_tab(|t| {
+            t.cursor = match (&t.kind, t.cursor) {
+                (ResultsPane::Results(r), ResultsCursor::Cell { col, .. })
+                    if !r.rows.is_empty() =>
+                {
+                    ResultsCursor::Cell {
+                        row: r.rows.len() - 1,
+                        col,
+                    }
+                }
+                (ResultsPane::Results(r), ResultsCursor::Header(c)) if !r.rows.is_empty() => {
+                    ResultsCursor::Cell {
+                        row: r.rows.len() - 1,
+                        col: c,
+                    }
+                }
+                (ResultsPane::Error(e), _) => {
+                    let n = e.lines().count();
+                    if n > 0 {
+                        ResultsCursor::MessageLine(n - 1)
+                    } else {
+                        t.cursor
+                    }
+                }
+                (_, c) => c,
+            };
+        });
+    }
+
+    /// `0` — jump to the first column of the current row.
+    pub fn results_cursor_row_start(&mut self) {
+        self.with_active_tab(|t| {
+            t.cursor = match (&t.kind, t.cursor) {
+                (ResultsPane::Results(_), ResultsCursor::Header(_)) => ResultsCursor::Header(0),
+                (ResultsPane::Results(_), ResultsCursor::Cell { row, .. }) => {
+                    ResultsCursor::Cell { row, col: 0 }
+                }
+                (_, c) => c,
+            };
+        });
+    }
+
+    /// `$` — jump to the last column of the current row.
+    pub fn results_cursor_row_end(&mut self) {
+        self.with_active_tab(|t| {
+            t.cursor = match (&t.kind, t.cursor) {
+                (ResultsPane::Results(r), ResultsCursor::Header(_)) if !r.columns.is_empty() => {
+                    ResultsCursor::Header(r.columns.len() - 1)
+                }
+                (ResultsPane::Results(r), ResultsCursor::Cell { row, .. })
+                    if !r.columns.is_empty() =>
+                {
+                    ResultsCursor::Cell {
+                        row,
+                        col: r.columns.len() - 1,
+                    }
+                }
+                (_, c) => c,
+            };
+        });
+    }
+
     /// Yank the entire row under the cursor as tab-separated values. Returns
     /// `None` when the active tab isn't a Results pane or has no row selected.
     pub fn results_cursor_yank_row(&self) -> Option<(String, &'static str)> {
@@ -2639,6 +2723,67 @@ mod tests {
         assert!(s.result_tabs[0].selection.is_some());
         s.results_clear_selection();
         assert!(s.result_tabs[0].selection.is_none());
+    }
+
+    fn seeded_results() -> Arc<Mutex<AppState>> {
+        let state = AppState::new();
+        {
+            let mut s = state.lock().unwrap();
+            s.set_results(QueryResult {
+                columns: vec!["a".into(), "b".into(), "c".into()],
+                rows: (0..5)
+                    .map(|i| vec![format!("{i}a"), format!("{i}b"), format!("{i}c")])
+                    .collect(),
+                col_widths: vec![],
+            });
+        }
+        state
+    }
+
+    #[test]
+    fn results_cursor_first_and_last_row_from_cell() {
+        let state = seeded_results();
+        let mut s = state.lock().unwrap();
+        s.result_tabs[0].cursor = ResultsCursor::Cell { row: 2, col: 1 };
+        s.results_cursor_first_row();
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 0, col: 1 }
+        );
+        s.results_cursor_last_row();
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 4, col: 1 }
+        );
+    }
+
+    #[test]
+    fn results_row_start_and_end_clamp_to_columns() {
+        let state = seeded_results();
+        let mut s = state.lock().unwrap();
+        s.result_tabs[0].cursor = ResultsCursor::Cell { row: 2, col: 1 };
+        s.results_cursor_row_start();
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 2, col: 0 }
+        );
+        s.results_cursor_row_end();
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 2, col: 2 }
+        );
+    }
+
+    #[test]
+    fn results_first_row_from_header_lands_on_body() {
+        let state = seeded_results();
+        let mut s = state.lock().unwrap();
+        s.result_tabs[0].cursor = ResultsCursor::Header(2);
+        s.results_cursor_first_row();
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 0, col: 2 }
+        );
     }
 
     #[test]
