@@ -5058,43 +5058,170 @@ fn draw_hover_popup(
         return;
     }
 
-    // Target width: widest line, clamped to a reasonable chunk of the
-    // editor area. Height: count of logical lines, wrapping isn't
-    // applied — long lines just truncate at the popup edge.
-    let longest = text
-        .lines()
-        .map(|l| l.chars().count() as u16)
+    let lines = format_hover_lines(text);
+    // Visual width of each rendered line (strip ANSI-style markers
+    // already consumed by the span builder — we only see the plain
+    // chars here).
+    let longest = lines
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>() as u16
+        })
         .max()
         .unwrap_or(0);
-    let popup_w = (longest + 4).clamp(24, inner_w.min(80));
-    let line_count = text.lines().count() as u16;
-    let popup_h = (line_count + 2).clamp(3, inner_h.min(20));
+    // Leave room for borders (2) + side padding (2). Cap at 80 cols or
+    // whatever the editor can fit.
+    let target_w = (longest + 4).clamp(24, inner_w.min(80));
+    let target_h = (lines.len() as u16 + 2).clamp(3, inner_h.min(20));
 
     let cx = inner_x.saturating_add(cur_col as u16);
     let cy = inner_y.saturating_add(cur_row as u16);
     // Prefer rendering below the cursor; flip above when the popup
     // would clip the bottom of the editor.
-    let popup_y = if cy + 2 + popup_h <= inner_y + inner_h {
+    let popup_y = if cy + 2 + target_h <= inner_y + inner_h {
         cy + 2
     } else {
-        cy.saturating_sub(popup_h)
+        cy.saturating_sub(target_h)
     };
-    let popup_x = cx.min((inner_x + inner_w).saturating_sub(popup_w));
+    let popup_x = cx.min((inner_x + inner_w).saturating_sub(target_w));
 
     let popup = Rect {
         x: popup_x,
         y: popup_y,
-        width: popup_w,
-        height: popup_h,
+        width: target_w,
+        height: target_h,
     };
     f.render_widget(Clear, popup);
+    let u = ui();
+    let title = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            "󰋼 Hover",
+            Style::default()
+                .fg(u.dialog_border)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+    ]);
     let block = Block::default()
-        .title(" Hover  (any key to dismiss) ")
+        .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ui().dialog_border));
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(u.dialog_border))
+        .padding(ratatui::widgets::Padding::horizontal(1));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
-    f.render_widget(Paragraph::new(text.to_string()), inner);
+    f.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        inner,
+    );
+}
+
+/// Parse a hover response (plain text or light markdown) into styled
+/// ratatui lines. Handles: ATX headers (`#`, `##`, `###`), fenced code
+/// blocks (```lang ... ```), inline backticks, and `**bold**`. Anything
+/// we don't recognise is passed through verbatim so mangled input
+/// still reads as close to the original as possible.
+fn format_hover_lines(text: &str) -> Vec<Line<'static>> {
+    let u = ui();
+    let header_style = Style::default()
+        .fg(u.dialog_border)
+        .add_modifier(Modifier::BOLD);
+    let subheader_style = Style::default()
+        .fg(u.sql_keyword)
+        .add_modifier(Modifier::BOLD);
+    let code_style = Style::default().fg(u.sql_ident);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut in_code = false;
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        if let Some(rest) = line.strip_prefix("```") {
+            in_code = !in_code;
+            // Skip the fence marker itself; `rest` is the language tag
+            // (e.g. "sql") — discard it so it doesn't render as a
+            // dangling line.
+            let _ = rest;
+            continue;
+        }
+        if in_code {
+            out.push(Line::from(Span::styled(line.to_string(), code_style)));
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("### ") {
+            out.push(Line::from(Span::styled(rest.to_string(), subheader_style)));
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("## ") {
+            out.push(Line::from(Span::styled(rest.to_string(), subheader_style)));
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("# ") {
+            out.push(Line::from(Span::styled(rest.to_string(), header_style)));
+            continue;
+        }
+        if line.is_empty() {
+            out.push(Line::from(""));
+            continue;
+        }
+        out.push(render_hover_inline(line, code_style));
+    }
+    if out.is_empty() {
+        out.push(Line::from(""));
+    }
+    out
+}
+
+/// Span-split a single line on inline markdown emphasis tokens:
+/// `` `code` `` (mono/identifier colour) and `**bold**` (bold modifier).
+/// Unmatched delimiters are rendered literally.
+fn render_hover_inline(line: &str, code_style: Style) -> Line<'static> {
+    let bold_style = Style::default().add_modifier(Modifier::BOLD);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut buf = String::new();
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let flush_plain = |buf: &mut String, spans: &mut Vec<Span<'static>>| {
+        if !buf.is_empty() {
+            spans.push(Span::raw(std::mem::take(buf)));
+        }
+    };
+    while i < bytes.len() {
+        // `**bold**`
+        if i + 1 < bytes.len()
+            && bytes[i] == b'*'
+            && bytes[i + 1] == b'*'
+            && let Some(end) = line[i + 2..].find("**")
+        {
+            flush_plain(&mut buf, &mut spans);
+            let text = &line[i + 2..i + 2 + end];
+            spans.push(Span::styled(text.to_string(), bold_style));
+            i += 2 + end + 2;
+            continue;
+        }
+        // `` `code` ``
+        if bytes[i] == b'`'
+            && let Some(end) = line[i + 1..].find('`')
+        {
+            flush_plain(&mut buf, &mut spans);
+            let text = &line[i + 1..i + 1 + end];
+            spans.push(Span::styled(text.to_string(), code_style));
+            i += 1 + end + 1;
+            continue;
+        }
+        // Fall-through: copy one full UTF-8 char — ranging forward to
+        // the next char boundary so multi-byte sequences stay intact.
+        let mut end = i + 1;
+        while end < bytes.len() && !line.is_char_boundary(end) {
+            end += 1;
+        }
+        buf.push_str(&line[i..end]);
+        i = end;
+    }
+    flush_plain(&mut buf, &mut spans);
+    Line::from(spans)
 }
 
 fn draw_completions(
@@ -5597,7 +5724,8 @@ fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect)
 
 #[cfg(test)]
 mod tests {
-    use super::{CommentBody, comment_body_from_line};
+    use super::{CommentBody, comment_body_from_line, format_hover_lines, render_hover_inline};
+    use ratatui::style::{Modifier, Style};
     use sqeel_core::{
         AppState,
         state::{Focus, QueryResult},
@@ -6174,5 +6302,61 @@ mod tests {
                 "row {row} missing Keyword span at col 0..4; row spans = {spans:?}"
             );
         }
+    }
+
+    #[test]
+    fn hover_formatter_strips_h1_header_markers() {
+        let lines = format_hover_lines("# schema.users\nbody");
+        assert_eq!(lines[0].spans[0].content, "schema.users");
+        assert!(
+            lines[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert_eq!(lines[1].spans[0].content, "body");
+    }
+
+    #[test]
+    fn hover_formatter_strips_code_fence_markers() {
+        let text = "before\n```sql\nSELECT 1\n```\nafter";
+        let lines = format_hover_lines(text);
+        let joined: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<Vec<&str>>()
+                    .join("")
+            })
+            .collect();
+        assert_eq!(joined, vec!["before", "SELECT 1", "after"]);
+    }
+
+    #[test]
+    fn hover_inline_splits_backtick_code() {
+        let line = render_hover_inline("text `code` more", Style::default());
+        let contents: Vec<String> = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(contents.iter().any(|c| c == "code"));
+    }
+
+    #[test]
+    fn hover_inline_splits_bold() {
+        let line = render_hover_inline("a **bold** b", Style::default());
+        let bold_span = line
+            .spans
+            .iter()
+            .find(|s| s.content == "bold")
+            .expect("bold span present");
+        assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn hover_inline_handles_unicode_chars() {
+        // Unicode fall-through path must preserve multi-byte chars.
+        let line = render_hover_inline("tablé", Style::default());
+        let joined: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(joined, "tablé");
     }
 }
