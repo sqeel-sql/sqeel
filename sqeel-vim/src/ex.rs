@@ -280,7 +280,7 @@ impl<'a> Editor<'a> {
     /// Called by ex-command handlers after they rewrite the buffer.
     /// Ensures dirty tracking and undo bookkeeping stay consistent.
     fn mark_dirty_after_ex(&mut self) {
-        self.content_dirty = true;
+        self.mark_content_dirty();
     }
 }
 

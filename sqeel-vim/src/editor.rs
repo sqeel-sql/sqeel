@@ -35,6 +35,11 @@ pub struct Editor<'a> {
     pub(super) redo_stack: Vec<(Vec<String>, (usize, usize))>,
     /// Set whenever the buffer content changes; cleared by `take_dirty`.
     pub(super) content_dirty: bool,
+    /// Cached snapshot of `lines().join("\n") + "\n"` wrapped in an Arc
+    /// so repeated `content_arc()` calls within the same un-mutated
+    /// window are free (ref-count bump instead of a full-buffer join).
+    /// Invalidated by every [`mark_content_dirty`] call.
+    pub(super) cached_content: Option<std::sync::Arc<String>>,
     /// Last rendered viewport height (text rows only, no chrome). Written
     /// by the draw path via [`set_viewport_height`] so the scroll helpers
     /// can clamp the cursor to stay visible without plumbing the height
@@ -54,6 +59,7 @@ impl<'a> Editor<'a> {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             content_dirty: false,
+            cached_content: None,
             viewport_height: AtomicU16::new(0),
         }
     }
@@ -71,8 +77,16 @@ impl<'a> Editor<'a> {
 
     /// Calls `f` on the textarea and marks the content dirty.
     pub(super) fn mutate<R>(&mut self, f: impl FnOnce(&mut TextArea<'a>) -> R) -> R {
-        self.content_dirty = true;
+        self.mark_content_dirty();
         f(&mut self.textarea)
+    }
+
+    /// Single choke-point for "the buffer just changed". Sets the
+    /// dirty flag and drops the cached `content_arc` snapshot so
+    /// subsequent reads rebuild from the live textarea.
+    pub(super) fn mark_content_dirty(&mut self) {
+        self.content_dirty = true;
+        self.cached_content = None;
     }
 
     /// Returns true if content changed since the last call, then clears the flag.
@@ -182,6 +196,19 @@ impl<'a> Editor<'a> {
         s
     }
 
+    /// Same logical output as [`content`], but returns a cached
+    /// `Arc<String>` so back-to-back reads within an un-mutated window
+    /// are ref-count bumps instead of multi-MB joins. The cache is
+    /// invalidated by every [`mark_content_dirty`] call.
+    pub fn content_arc(&mut self) -> std::sync::Arc<String> {
+        if let Some(arc) = &self.cached_content {
+            return std::sync::Arc::clone(arc);
+        }
+        let arc = std::sync::Arc::new(self.content());
+        self.cached_content = Some(std::sync::Arc::clone(&arc));
+        arc
+    }
+
     pub fn set_content(&mut self, text: &str) {
         let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
         while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
@@ -198,7 +225,7 @@ impl<'a> Editor<'a> {
         }
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.content_dirty = true;
+        self.mark_content_dirty();
     }
 
     /// Install `text` as the pending yank buffer so the next `p`/`P` pastes
@@ -378,7 +405,7 @@ impl<'a> Editor<'a> {
         self.textarea.set_max_histories(0);
         self.textarea
             .move_cursor(CursorMove::Jump(cursor.0, cursor.1));
-        self.content_dirty = true;
+        self.mark_content_dirty();
     }
 
     /// Returns true if the key was consumed by the editor.
@@ -857,5 +884,38 @@ mod tests {
             "set_content should leave content_dirty=true"
         );
         assert!(!e.take_dirty(), "take_dirty should clear the flag");
+    }
+
+    #[test]
+    fn content_arc_returns_same_arc_until_mutation() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        let a = e.content_arc();
+        let b = e.content_arc();
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "repeated content_arc() should hit the cache"
+        );
+
+        // Any mutation must invalidate the cache.
+        e.handle_key(key(KeyCode::Char('i')));
+        e.handle_key(key(KeyCode::Char('!')));
+        let c = e.content_arc();
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &c),
+            "mutation should invalidate content_arc() cache"
+        );
+        assert!(c.contains('!'));
+    }
+
+    #[test]
+    fn content_arc_cache_invalidated_by_set_content() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("one");
+        let a = e.content_arc();
+        e.set_content("two");
+        let b = e.content_arc();
+        assert!(!std::sync::Arc::ptr_eq(&a, &b));
+        assert!(b.starts_with("two"));
     }
 }

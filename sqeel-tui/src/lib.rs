@@ -571,7 +571,7 @@ async fn run_loop(
         let content: Option<Arc<String>> =
             if should_publish && buffer_bytes <= HEAVY_PIPELINE_MAX_BYTES {
                 content_dirty_since = None;
-                Some(Arc::new(editor.content()))
+                Some(editor.content_arc())
             } else if should_publish {
                 // Over the size gate — clear the dirty timer so we don't
                 // re-enter every iteration, and drop any completion popup so
@@ -1060,7 +1060,7 @@ async fn run_loop(
                                     let mut s = state.lock().unwrap();
                                     s.focus = Focus::Editor;
                                     if editor_dirty {
-                                        s.editor_content = Arc::new(editor.content());
+                                        s.editor_content = editor.content_arc();
                                         s.mark_active_dirty();
                                         editor_dirty = false;
                                     }
@@ -1405,7 +1405,7 @@ async fn run_loop(
                             quit_prompt = None;
                             let pending = {
                                 let mut s = state.lock().unwrap();
-                                s.editor_content = Arc::new(editor.content());
+                                s.editor_content = editor.content_arc();
                                 s.editor_content_synced = true;
                                 s.mark_active_dirty();
                                 s.prepare_save_all_dirty()
@@ -1445,7 +1445,7 @@ async fn run_loop(
                                     let local_dirty = editor_dirty;
                                     let any_dirty = {
                                         let mut s = state.lock().unwrap();
-                                        s.editor_content = Arc::new(editor.content());
+                                        s.editor_content = editor.content_arc();
                                         s.editor_content_synced = true;
                                         editor_dirty = false;
                                         if local_dirty {
@@ -1483,7 +1483,7 @@ async fn run_loop(
                                         // `editor_content_synced = false`
                                         // and the save falls back to
                                         // stale `tab.content`.
-                                        s.editor_content = Arc::new(editor.content());
+                                        s.editor_content = editor.content_arc();
                                         s.editor_content_synced = true;
                                         s.prepare_save_active_tab()
                                     };
@@ -1645,7 +1645,7 @@ async fn run_loop(
                                 let mut s = state.lock().unwrap();
                                 if let Some(idx) = s.tabs.iter().position(|t| &t.name == name) {
                                     if editor_dirty {
-                                        s.editor_content = Arc::new(editor.content());
+                                        s.editor_content = editor.content_arc();
                                         s.mark_active_dirty();
                                         editor_dirty = false;
                                     }
@@ -1892,7 +1892,7 @@ async fn run_loop(
                         let content = {
                             let mut s = state.lock().unwrap();
                             if editor_dirty {
-                                s.editor_content = Arc::new(editor.content());
+                                s.editor_content = editor.content_arc();
                                 s.mark_active_dirty();
                                 editor_dirty = false;
                             }
@@ -1912,7 +1912,7 @@ async fn run_loop(
                         let content = {
                             let mut s = state.lock().unwrap();
                             if editor_dirty {
-                                s.editor_content = Arc::new(editor.content());
+                                s.editor_content = editor.content_arc();
                                 s.mark_active_dirty();
                                 editor_dirty = false;
                             }

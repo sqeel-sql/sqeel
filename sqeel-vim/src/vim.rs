@@ -517,7 +517,7 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
         session.row_max = session.row_max.max(row);
     }
     if ed.textarea.input(input) {
-        ed.content_dirty = true;
+        ed.mark_content_dirty();
         if let Some(ref mut session) = ed.vim.insert_session {
             let (row, _) = ed.textarea.cursor();
             session.row_min = session.row_min.min(row);
@@ -2445,7 +2445,7 @@ fn reset_textarea_lines(ed: &mut Editor<'_>, lines: Vec<String>) {
     if !carried.is_empty() {
         ed.textarea.set_yank_text(carried);
     }
-    ed.content_dirty = true;
+    ed.mark_content_dirty();
 }
 
 // ─── Visual-line helpers ───────────────────────────────────────────────────
