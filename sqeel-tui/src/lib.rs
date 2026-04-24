@@ -694,8 +694,19 @@ async fn run_loop(
                 // changed: re-apply the cached highlight so the cursor
                 // -line blending and diagnostic underlines update
                 // without paying another tree-sitter parse.
+                //
+                // Skip while the user is mid-mouse-drag: every pixel-
+                // row crossing during a drag would otherwise trigger a
+                // full window splice (O(window_rows)), dominating the
+                // drag event loop and producing visible selection lag.
+                // The visual selection still renders via the post-
+                // render overlay; only the cursor-line marker re-
+                // blending is deferred until the drag ends.
                 let cursor_row = editor.textarea.cursor().0;
-                if let Some(result) = last_highlight_result.as_ref() {
+                let dragging_editor = mouse_drag_pane == Some(Focus::Editor);
+                if let Some(result) = last_highlight_result.as_ref()
+                    && !dragging_editor
+                {
                     let diagnostics = merged_diagnostics(&s.lsp_diagnostics, &result.parse_errors);
                     if cursor_row != last_marker_cursor_row
                         || diagnostics.len() != last_marker_diag_len
