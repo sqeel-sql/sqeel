@@ -294,6 +294,33 @@ impl LspWriter {
         self.tx.send(framed).await?;
         Ok(())
     }
+
+    /// Fire-and-forget completion request. Returns the request ID
+    /// synchronously (derived from the shared counter) so the caller
+    /// can use it to dedupe late responses. The serialize + mpsc send
+    /// run on a spawned task, so a slow writer channel doesn't stall
+    /// the render loop.
+    pub fn request_completion(&self, uri: Uri, line: u32, col: u32) -> i64 {
+        let id = next_id();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let params = json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": col }
+            });
+            let msg = RpcRequest {
+                jsonrpc: "2.0",
+                id,
+                method: "textDocument/completion",
+                params,
+            };
+            if let Ok(body) = serde_json::to_string(&msg) {
+                let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+                let _ = tx.send(framed).await;
+            }
+        });
+        id
+    }
 }
 
 async fn write_loop(stdin: ChildStdin, mut rx: mpsc::Receiver<String>) {

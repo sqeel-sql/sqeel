@@ -779,12 +779,16 @@ async fn run_loop(
                                 }
                             }
                         });
-                        if let Ok(id) = client
-                            .request_completion(scratch_uri.clone(), row as u32, col as u32)
-                            .await
-                        {
-                            last_completion_id = Some(id);
-                        }
+                        // Fire the completion request off the render
+                        // loop too — we get the id synchronously from
+                        // the shared counter, the serialize + send run
+                        // in a spawned task.
+                        let id = client.writer().request_completion(
+                            scratch_uri.clone(),
+                            row as u32,
+                            col as u32,
+                        );
+                        last_completion_id = Some(id);
                     }
                 }
             }
