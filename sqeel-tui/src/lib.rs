@@ -704,6 +704,27 @@ async fn run_loop(
                 needs_redraw = true;
                 match event {
                     LspEvent::Diagnostics(diags) => {
+                        if let Ok(path) = std::env::var("SQEEL_DEBUG_HL_DUMP") {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&path)
+                            {
+                                let _ = writeln!(
+                                    f,
+                                    "### lsp diagnostics received ({} items)",
+                                    diags.len()
+                                );
+                                for d in &diags {
+                                    let _ = writeln!(
+                                        f,
+                                        "  {}:{} .. {}:{} [{:?}] {}",
+                                        d.line, d.col, d.end_line, d.end_col, d.severity, d.message
+                                    );
+                                }
+                            }
+                        }
                         state.lock().unwrap().set_diagnostics(diags);
                     }
                     LspEvent::Completion(id, lsp_items) => {
