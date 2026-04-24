@@ -12,7 +12,24 @@ use crate::util::{spaces, Pos};
 use crate::widget::Viewport;
 use crate::word::{find_word_exclusive_end_forward, find_word_start_backward};
 #[cfg(feature = "ratatui")]
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
+
+/// Convert a `Line<'b>` (borrowing from buffer data) into a `Line<'static>`
+/// by copying each span's content into an owned String. Used by the
+/// per-row render cache so stored lines outlive any particular render
+/// frame's borrow of `self.lines`.
+#[cfg(feature = "ratatui")]
+fn to_static_line(line: &Line<'_>) -> Line<'static> {
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .iter()
+        .map(|s| Span::styled(s.content.to_string(), s.style))
+        .collect();
+    let mut out = Line::from(spans);
+    out.style = line.style;
+    out.alignment = line.alignment;
+    out
+}
 use std::cmp::Ordering;
 use std::fmt;
 #[cfg(feature = "tuirs")]
@@ -128,6 +145,24 @@ pub struct TextArea<'a> {
     /// External per-row syntax styling (e.g. tree-sitter). Each entry is
     /// `(start_byte, end_byte, style)` for that row, sorted by start, no overlaps.
     syntax_spans: Vec<Vec<(usize, usize, Style)>>,
+    /// Per-row render cache. `line_spans` stashes an owned (`'static`)
+    /// copy of the produced Line alongside a fingerprint of all inputs
+    /// that can affect rendering for that row (content pointer/length,
+    /// cursor-line state, selection range, search pattern, syntax span
+    /// fingerprint, col_offset, lnum_len). A matching fingerprint on the
+    /// next frame lets us clone the cached Line instead of re-running
+    /// the highlighter + boundary resolver for the row. Invalidated
+    /// coarsely by bumping `render_gen` on any buffer mutation.
+    pub(crate) row_cache: std::cell::RefCell<Vec<CachedRow>>,
+    /// Generation counter bumped on every buffer mutation. Baked into
+    /// each row's fingerprint so stale cache entries miss.
+    pub(crate) render_gen: std::cell::Cell<u64>,
+}
+
+#[derive(Default, Debug, Clone)]
+pub(crate) struct CachedRow {
+    pub(crate) fingerprint: u64,
+    pub(crate) line: Option<Line<'static>>,
 }
 
 /// Convert any iterator whose elements can be converted into [`String`] into [`TextArea`]. Each [`String`] element is
@@ -234,6 +269,8 @@ impl<'a> TextArea<'a> {
             selection_start: None,
             select_style: Style::default().bg(Color::LightBlue),
             syntax_spans: Vec::new(),
+            row_cache: std::cell::RefCell::new(Vec::new()),
+            render_gen: std::cell::Cell::new(0),
         }
     }
 
@@ -243,11 +280,13 @@ impl<'a> TextArea<'a> {
     /// cursor / search / selection styles override these.
     pub fn set_syntax_spans(&mut self, spans: Vec<Vec<(usize, usize, Style)>>) {
         self.syntax_spans = spans;
+        self.bump_render_gen();
     }
 
     /// Clear any externally-supplied syntax styling.
     pub fn clear_syntax_spans(&mut self) {
         self.syntax_spans.clear();
+        self.bump_render_gen();
     }
 
     /// Move the syntax span storage out of the textarea, leaving an empty
@@ -770,6 +809,16 @@ impl<'a> TextArea<'a> {
         let after = Pos::new(row, col, after_offset);
         let edit = Edit::new(kind, before, after);
         self.history.push(edit);
+        self.bump_render_gen();
+    }
+
+    /// Bump the render-cache generation. Anything that changes the
+    /// buffer (edits, history replays, `set_syntax_spans`, etc.) must
+    /// call this so the per-row render cache invalidates; otherwise a
+    /// stale `Line<'static>` would paint over fresh content.
+    #[inline]
+    fn bump_render_gen(&self) {
+        self.render_gen.set(self.render_gen.get().wrapping_add(1));
     }
 
     /// Insert a single character at current cursor position.
@@ -1611,7 +1660,79 @@ impl<'a> TextArea<'a> {
         }
     }
 
+    fn compute_row_fingerprint(&self, line: &str, row: usize, lnum_len: u8, col_offset: usize) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.render_gen.get().hash(&mut h);
+        (line.as_ptr() as usize).hash(&mut h);
+        line.len().hash(&mut h);
+        row.hash(&mut h);
+        lnum_len.hash(&mut h);
+        col_offset.hash(&mut h);
+        let is_cursor_row = row == self.cursor.0;
+        is_cursor_row.hash(&mut h);
+        if is_cursor_row {
+            self.cursor.1.hash(&mut h);
+        }
+        // Selection range — only fold the portion that changes this
+        // row's rendering. Rows entirely outside the selection share
+        // the "no selection on me" fingerprint (0); rows fully covered
+        // share the "fully covered" fingerprint (1) regardless of
+        // selection length; only the boundary rows carry endpoint
+        // offsets. Without this scope narrowing a drag that extends
+        // the selection by 1 line would invalidate every cached row.
+        match self.selection_positions() {
+            None => 0u8.hash(&mut h),
+            Some((s, e)) => {
+                if row < s.row || row > e.row {
+                    0u8.hash(&mut h);
+                } else if row > s.row && row < e.row {
+                    1u8.hash(&mut h);
+                } else {
+                    2u8.hash(&mut h);
+                    if row == s.row {
+                        s.offset.hash(&mut h);
+                    }
+                    if row == e.row {
+                        e.offset.hash(&mut h);
+                    }
+                }
+            }
+        }
+        // Search matches: presence + pattern id (pointer) are enough.
+        #[cfg(feature = "search")]
+        {
+            if let Some(re) = self.search.pat.as_ref() {
+                1u8.hash(&mut h);
+                (re.as_str().as_ptr() as usize).hash(&mut h);
+            } else {
+                0u8.hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
     pub(crate) fn line_spans<'b>(&'b self, line: &'b str, row: usize, lnum_len: u8, col_offset: usize) -> Line<'b> {
+        // Per-row render cache. The input fingerprint captures every
+        // thing that can change the produced Line for this row; if it
+        // matches the cached entry we return the owned `'static` copy
+        // cloned back into `'b` and skip the highlighter build + span
+        // boundary resolution entirely. During steady-state drag only
+        // the old + new cursor rows (and rows where the selection
+        // boundary moved) miss the cache.
+        let fingerprint = self.compute_row_fingerprint(line, row, lnum_len, col_offset);
+        {
+            let cache = self.row_cache.borrow();
+            if let Some(entry) = cache.get(row) {
+                if entry.fingerprint == fingerprint {
+                    if let Some(ref cached) = entry.line {
+                        return cached.clone();
+                    }
+                }
+            }
+        }
+
         // When col_offset > 0 the viewport has scrolled past u16::MAX columns.
         // Clip the line to the visible portion and adjust all byte/char positions.
         let (line, byte_offset) = if col_offset > 0 {
@@ -1672,7 +1793,21 @@ impl<'a> TextArea<'a> {
             hl.syntax(shifted);
         }
 
-        hl.into_spans()
+        let produced = hl.into_spans();
+        // Stash an owned (`'static`) copy for future frames. Conversion
+        // allocates per-span — cheap compared to the hl build above —
+        // and future cache hits avoid both costs entirely.
+        {
+            let mut cache = self.row_cache.borrow_mut();
+            if cache.len() <= row {
+                cache.resize(row + 1, CachedRow::default());
+            }
+            cache[row] = CachedRow {
+                fingerprint,
+                line: Some(to_static_line(&produced)),
+            };
+        }
+        produced
     }
 
     /// Build a ratatui (or tui-rs) widget to render the current state of the textarea. The widget instance returned
