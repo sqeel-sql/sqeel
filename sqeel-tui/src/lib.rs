@@ -1167,6 +1167,12 @@ async fn run_loop(
         event_triggered_redraw = true;
         match ev {
             Event::Mouse(mouse) => {
+                // Hover popup steals focus; a stray click on the
+                // underlying editor would otherwise move `state.focus`
+                // back out of `Focus::Hover` and break Esc/nav.
+                if state.lock().unwrap().focus == Focus::Hover {
+                    continue;
+                }
                 // Help overlay swallows clicks / drags so they don't
                 // fall through to whatever pane sits underneath — but
                 // scroll events need to pass through so the user can
