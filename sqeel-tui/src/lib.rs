@@ -1969,8 +1969,7 @@ async fn run_loop(
                 // ── Help overlay ─────────────────────────────────────────────────
                 if show_help {
                     match (key.modifiers, key.code) {
-                        (KeyModifiers::NONE, KeyCode::Esc)
-                        | (KeyModifiers::NONE, KeyCode::Char('q' | '?')) => {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
                             state.lock().unwrap().close_help();
                         }
                         (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
@@ -5390,7 +5389,7 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) -> u16 {
     f.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(" Help  (Esc / q / ? to close) ")
+        .title(" Help  (Esc to close) ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ui().dialog_border));
     let inner = block.inner(popup);
