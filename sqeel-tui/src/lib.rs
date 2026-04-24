@@ -495,9 +495,37 @@ async fn run_loop(
             needs_redraw = true;
         }
 
+        // Drain async-task result channels without touching the state
+        // lock (they're pure mpsc try_recv). We apply them below in one
+        // consolidated lock block so per-iter lock pressure stays low.
+        let drained_tab_loads: Vec<(usize, String)> =
+            std::iter::from_fn(|| tab_load_rx.try_recv().ok()).collect();
+        let drained_schema_caches: Vec<(Vec<_>, Vec<_>, Vec<_>)> =
+            std::iter::from_fn(|| schema_cache_rx.try_recv().ok()).collect();
+        if !drained_tab_loads.is_empty() || !drained_schema_caches.is_empty() {
+            needs_redraw = true;
+        }
+
+        // Single top-of-iter lock: apply drained channel results, run
+        // periodic maintenance, and take any pending tasks/content.
+        // Dropping to ~1 lock cycle here instead of 5+ reduces per-event
+        // contention with the highlight / executor worker threads.
+        let (pending_load, pending_tab_content) = {
+            let mut s = state.lock().unwrap();
+            for (tab_index, content) in drained_tab_loads {
+                s.apply_loaded_tab_content(tab_index, content);
+            }
+            for (items, all, ids) in drained_schema_caches {
+                s.apply_schema_cache_rebuild(items, all, ids);
+            }
+            s.evict_cold_tabs();
+            let pending_load = s.pending_tab_load.take();
+            let pending_tab_content = s.tab_content_pending.take();
+            (pending_load, pending_tab_content)
+        };
+
         // Kick off any pending cold-tab disk read on a blocking task
         // so a big file / slow FS doesn't stall the render loop.
-        let pending_load = state.lock().unwrap().pending_tab_load.take();
         if let Some(load) = pending_load {
             let tx = tab_load_tx.clone();
             tokio::task::spawn_blocking(move || {
@@ -506,31 +534,10 @@ async fn run_loop(
                 let _ = tx.send((load.tab_index, content));
             });
         }
-        // Apply any completed cold-tab loads. We route through
-        // `AppState::apply_loaded_tab_content` which caches onto the
-        // target tab and only surfaces content for the currently
-        // active tab (so a stale load from a rapid-switch doesn't
-        // clobber the live editor).
-        while let Ok((tab_index, content)) = tab_load_rx.try_recv() {
-            let mut s = state.lock().unwrap();
-            s.apply_loaded_tab_content(tab_index, content);
-            drop(s);
-            needs_redraw = true;
-        }
-        // Install any completed schema-cache rebuild. If the schema
-        // dirtied again during the flatten, the next iteration of the
-        // main loop will kick a fresh rebuild.
-        while let Ok((items, all, ids)) = schema_cache_rx.try_recv() {
-            let mut s = state.lock().unwrap();
-            s.apply_schema_cache_rebuild(items, all, ids);
-            drop(s);
-            needs_redraw = true;
-        }
 
-        // Drain pending tab content (set when connection loads or tab switches)
+        // Apply pending tab content (set when connection loads or tab switches).
         {
-            let pending = state.lock().unwrap().tab_content_pending.take();
-            if let Some(content) = pending {
+            if let Some(content) = pending_tab_content {
                 editor.set_content(&content);
                 // `set_content` flips the editor's dirty flag internally
                 // (textarea rebuild). Consume it here so the main-loop
@@ -579,9 +586,6 @@ async fn run_loop(
             }
         }
 
-        // Evict cold tabs (content not accessed for 5 min released from RAM)
-        state.lock().unwrap().evict_cold_tabs();
-
         // Sync editor content + submit to highlight thread when changed.
         // Cheap per-keystroke work stays here; the expensive full-buffer
         // `String` build + highlight + LSP + completion submission is
@@ -593,7 +597,7 @@ async fn run_loop(
             if content_dirty_since.is_none() {
                 content_dirty_since = Some(Instant::now());
             }
-            state.lock().unwrap().mark_active_dirty();
+            // mark_active_dirty is folded into the main lock block below.
         }
         // Trailing-edge debounce: publish once the dirty window has aged
         // past the threshold.  The 50 ms event-poll timeout guarantees we
@@ -629,8 +633,16 @@ async fn run_loop(
             } else {
                 None
             };
+        // Merged into the single big lock below: extracted here so
+        // downstream code (highlight resubmit gate) can consume it
+        // without reacquiring the lock.
+        let current_dialect;
         {
             let mut s = state.lock().unwrap();
+            current_dialect = s.active_dialect;
+            if content_changed {
+                s.mark_active_dirty();
+            }
             // Kick the schema-cache rebuild off the render loop when
             // it's stale and nothing else is already rebuilding. The
             // snapshot + flatten work runs on a blocking task; the
@@ -738,7 +750,6 @@ async fn run_loop(
         const HIGHLIGHT_WINDOW_MARGIN: usize = 500;
         let viewport_top = editor.textarea.viewport_top_row();
         let viewport_height = editor.viewport_height_value() as usize;
-        let current_dialect = state.lock().unwrap().active_dialect;
         let viewport_scrolled = last_highlight_top == usize::MAX
             || viewport_top.abs_diff(last_highlight_top) >= HIGHLIGHT_WINDOW_MARGIN / 2;
         let should_submit = should_resubmit_highlight(
@@ -995,43 +1006,43 @@ async fn run_loop(
             }
         }
 
-        // Spinner needs periodic redraws while schema is loading, plus one final
-        // redraw on the loading→idle transition so the spinner is replaced by the ✓.
-        let (schema_loading, pending_loads) = {
-            let s = state.lock().unwrap();
-            (s.schema_loading, s.schema_pending_loads)
-        };
-        if schema_loading || last_schema_loading != schema_loading {
-            needs_redraw = true;
-        }
-        last_schema_loading = schema_loading;
-
-        // Periodic schema-freshness sweep. Fires TTL-driven refreshes for
-        // the db list and any tables/columns we've already fetched.
-        if last_stale_check.elapsed() >= Duration::from_secs(1) {
-            state.lock().unwrap().refresh_stale_schema();
-            last_stale_check = Instant::now();
-        }
-
-        // Lazy schema loads just drained — re-run the stashed completion
-        // query so the popup picks up newly fetched tables/columns.
-        if last_pending_loads > 0
-            && pending_loads < last_pending_loads
-            && let Some((ctx, prefix)) = last_completion_ctx.clone()
-        {
-            let pool = state.lock().unwrap().completions_for_context(&ctx, "");
-            completion_thread.submit(prefix, Arc::new(pool));
-        }
-        last_pending_loads = pending_loads;
-
-        // Executor finished a query — redraw to show results/error.
-        {
+        // Single end-of-iter lock: schema loading flags, periodic stale
+        // sweep, and results_dirty — collapsed from four separate
+        // lock/unlock cycles so drag frames don't pay lock thrash here.
+        let stale_due = last_stale_check.elapsed() >= Duration::from_secs(1);
+        let (schema_loading, pending_loads, lazy_pool) = {
             let mut s = state.lock().unwrap();
+            if stale_due {
+                s.refresh_stale_schema();
+            }
             if s.results_dirty {
                 needs_redraw = true;
                 s.results_dirty = false;
             }
+            let pending_loads = s.schema_pending_loads;
+            // If lazy schema loads just drained, stage a fresh completion
+            // pool under the same lock to avoid reacquiring below.
+            let lazy_pool = if last_pending_loads > 0
+                && pending_loads < last_pending_loads
+                && let Some((ctx, prefix)) = last_completion_ctx.clone()
+            {
+                Some((prefix, s.completions_for_context(&ctx, "")))
+            } else {
+                None
+            };
+            (s.schema_loading, pending_loads, lazy_pool)
+        };
+        if stale_due {
+            last_stale_check = Instant::now();
         }
+        if schema_loading || last_schema_loading != schema_loading {
+            needs_redraw = true;
+        }
+        last_schema_loading = schema_loading;
+        if let Some((prefix, pool)) = lazy_pool {
+            completion_thread.submit(prefix, Arc::new(pool));
+        }
+        last_pending_loads = pending_loads;
 
         if needs_redraw {
             let cmd_snap = command_input.clone();
