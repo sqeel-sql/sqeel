@@ -976,6 +976,15 @@ async fn run_loop(
                 let content = editor.content();
                 let _ = client.open_document(scratch_uri.clone(), &content).await;
                 doc_version = 1;
+                // Warm-up hover request right after opening the doc.
+                // sqls fetches the DB schema on its first
+                // symbol-resolution request, which would otherwise
+                // penalise the user's *real* first `K` by several
+                // hundred ms. Firing it now paves the cache before
+                // the user interacts. Response is discarded — we
+                // don't set `last_hover_id`, so the TUI arm's id
+                // check drops the payload silently.
+                let _ = client.writer().request_hover(scratch_uri.clone(), 0, 0);
                 lsp = Some(client);
                 lsp_suspended = false;
                 needs_redraw = true;
