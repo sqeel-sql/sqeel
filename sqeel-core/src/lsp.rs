@@ -14,6 +14,49 @@ fn next_id() -> i64 {
     ID.fetch_add(1, Ordering::SeqCst)
 }
 
+/// Generate a `sqls` config file from a sqlx-style connection URL and
+/// write it to a per-process temp path. Returns the path so the caller
+/// can pass `--config=<path>` (or similar) when spawning sqls. The
+/// config contains a single connection entry — sqls picks the first
+/// one by default so no further wiring is needed.
+pub fn write_sqls_config(url: &str) -> anyhow::Result<std::path::PathBuf> {
+    let (driver, dsn) = sqls_driver_and_dsn(url)?;
+    let yaml = format!(
+        "lowercaseKeywords: false\nconnections:\n  - alias: sqeel\n    driver: {driver}\n    dataSourceName: \"{dsn}\"\n"
+    );
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("sqeel-sqls-config-{}.yml", std::process::id()));
+    std::fs::write(&path, yaml)?;
+    Ok(path)
+}
+
+fn sqls_driver_and_dsn(url: &str) -> anyhow::Result<(&'static str, String)> {
+    use anyhow::Context as _;
+    if let Some(rest) = url
+        .strip_prefix("mysql://")
+        .or_else(|| url.strip_prefix("mariadb://"))
+    {
+        // sqls expects MySQL DSN form `user[:pass]@tcp(host[:port])/db`.
+        let (userpass, after) = rest
+            .split_once('@')
+            .context("mysql url missing `user@host`")?;
+        let (hostport, db_and_rest) = after.split_once('/').unwrap_or((after, ""));
+        let db = db_and_rest.split('?').next().unwrap_or("");
+        Ok(("mysql", format!("{userpass}@tcp({hostport})/{db}")))
+    } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        // sqls `postgresql` driver accepts libpq URIs directly.
+        Ok(("postgresql", url.to_string()))
+    } else if url.starts_with("sqlite:") {
+        let path = url
+            .strip_prefix("sqlite://")
+            .or_else(|| url.strip_prefix("sqlite:"))
+            .unwrap_or("");
+        Ok(("sqlite3", path.to_string()))
+    } else {
+        anyhow::bail!("unsupported URL scheme for sqls config: {url}")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub line: u32,
@@ -65,8 +108,13 @@ pub struct LspClient {
 }
 
 impl LspClient {
-    pub async fn start(binary: &str, root_uri: Option<Uri>) -> anyhow::Result<Self> {
+    pub async fn start(
+        binary: &str,
+        root_uri: Option<Uri>,
+        args: &[String],
+    ) -> anyhow::Result<Self> {
         let mut child = Command::new(binary)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -287,5 +335,53 @@ async fn read_loop(mut reader: BufReader<ChildStdout>, tx: mpsc::Sender<LspEvent
             };
             let _ = tx.send(LspEvent::Completion(id, items)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqls_driver_and_dsn_mysql() {
+        let (driver, dsn) =
+            super::sqls_driver_and_dsn("mysql://root:secret@localhost:3306/mydb").unwrap();
+        assert_eq!(driver, "mysql");
+        assert_eq!(dsn, "root:secret@tcp(localhost:3306)/mydb");
+    }
+
+    #[test]
+    fn sqls_driver_and_dsn_mariadb_aliased_to_mysql() {
+        let (driver, dsn) = super::sqls_driver_and_dsn("mariadb://u:p@db.host:3307/shop").unwrap();
+        assert_eq!(driver, "mysql");
+        assert_eq!(dsn, "u:p@tcp(db.host:3307)/shop");
+    }
+
+    #[test]
+    fn sqls_driver_and_dsn_postgres_passthrough() {
+        let (driver, dsn) = super::sqls_driver_and_dsn("postgres://u:p@h:5432/db").unwrap();
+        assert_eq!(driver, "postgresql");
+        assert_eq!(dsn, "postgres://u:p@h:5432/db");
+    }
+
+    #[test]
+    fn sqls_driver_and_dsn_sqlite_strips_scheme() {
+        let (driver, dsn) = super::sqls_driver_and_dsn("sqlite:///tmp/foo.db").unwrap();
+        assert_eq!(driver, "sqlite3");
+        assert_eq!(dsn, "/tmp/foo.db");
+    }
+
+    #[test]
+    fn sqls_driver_and_dsn_rejects_unknown_scheme() {
+        assert!(super::sqls_driver_and_dsn("other://x").is_err());
+    }
+
+    #[test]
+    fn write_sqls_config_writes_file() {
+        let path = write_sqls_config("mysql://u:p@host/db").unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("driver: mysql"));
+        assert!(body.contains("u:p@tcp(host)/db"));
+        let _ = std::fs::remove_file(&path);
     }
 }

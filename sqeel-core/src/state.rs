@@ -245,6 +245,11 @@ pub struct AppState {
     /// SQL dialect of the current connection. Drives per-dialect
     /// keyword highlighting; `Generic` before any connection opens.
     pub active_dialect: Dialect,
+    /// When a connection resolves we write a sqls config file from its
+    /// URL and park the path here. The TUI main loop takes it, restarts
+    /// the LSP with `--config=<path>`, so sqls can emit schema-aware
+    /// diagnostics instead of running blind.
+    pub pending_sqls_config: Option<std::path::PathBuf>,
     pub status_message: Option<String>,
     pub schema_nodes: Vec<SchemaNode>,
     pub schema_cursor: usize,

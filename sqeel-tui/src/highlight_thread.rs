@@ -1,4 +1,4 @@
-use sqeel_core::highlight::{Dialect, HighlightSpan, Highlighter};
+use sqeel_core::highlight::{Dialect, HighlightSpan, Highlighter, ParseError};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -23,6 +23,10 @@ pub struct HighlightResult {
     pub spans: Vec<HighlightSpan>,
     pub start_row: usize,
     pub row_count: usize,
+    /// Parse errors harvested from the same tree-sitter run. Surfaces
+    /// inline diagnostic underlines as a fallback when the LSP is
+    /// absent or not producing messages.
+    pub parse_errors: Vec<ParseError>,
 }
 
 /// Runs tree-sitter highlighting on a dedicated thread.
@@ -60,12 +64,14 @@ impl HighlightThread {
                     };
 
                     let spans = highlighter.highlight_shared(&req.source, req.dialect);
+                    let parse_errors = highlighter.last_errors().to_vec();
 
                     if result_tx
                         .send(HighlightResult {
                             spans,
                             start_row: req.start_row,
                             row_count: req.row_count,
+                            parse_errors,
                         })
                         .is_err()
                     {

@@ -331,7 +331,7 @@ async fn run_loop(
     let lsp_binary = main_config.editor.lsp_binary.clone();
     let mouse_scroll_lines = main_config.editor.mouse_scroll_lines;
     let leader_char: char = main_config.editor.leader_key.chars().next().unwrap_or(' ');
-    let lsp_start_result = LspClient::start(&lsp_binary, None).await;
+    let lsp_start_result = LspClient::start(&lsp_binary, None, &[]).await;
     if let Ok(path) = std::env::var("SQEEL_DEBUG_HL_DUMP") {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -576,7 +576,7 @@ async fn run_loop(
             if let Some(result) = highlight_thread.try_recv() {
                 let row_count = editor.textarea.lines().len();
                 let cursor_row = editor.textarea.cursor().0;
-                let diagnostics = s.lsp_diagnostics.clone();
+                let diagnostics = merged_diagnostics(&s.lsp_diagnostics, &result.parse_errors);
                 apply_window_spans(
                     &mut editor.textarea,
                     &result,
@@ -585,9 +585,9 @@ async fn run_loop(
                     &diagnostics,
                 );
                 s.set_highlights(result.spans.clone());
-                last_highlight_result = Some(result);
                 last_marker_cursor_row = cursor_row;
                 last_marker_diag_len = diagnostics.len();
+                last_highlight_result = Some(result);
                 needs_redraw = true;
             } else {
                 // Cursor moved onto a different row OR diagnostics
@@ -595,22 +595,23 @@ async fn run_loop(
                 // -line blending and diagnostic underlines update
                 // without paying another tree-sitter parse.
                 let cursor_row = editor.textarea.cursor().0;
-                let diagnostics_len = s.lsp_diagnostics.len();
-                if (cursor_row != last_marker_cursor_row || diagnostics_len != last_marker_diag_len)
-                    && let Some(result) = last_highlight_result.as_ref()
-                {
-                    let row_count = editor.textarea.lines().len();
-                    let diagnostics = s.lsp_diagnostics.clone();
-                    apply_window_spans(
-                        &mut editor.textarea,
-                        result,
-                        row_count,
-                        cursor_row,
-                        &diagnostics,
-                    );
-                    last_marker_cursor_row = cursor_row;
-                    last_marker_diag_len = diagnostics_len;
-                    needs_redraw = true;
+                if let Some(result) = last_highlight_result.as_ref() {
+                    let diagnostics = merged_diagnostics(&s.lsp_diagnostics, &result.parse_errors);
+                    if cursor_row != last_marker_cursor_row
+                        || diagnostics.len() != last_marker_diag_len
+                    {
+                        let row_count = editor.textarea.lines().len();
+                        apply_window_spans(
+                            &mut editor.textarea,
+                            result,
+                            row_count,
+                            cursor_row,
+                            &diagnostics,
+                        );
+                        last_marker_cursor_row = cursor_row;
+                        last_marker_diag_len = diagnostics.len();
+                        needs_redraw = true;
+                    }
                 }
             }
         }
@@ -758,6 +759,44 @@ async fn run_loop(
             last_schema_completions = schema_items.clone();
             state.lock().unwrap().set_completions(schema_items);
             needs_redraw = true;
+        }
+
+        // When a DB connection resolves, `connect_and_spawn` writes a
+        // sqls config file and parks the path on the state. Swap the
+        // running LSP over to it so sqls can resolve schema.
+        let pending_cfg = state.lock().unwrap().pending_sqls_config.take();
+        if let Some(cfg_path) = pending_cfg {
+            // Drop the old client (kill_on_drop SIGKILLs sqls).
+            lsp = None;
+            let args: Vec<String> = vec!["-config".into(), cfg_path.to_string_lossy().into_owned()];
+            let restart = LspClient::start(&lsp_binary, None, &args).await;
+            if let Ok(path) = std::env::var("SQEEL_DEBUG_HL_DUMP") {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    match &restart {
+                        Ok(_) => {
+                            let _ = writeln!(f, "### lsp restarted with config={cfg_path:?}");
+                        }
+                        Err(e) => {
+                            let _ =
+                                writeln!(f, "### lsp restart FAILED config={cfg_path:?} err={e}");
+                        }
+                    }
+                }
+            }
+            if let Ok(mut client) = restart {
+                // Re-open the scratch doc with current editor content so
+                // the new LSP has state; sync the version counter.
+                let content = editor.content();
+                let _ = client.open_document(scratch_uri.clone(), &content).await;
+                doc_version = 1;
+                lsp = Some(client);
+                lsp_suspended = false;
+            }
         }
 
         // Drain LSP events
@@ -3832,6 +3871,27 @@ fn highlight_query_line(query: &str, dialect: Dialect) -> Line<'static> {
     Line::from(out)
 }
 
+/// Combine the LSP diagnostics vector with tree-sitter-derived parse
+/// errors into one list for the inline-underline overlay. Parse errors
+/// are lifted to `ERROR` severity so they render with the same loud
+/// styling as an LSP error — they're "why did my SQL not run" markers
+/// either way.
+fn merged_diagnostics(
+    lsp: &[sqeel_core::lsp::Diagnostic],
+    parse_errors: &[sqeel_core::highlight::ParseError],
+) -> Vec<sqeel_core::lsp::Diagnostic> {
+    let mut out: Vec<sqeel_core::lsp::Diagnostic> = lsp.to_vec();
+    out.extend(parse_errors.iter().map(|e| sqeel_core::lsp::Diagnostic {
+        line: e.start_row as u32,
+        col: e.start_col as u32,
+        end_line: e.end_row as u32,
+        end_col: e.end_col as u32,
+        message: e.message.clone(),
+        severity: lsp_types::DiagnosticSeverity::ERROR,
+    }));
+    out
+}
+
 /// Decide whether the highlight worker needs a fresh submission.
 ///
 /// Fires on:
@@ -5333,6 +5393,7 @@ mod tests {
             spans,
             start_row: 0,
             row_count,
+            parse_errors: Vec::new(),
         };
 
         let mut ta = tui_textarea::TextArea::new(lines);
@@ -5393,6 +5454,7 @@ mod tests {
             spans,
             start_row: 0,
             row_count,
+            parse_errors: Vec::new(),
         };
 
         let mut ta = tui_textarea::TextArea::new(lines);

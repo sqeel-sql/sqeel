@@ -327,6 +327,13 @@ async fn connect_and_spawn(
                     && !s.tabs.is_empty();
                 s.active_connection = Some(conn_name.clone());
                 s.active_dialect = sqeel_core::highlight::Dialect::from_url(url);
+                // Generate a sqls config from the active URL so the
+                // LSP can resolve schema + emit useful diagnostics.
+                // Main loop picks up `pending_sqls_config` and restarts
+                // the LSP with `--config=<path>`.
+                if let Ok(cfg) = sqeel_core::lsp::write_sqls_config(url) {
+                    s.pending_sqls_config = Some(cfg);
+                }
                 if !already_loaded {
                     s.load_tabs_for_connection(&slug);
                     if session_active_tab < s.tabs.len() {

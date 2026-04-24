@@ -207,6 +207,20 @@ pub struct HighlightSpan {
     pub kind: TokenKind,
 }
 
+/// A parse-error span collected from tree-sitter's concrete syntax
+/// tree. Surfaces through [`Highlighter::last_errors`] so the TUI can
+/// render inline underlines without relying on an external LSP.
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
+    pub end_col: usize,
+    pub message: String,
+}
+
 pub struct Highlighter {
     parser: Parser,
     old_tree: Option<Tree>,
@@ -214,6 +228,7 @@ pub struct Highlighter {
     // is a ref-count bump instead of a full-buffer `String::clone` — which
     // on multi-MB buffers was the hottest allocation in the highlight loop.
     old_source: Option<Arc<String>>,
+    last_errors: Vec<ParseError>,
 }
 
 impl Highlighter {
@@ -224,7 +239,16 @@ impl Highlighter {
             parser,
             old_tree: None,
             old_source: None,
+            last_errors: Vec::new(),
         })
+    }
+
+    /// Parse-error nodes collected on the most recent call to
+    /// [`highlight`] / [`highlight_shared`]. Callers feed these into
+    /// their diagnostic pipeline when no LSP is available (or as a
+    /// best-effort fallback in addition).
+    pub fn last_errors(&self) -> &[ParseError] {
+        &self.last_errors
     }
 
     /// Highlight a borrowed source string.  Callers that already have an
@@ -282,10 +306,68 @@ impl Highlighter {
         // synthetic Keyword spans for those.
         promote_uncovered_dialect_keywords(source, dialect, &mut spans);
 
+        // Harvest error / missing nodes for the diagnostic fallback.
+        self.last_errors.clear();
+        if tree.root_node().has_error() {
+            collect_parse_errors(tree.root_node(), source, dialect, &mut self.last_errors);
+        }
+
         self.old_source = Some(Arc::clone(source));
         self.old_tree = Some(tree);
 
         spans
+    }
+}
+
+/// Walk the tree collecting error and missing nodes. Dialect-native
+/// statement starts (`DESC`, `SHOW`, `PRAGMA`, …) are filtered out so
+/// we don't double-flag queries that the engine accepts natively.
+fn collect_parse_errors(node: Node, source: &str, dialect: Dialect, out: &mut Vec<ParseError>) {
+    if node.is_error() || node.is_missing() {
+        let start_byte = node.start_byte();
+        let end_byte = node.end_byte().max(start_byte + 1).min(source.len());
+        if end_byte > start_byte
+            && let Some(slice) = source.get(start_byte..end_byte)
+            && !dialect.is_native_statement(slice.trim_start())
+        {
+            let start = node.start_position();
+            let end = node.end_position();
+            let kind = node.kind();
+            let message = if node.is_missing() {
+                if kind.is_empty() {
+                    "missing token".to_string()
+                } else {
+                    format!("missing `{kind}`")
+                }
+            } else {
+                let snippet = slice.lines().next().unwrap_or("").trim();
+                if snippet.is_empty() {
+                    "unexpected token".to_string()
+                } else {
+                    let trimmed: String = snippet.chars().take(60).collect();
+                    format!("unexpected `{trimmed}`")
+                }
+            };
+            out.push(ParseError {
+                start_byte,
+                end_byte,
+                start_row: start.row,
+                start_col: start.column,
+                end_row: end.row,
+                end_col: end.column,
+                message,
+            });
+            // Don't descend into an error node — its children are
+            // already covered by the parent's range.
+            return;
+        }
+    }
+    if !node.has_error() {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_parse_errors(child, source, dialect, out);
     }
 }
 
@@ -812,6 +894,45 @@ mod tests {
         h.highlight(src1, Dialect::Generic);
         let spans_incr = h.highlight(src2, Dialect::Generic);
         assert_eq!(spans_full.len(), spans_incr.len());
+    }
+
+    #[test]
+    fn parse_error_harvested_for_obvious_junk() {
+        let mut h = Highlighter::new().unwrap();
+        let src = "this line should error this is a test;\n";
+        h.highlight(src, Dialect::MySql);
+        let errs = h.last_errors();
+        assert!(
+            !errs.is_empty(),
+            "expected tree-sitter to flag a parse error; got none"
+        );
+    }
+
+    #[test]
+    fn parse_errors_cleared_between_calls() {
+        let mut h = Highlighter::new().unwrap();
+        h.highlight("this line should error this is a test;\n", Dialect::MySql);
+        assert!(!h.last_errors().is_empty());
+        h.highlight("SELECT 1;\n", Dialect::MySql);
+        assert!(
+            h.last_errors().is_empty(),
+            "valid SQL should leave no lingering errors"
+        );
+    }
+
+    #[test]
+    fn parse_error_skipped_for_dialect_native_statement() {
+        // `DESC users;` isn't parsed by tree-sitter-sequel, but it's
+        // native MySQL — we shouldn't flag it as a client-side parse
+        // error.
+        let mut h = Highlighter::new().unwrap();
+        h.highlight("DESC users;\n", Dialect::MySql);
+        let flagged_desc = h.last_errors().iter().any(|e| e.message.contains("DESC"));
+        assert!(
+            !flagged_desc,
+            "DESC shouldn't be flagged as error on MySQL; got {:?}",
+            h.last_errors()
+        );
     }
 
     #[test]
