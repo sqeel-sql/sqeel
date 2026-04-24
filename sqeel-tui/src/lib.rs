@@ -5523,7 +5523,15 @@ fn draw_hover_loading(f: &mut ratatui::Frame<'_>, area: Rect) {
     }
     let u = ui();
     let bg = Style::default().fg(u.dialog_fg).bg(u.dialog_bg);
-    let popup_w = 34u16.min(area.width.saturating_sub(4));
+    // Size from actual content. The hourglass glyph is wide in most
+    // fonts, so use `UnicodeWidthStr` to measure display cells rather
+    // than chars; char-count under-sized the popup and clipped the
+    // trailing "(Esc to cancel)" hint.
+    use unicode_width::UnicodeWidthStr;
+    let label = "⏳ Loading hover…";
+    let hint = "  (Esc to cancel)";
+    let content_w = (label.width() + hint.width()) as u16;
+    let popup_w = (content_w + 4).min(area.width.saturating_sub(4));
     let popup_h = 3u16.min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(popup_w)) / 2,
@@ -5541,8 +5549,8 @@ fn draw_hover_loading(f: &mut ratatui::Frame<'_>, area: Rect) {
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("⏳ Loading hover…", bg.add_modifier(Modifier::BOLD)),
-            Span::styled("  (Esc to cancel)", bg),
+            Span::styled(label, bg.add_modifier(Modifier::BOLD)),
+            Span::styled(hint, bg),
         ]))
         .style(bg),
         inner,

@@ -18,3 +18,4 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 dirs = "6"
 pulldown-cmark = { version = "0.11", default-features = false }
+unicode-width = "0.2"
