@@ -1205,7 +1205,7 @@ async fn run_loop(
                                     });
                                 }
                                 if let Some((row, col)) =
-                                    s.hover_click_to_cell(mouse.column, mouse.row)
+                                    s.hover_drag_to_cell(mouse.column, mouse.row)
                                 {
                                     s.hover_cursor = ResultsCursor::Cell { row, col };
                                     s.clamp_hover_scroll();
@@ -1429,7 +1429,7 @@ async fn run_loop(
                                 }
                             }
                             if let Some((row, col)) =
-                                s.results_click_to_cell(mouse.column, mouse.row)
+                                s.results_drag_to_cell(mouse.column, mouse.row)
                             {
                                 let idx = s.active_result_tab;
                                 if let Some(t) = s.result_tabs.get_mut(idx) {

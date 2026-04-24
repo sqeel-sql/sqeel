@@ -1197,6 +1197,49 @@ impl AppState {
         self.clamp_hover_scroll();
     }
 
+    /// Drag-extended variant of [`Self::results_click_to_cell`] —
+    /// when the pointer leaves the body the cursor keeps stepping
+    /// toward the edge it crossed, so a drag-select that runs off the
+    /// visible area still grows the selection (and auto-scrolls via
+    /// `clamp_results_cursor`).
+    pub fn results_drag_to_cell(&self, mx: u16, my: u16) -> Option<(usize, usize)> {
+        if let Some(cell) = self.results_click_to_cell(mx, my) {
+            return Some(cell);
+        }
+        let tab = self.active_result()?;
+        let ResultsPane::Results(r) = &tab.kind else {
+            return None;
+        };
+        if r.rows.is_empty() || r.columns.is_empty() {
+            return None;
+        }
+        let body_x = self.results_body_x.load(Ordering::Relaxed);
+        let body_y = self.results_body_y.load(Ordering::Relaxed);
+        let body_w = self.results_body_width.load(Ordering::Relaxed);
+        let body_h = self.results_body_rows.load(Ordering::Relaxed);
+        if body_w == 0 || body_h == 0 {
+            return None;
+        }
+        let (cur_row, cur_col) = match tab.cursor {
+            ResultsCursor::Cell { row, col } => (row, col),
+            ResultsCursor::Header(c) => (0, c),
+            _ => (0, 0),
+        };
+        let mut row = cur_row;
+        let mut col = cur_col;
+        if my < body_y {
+            row = row.saturating_sub(1);
+        } else if my >= body_y + body_h {
+            row = (row + 1).min(r.rows.len().saturating_sub(1));
+        }
+        if mx < body_x {
+            col = col.saturating_sub(1);
+        } else if mx >= body_x + body_w {
+            col = (col + 1).min(r.columns.len().saturating_sub(1));
+        }
+        Some((row, col))
+    }
+
     /// Translate a terminal-space mouse click into a `(row, col)` on
     /// the active results grid. Mirrors [`Self::hover_click_to_cell`]
     /// so both panes share the same click → cell idiom (drag-select,
@@ -1234,6 +1277,45 @@ impl AppState {
             col += 1;
         }
         None
+    }
+
+    /// Drag-extended variant of [`Self::hover_click_to_cell`] — when
+    /// the pointer leaves the body during a mouse drag we step the
+    /// cursor (and the scroll offset) one cell toward the edge the
+    /// drag is crossing, so the selection keeps growing in that
+    /// direction. Returns `None` only when there's no hover grid.
+    pub fn hover_drag_to_cell(&self, mx: u16, my: u16) -> Option<(usize, usize)> {
+        if let Some(cell) = self.hover_click_to_cell(mx, my) {
+            return Some(cell);
+        }
+        let t = self.hover_table.as_ref()?;
+        if t.rows.is_empty() || t.columns.is_empty() {
+            return None;
+        }
+        let body_x = self.hover_body_x.load(Ordering::Relaxed);
+        let body_y = self.hover_body_y.load(Ordering::Relaxed);
+        let body_w = self.hover_body_width.load(Ordering::Relaxed);
+        let body_h = self.hover_body_height.load(Ordering::Relaxed);
+        if body_w == 0 || body_h == 0 {
+            return None;
+        }
+        let (cur_row, cur_col) = match self.hover_cursor {
+            ResultsCursor::Cell { row, col } => (row, col),
+            _ => (0, 0),
+        };
+        let mut row = cur_row;
+        let mut col = cur_col;
+        if my < body_y {
+            row = row.saturating_sub(1);
+        } else if my >= body_y + body_h {
+            row = (row + 1).min(t.rows.len().saturating_sub(1));
+        }
+        if mx < body_x {
+            col = col.saturating_sub(1);
+        } else if mx >= body_x + body_w {
+            col = (col + 1).min(t.columns.len().saturating_sub(1));
+        }
+        Some((row, col))
     }
 
     /// Translate a terminal-space mouse click into a `(row, col)` on
