@@ -414,18 +414,25 @@ fn spawn_executor(
 
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
+            // Clear any stale cancel signal left over from a previous
+            // request (e.g. user pressed Ctrl-C while idle) so the new
+            // query doesn't abort before it starts.
+            let cancel = state.lock().unwrap().cancel_control.clone();
+            cancel.reset();
             match req {
                 QueryRequest::Single(query, tab_idx) => {
-                    // Run old-results cleanup concurrently with query execution
                     let cleanup_slug = conn_slug.clone();
                     tokio::spawn(async move {
                         evict_old_results(&cleanup_slug);
                     });
-                    let result = conn.execute(&query).await;
+                    let outcome = tokio::select! {
+                        r = conn.execute(&query) => Some(r),
+                        _ = cancel.cancelled() => None,
+                    };
                     let mut s = state.lock().unwrap();
                     s.batch_in_progress = false;
-                    match result {
-                        Ok(mut r) => {
+                    match outcome {
+                        Some(Ok(mut r)) => {
                             let filename = s.persist_result(&query, &r);
                             s.push_history(&query);
                             r.compute_col_widths();
@@ -437,14 +444,17 @@ fn spawn_executor(
                                 s.invalidate_for_ddl(&effect);
                             }
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             s.finish_result_tab(tab_idx, ResultsPane::Error(e.to_string()));
+                        }
+                        None => {
+                            // Cancelled before the query completed.
+                            s.finish_result_tab(tab_idx, ResultsPane::Cancelled);
                         }
                     }
                     s.results_dirty = true;
                 }
                 QueryRequest::Batch(queries, start_idx) => {
-                    // Run old-results cleanup concurrently with batch execution
                     let cleanup_slug = conn_slug.clone();
                     tokio::spawn(async move {
                         evict_old_results(&cleanup_slug);
@@ -454,14 +464,21 @@ fn spawn_executor(
                         (s.stop_on_error, s.start_batch())
                     };
                     let query_count = queries.len();
+                    let mut cancelled = false;
                     for (i, query) in queries.into_iter().enumerate() {
+                        if cancel.is_cancelled() {
+                            cancelled = true;
+                            break;
+                        }
                         let tab_idx = start_idx + i;
-                        let result = conn.execute(&query).await;
-                        let is_err = result.is_err();
-                        let stop = {
+                        let outcome = tokio::select! {
+                            r = conn.execute(&query) => Some(r),
+                            _ = cancel.cancelled() => None,
+                        };
+                        let (is_err, stop) = {
                             let mut s = state.lock().unwrap();
-                            match result {
-                                Ok(mut r) => {
+                            let (is_err, stop) = match outcome {
+                                Some(Ok(mut r)) => {
                                     let filename = s.persist_result(&query, &r);
                                     s.push_history(&query);
                                     r.compute_col_widths();
@@ -472,16 +489,28 @@ fn spawn_executor(
                                     if let Some(effect) = parse_ddl(&query) {
                                         s.invalidate_for_ddl(&effect);
                                     }
+                                    (false, false)
                                 }
-                                Err(e) => {
+                                Some(Err(e)) => {
                                     s.finish_result_tab(tab_idx, ResultsPane::Error(e.to_string()));
+                                    (true, stop_on_error)
                                 }
-                            }
+                                None => {
+                                    // User cancelled this query — mark it and
+                                    // break out so the rest of the batch doesn't
+                                    // run.
+                                    s.finish_result_tab(tab_idx, ResultsPane::Cancelled);
+                                    cancelled = true;
+                                    (false, true)
+                                }
+                            };
                             s.results_dirty = true;
-                            is_err && stop_on_error
+                            (is_err, stop)
                         };
+                        let _ = is_err;
                         if stop {
-                            // Mark remaining loading tabs as cancelled
+                            // Mark remaining loading tabs as cancelled so the
+                            // UI stops showing them as pending.
                             let mut s = state.lock().unwrap();
                             for j in (i + 1)..query_count {
                                 let remaining_idx = start_idx + j;
@@ -493,8 +522,12 @@ fn spawn_executor(
                     }
                     let mut s = state.lock().unwrap();
                     s.end_batch(batch_start);
+                    let _ = cancelled;
                 }
             }
+            // Reset again so a cancel-late (fired between breakout and
+            // here) doesn't leak into the next request.
+            cancel.reset();
         }
     });
 }

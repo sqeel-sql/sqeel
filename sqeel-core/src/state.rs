@@ -15,6 +15,74 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+impl AppState {
+    /// True iff a single query or batch is currently running against
+    /// the DB. Used to gate the Ctrl-C cancel keybinding — outside a
+    /// running query Ctrl-C falls through to other handlers.
+    pub fn query_in_flight(&self) -> bool {
+        self.batch_in_progress
+            || self
+                .result_tabs
+                .iter()
+                .any(|t| matches!(t.kind, ResultsPane::Loading))
+    }
+
+    /// Signal the executor to cancel the currently running query (or
+    /// the rest of the running batch). Called by the TUI on Ctrl-C /
+    /// `:cancel`. Safe to call when no query is in flight — the flag
+    /// is cleared by the executor at the start of the next request.
+    pub fn cancel_current_query(&self) {
+        self.cancel_control.cancel();
+    }
+}
+
+/// Per-query cancellation handle. Set once at startup + shared
+/// between the TUI and the query executor. The TUI flips the flag on
+/// user cancel (Ctrl-C / `:cancel`) and wakes every waiter; the
+/// executor re-sets between requests so a cancel doesn't leak into
+/// the next query.
+#[derive(Default)]
+pub struct CancelControl {
+    flag: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl CancelControl {
+    /// Flip the flag on + wake every current waiter. Safe to call
+    /// while no waiters are listening; the flag stays set until the
+    /// next [`reset`].
+    pub fn cancel(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Clear the flag. The executor calls this at the start of each
+    /// request so a stale cancel (pressed while idle) doesn't
+    /// immediately abort the next query.
+    pub fn reset(&self) {
+        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Future that resolves when [`cancel`] is called. Picks up a
+    /// cancel that was signalled before the await started, so there's
+    /// no lost-wake race when the executor enters the select.
+    pub async fn cancelled(&self) {
+        loop {
+            if self.is_cancelled() {
+                return;
+            }
+            self.notify.notified().await;
+            if self.is_cancelled() {
+                return;
+            }
+        }
+    }
+}
+
 /// A tab-content load that [`AppState::switch_to_tab`] deferred
 /// because the tab's cached content wasn't in memory. The TUI drives
 /// the actual `persistence::load_query` on a blocking task so slow
@@ -336,6 +404,11 @@ pub struct AppState {
     pub lsp_binary: String,
     // Live query channel — set by the binary when connected
     pub query_tx: Option<tokio::sync::mpsc::Sender<QueryRequest>>,
+    /// Shared cancel signal for the active single / batch query.
+    /// The TUI flips it on user cancel; the executor aborts the
+    /// current sqlx future via `tokio::select!` and skips any
+    /// remaining queries in the batch.
+    pub cancel_control: std::sync::Arc<CancelControl>,
     /// Lazy schema-load channel — set by the binary when connected. Toggling a
     /// sidebar node into an expanded state posts a request here so the loader
     /// fetches tables/columns on demand instead of eagerly up front.
@@ -3190,6 +3263,61 @@ mod tests {
         // But the editor (tab_content_pending) is NOT clobbered with
         // b's content — we're viewing a.
         assert!(s.tab_content_pending.is_none());
+    }
+
+    #[test]
+    fn cancel_control_flag_set_and_reset() {
+        let c = CancelControl::default();
+        assert!(!c.is_cancelled());
+        c.cancel();
+        assert!(c.is_cancelled());
+        c.reset();
+        assert!(!c.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_control_cancelled_future_resolves_after_cancel() {
+        let c = std::sync::Arc::new(CancelControl::default());
+        let c2 = c.clone();
+        let waiter = tokio::spawn(async move { c2.cancelled().await });
+        // Tiny yield so the waiter enters the Notify await.
+        tokio::task::yield_now().await;
+        c.cancel();
+        tokio::time::timeout(std::time::Duration::from_millis(100), waiter)
+            .await
+            .expect("cancelled() should resolve after cancel()")
+            .expect("waiter task ok");
+    }
+
+    #[tokio::test]
+    async fn cancel_control_cancelled_future_resolves_if_already_cancelled() {
+        let c = CancelControl::default();
+        c.cancel();
+        // Should return immediately without timing out.
+        tokio::time::timeout(std::time::Duration::from_millis(50), c.cancelled())
+            .await
+            .expect("cancelled() should resolve immediately when flag is already set");
+    }
+
+    #[test]
+    fn query_in_flight_true_during_batch_or_loading_tab() {
+        use crate::state::{ResultsPane, ResultsTab};
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        assert!(!s.query_in_flight());
+        s.batch_in_progress = true;
+        assert!(s.query_in_flight());
+        s.batch_in_progress = false;
+        s.result_tabs.push(ResultsTab {
+            query: "q".into(),
+            kind: ResultsPane::Loading,
+            cursor: crate::state::ResultsCursor::Query,
+            scroll: 0,
+            col_scroll: 0,
+            saved_filename: None,
+            selection: None,
+        });
+        assert!(s.query_in_flight());
     }
 
     #[test]

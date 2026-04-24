@@ -1363,6 +1363,24 @@ async fn run_loop(
                 }
             }
             Event::Key(key) => {
+                // Ctrl-C while a query / batch is running cancels the
+                // current query and skips any remaining ones in the
+                // batch. Falls through to the regular handler
+                // otherwise so Ctrl-C keeps its "dismiss results"
+                // binding in idle state.
+                if key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('c'))
+                {
+                    let in_flight = state.lock().unwrap().query_in_flight();
+                    if in_flight {
+                        state.lock().unwrap().cancel_current_query();
+                        toasts.push((
+                            "Query cancelled".into(),
+                            ToastKind::Info,
+                            std::time::Instant::now(),
+                        ));
+                        continue;
+                    }
+                }
                 // Double-Esc within 500ms dismisses any visible toasts. Tracked
                 // globally so it works regardless of which mode the first Esc
                 // may have exited.

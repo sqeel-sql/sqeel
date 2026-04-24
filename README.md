@@ -103,6 +103,7 @@ Press `?` in normal mode to open the help overlay.
 | `Ctrl+Enter`       | Run statement under cursor      |
 | `Ctrl+Shift+Enter` | Run all statements in file      |
 | `:q`               | Quit                            |
+| `Ctrl+C`           | Cancel running query / batch    |
 | `Esc Esc`          | Dismiss all toasts              |
 
 ### Leader (default `Space` — config: `editor.leader_key`)
