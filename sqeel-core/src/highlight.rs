@@ -490,7 +490,7 @@ pub fn statement_ranges(source: &str) -> Vec<(usize, usize)> {
         return vec![];
     };
     let root = tree.root_node();
-    let mut ranges = Vec::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
         let start = child.start_byte();
@@ -502,10 +502,78 @@ pub fn statement_ranges(source: &str) -> Vec<(usize, usize)> {
     if ranges.is_empty() && !source.trim().is_empty() {
         ranges.push((0, source.len()));
     }
+    // tree-sitter-sequel groups consecutive statements it can't parse
+    // (e.g. two `DESC users;` in a row) into a single error range, which
+    // would run both as one query on Ctrl+Enter. Re-split each range on
+    // top-level `;` that isn't inside a string / line comment / block
+    // comment so each statement lands on its own row.
+    let split: Vec<(usize, usize)> = ranges
+        .into_iter()
+        .flat_map(|(s, e)| split_top_level_semicolons(source, s, e))
+        .collect();
     // Filter out ranges that are just semicolons or whitespace (tree-sitter-sequel
     // creates separate anonymous nodes for `;` delimiters between statements).
-    ranges.retain(|&(s, e)| !source[s..e].trim().is_empty() && source[s..e].trim() != ";");
-    ranges
+    split
+        .into_iter()
+        .filter(|&(s, e)| {
+            let t = source[s..e].trim();
+            !t.is_empty() && t != ";"
+        })
+        .collect()
+}
+
+/// Walk `source[start..end]` and split it at every top-level `;`
+/// (outside strings / line comments / block comments). Each returned
+/// range includes the trailing `;` so callers see a clean statement.
+fn split_top_level_semicolons(source: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let end = end.min(bytes.len());
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut stmt_start = start;
+    let mut i = start;
+    while i < end {
+        let c = bytes[i];
+        match c {
+            b'\'' | b'"' | b'`' => {
+                i += 1;
+                while i < end && bytes[i] != c {
+                    // Handle escape sequences so `'\''` doesn't fool us.
+                    if bytes[i] == b'\\' && i + 1 < end {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if i < end {
+                    i += 1;
+                }
+            }
+            b'-' if i + 1 < end && bytes[i + 1] == b'-' => {
+                while i < end && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < end && bytes[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < end && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                if i + 1 < end {
+                    i += 2;
+                }
+            }
+            b';' => {
+                out.push((stmt_start, i + 1));
+                stmt_start = i + 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    if stmt_start < end {
+        out.push((stmt_start, end));
+    }
+    out
 }
 
 /// Returns the byte range of the statement containing `byte`. If `byte` falls in
@@ -894,6 +962,31 @@ mod tests {
         h.highlight(src1, Dialect::Generic);
         let spans_incr = h.highlight(src2, Dialect::Generic);
         assert_eq!(spans_full.len(), spans_incr.len());
+    }
+
+    #[test]
+    fn statement_ranges_splits_consecutive_desc_statements() {
+        // Regression: Ctrl+Enter on the 2nd `DESC` used to run both
+        // because tree-sitter-sequel groups unparsed statements into
+        // one error range. Splitter must honour top-level `;`.
+        let src = "desc test;\n\ndesc another;\n";
+        let ranges = statement_ranges(src);
+        let texts: Vec<&str> = ranges.iter().map(|&(s, e)| src[s..e].trim()).collect();
+        assert_eq!(texts, vec!["desc test;", "desc another;"]);
+    }
+
+    #[test]
+    fn statement_ranges_does_not_split_inside_string_literal() {
+        // `;` inside a string must not split — one SELECT only.
+        let src = "select '; not end' as x;\n";
+        let ranges = statement_ranges(src);
+        let selects: Vec<&str> = ranges
+            .iter()
+            .map(|&(s, e)| src[s..e].trim())
+            .filter(|t| t.starts_with("select"))
+            .collect();
+        assert_eq!(selects.len(), 1, "got: {selects:?}");
+        assert!(selects[0].contains("; not end"));
     }
 
     #[test]
