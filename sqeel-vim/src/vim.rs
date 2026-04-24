@@ -2168,12 +2168,26 @@ fn execute_line_op(ed: &mut Editor<'_>, op: Operator, count: usize) {
         }
         Operator::Delete => {
             ed.push_undo();
+            let deleted_through_last = end_row + 1 >= total;
             select_full_lines(ed, row, end_row);
             ed.vim.yank_linewise = true;
             ed.mutate(|t| t.cut());
             if let Some(y) = non_empty_yank(ed) {
                 ed.last_yank = Some(y);
             }
+            // Vim's `dd` / `Ndd` leaves the cursor on the *first
+            // non-blank* of the line that now occupies `row` — or, if
+            // the deletion consumed the last line, the line above it.
+            let total_after = ed.textarea.lines().len();
+            let target_row = if total_after == 0 {
+                0
+            } else if deleted_through_last {
+                row.saturating_sub(1).min(total_after.saturating_sub(1))
+            } else {
+                row.min(total_after.saturating_sub(1))
+            };
+            ed.textarea.move_cursor(CursorMove::Jump(target_row, 0));
+            move_first_non_whitespace(ed);
             ed.vim.mode = Mode::Normal;
         }
         Operator::Change => {
@@ -3275,6 +3289,49 @@ mod tests {
         run_keys(&mut e, "2dd");
         assert_eq!(e.textarea.lines().len(), 1);
         assert_eq!(e.textarea.lines()[0], "c");
+    }
+
+    /// Vim's `dd` leaves the cursor on the first non-blank of the line
+    /// that now sits at the deleted row — not at the end of the
+    /// previous line, which is where tui-textarea's raw cut would
+    /// park it.
+    #[test]
+    fn dd_in_middle_puts_cursor_on_first_non_blank_of_next() {
+        let mut e = editor_with("one\ntwo\n    three\nfour");
+        e.textarea.move_cursor(CursorMove::Jump(1, 2));
+        run_keys(&mut e, "dd");
+        // Buffer: ["one", "    three", "four"]
+        assert_eq!(e.textarea.lines()[1], "    three");
+        assert_eq!(e.textarea.cursor(), (1, 4));
+    }
+
+    #[test]
+    fn dd_on_last_line_puts_cursor_on_first_non_blank_of_prev() {
+        let mut e = editor_with("one\n  two\nthree");
+        e.textarea.move_cursor(CursorMove::Jump(2, 0));
+        run_keys(&mut e, "dd");
+        // Buffer: ["one", "  two"]
+        assert_eq!(e.textarea.lines().len(), 2);
+        assert_eq!(e.textarea.cursor(), (1, 2));
+    }
+
+    #[test]
+    fn dd_on_only_line_leaves_empty_buffer_and_cursor_at_zero() {
+        let mut e = editor_with("lonely");
+        run_keys(&mut e, "dd");
+        assert_eq!(e.textarea.lines().len(), 1);
+        assert_eq!(e.textarea.lines()[0], "");
+        assert_eq!(e.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn count_dd_puts_cursor_on_first_non_blank_of_remaining() {
+        let mut e = editor_with("a\nb\nc\n   d\ne");
+        // Cursor on row 1, "3dd" deletes b/c/   d → lines become [a, e].
+        e.textarea.move_cursor(CursorMove::Jump(1, 0));
+        run_keys(&mut e, "3dd");
+        assert_eq!(e.textarea.lines(), &["a".to_string(), "e".to_string()]);
+        assert_eq!(e.textarea.cursor(), (1, 0));
     }
 
     #[test]
