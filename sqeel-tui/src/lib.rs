@@ -1397,7 +1397,15 @@ async fn run_loop(
                                 editor::ex::ExEffect::Save => {
                                     let result = {
                                         let mut s = state.lock().unwrap();
+                                        // The heavy content pipeline is
+                                        // gated off for buffers over 2 MB,
+                                        // which otherwise leaves
+                                        // `editor_content_synced = false`
+                                        // and makes `save_active_tab`
+                                        // fall back to stale `tab.content`.
+                                        // Bypass by syncing explicitly here.
                                         s.editor_content = Arc::new(editor.content());
+                                        s.editor_content_synced = true;
                                         s.save_active_tab()
                                     };
                                     match result {

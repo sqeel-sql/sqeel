@@ -2933,4 +2933,63 @@ mod tests {
             }
         );
     }
+
+    /// Redirect the data dir to a fresh tempdir so tests exercising
+    /// `save_active_tab` don't write to the user's real
+    /// `~/.local/share/sqeel`. Returns the dir for the caller to keep
+    /// alive for the duration of the test.
+    fn isolated_data_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: tests are single-threaded per process unless marked
+        // `#[test]` with parallel execution — these two tests touch
+        // the same env var, so they share one tempdir via this setter
+        // being idempotent per process.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", dir.path());
+        }
+        dir
+    }
+
+    /// Regression: above the heavy-pipeline gate (buffers > 2 MB) the
+    /// TUI used to leave `editor_content_synced = false`, so a `:w`
+    /// would write the stale cached `tab.content` instead of the
+    /// freshly updated `editor_content`. Pins the underlying
+    /// `save_active_tab` contract — the TUI is expected to flip
+    /// `editor_content_synced = true` before invoking save.
+    #[test]
+    fn save_active_tab_uses_editor_content_when_synced() {
+        use std::sync::Arc;
+        let _dir = isolated_data_dir();
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.tabs.push(TabEntry::open(
+            "scratch_sync".into(),
+            "stale on disk".to_string(),
+        ));
+        s.active_tab = 0;
+        s.editor_content = Arc::new("fresh edit".to_string());
+        s.editor_content_synced = true;
+        let _ = s.save_active_tab();
+        assert_eq!(s.tabs[0].content.as_deref(), Some("fresh edit"));
+    }
+
+    #[test]
+    fn save_active_tab_falls_back_to_tab_content_when_not_synced() {
+        use std::sync::Arc;
+        let _dir = isolated_data_dir();
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.tabs.push(TabEntry::open(
+            "scratch_unsynced".into(),
+            "cached content".to_string(),
+        ));
+        s.active_tab = 0;
+        s.editor_content = Arc::new("fresh edit but not synced".to_string());
+        s.editor_content_synced = false;
+        let _ = s.save_active_tab();
+        // Fall back to the cached tab.content so a freshly loaded tab
+        // doesn't get clobbered with whatever `editor_content` held
+        // before the TUI sync happened (startup race).
+        assert_eq!(s.tabs[0].content.as_deref(), Some("cached content"));
+    }
 }
