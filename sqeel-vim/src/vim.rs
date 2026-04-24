@@ -311,10 +311,12 @@ pub struct SearchPrompt {
 #[derive(Debug, Clone)]
 struct InsertSession {
     count: usize,
-    /// Min/max row visited during this session.
+    /// Min/max row visited during this session. Widens on every key.
     row_min: usize,
     row_max: usize,
-    /// Snapshot of lines[row_min..=row_max] at session entry.
+    /// Snapshot of the full buffer at session entry. Used to diff the
+    /// affected row window at finish without being fooled by cursor
+    /// navigation through rows the user never edited.
     before_lines: Vec<String>,
     reason: InsertReason,
 }
@@ -507,6 +509,13 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
         }
     }
 
+    // Widen the session's visited row window *before* handling the key
+    // so navigation-only keystrokes (arrow keys) still extend the range.
+    if let Some(ref mut session) = ed.vim.insert_session {
+        let (row, _) = ed.textarea.cursor();
+        session.row_min = session.row_min.min(row);
+        session.row_max = session.row_max.max(row);
+    }
     if ed.textarea.input(input) {
         ed.content_dirty = true;
         if let Some(ref mut session) = ed.vim.insert_session {
@@ -523,10 +532,20 @@ fn finish_insert_session(ed: &mut Editor<'_>) {
         return;
     };
     let lines = ed.textarea.lines();
-    let row_max = session.row_max.min(lines.len().saturating_sub(1));
-    let before = session.before_lines.join("\n");
-    let after = if row_max >= session.row_min {
-        lines[session.row_min..=row_max].join("\n")
+    // Clamp both slices to their respective bounds — the buffer may have
+    // grown (Enter splits rows) or shrunk (Backspace joins rows) during
+    // the session, so row_max can overshoot either side.
+    let after_end = session.row_max.min(lines.len().saturating_sub(1));
+    let before_end = session
+        .row_max
+        .min(session.before_lines.len().saturating_sub(1));
+    let before = if before_end >= session.row_min && session.row_min < session.before_lines.len() {
+        session.before_lines[session.row_min..=before_end].join("\n")
+    } else {
+        String::new()
+    };
+    let after = if after_end >= session.row_min && session.row_min < lines.len() {
+        lines[session.row_min..=after_end].join("\n")
     } else {
         String::new()
     };
@@ -598,12 +617,11 @@ fn begin_insert(ed: &mut Editor<'_>, count: usize, reason: InsertReason) {
         reason
     };
     let (row, _) = ed.textarea.cursor();
-    let line = ed.textarea.lines()[row].clone();
     ed.vim.insert_session = Some(InsertSession {
         count,
         row_min: row,
         row_max: row,
-        before_lines: vec![line],
+        before_lines: ed.textarea.lines().to_vec(),
         reason,
     });
     ed.vim.mode = Mode::Insert;
@@ -1951,12 +1969,11 @@ fn begin_insert_noundo(ed: &mut Editor<'_>, count: usize, reason: InsertReason) 
         reason
     };
     let (row, _) = ed.textarea.cursor();
-    let line = ed.textarea.lines()[row].clone();
     ed.vim.insert_session = Some(InsertSession {
         count,
         row_min: row,
         row_max: row,
-        before_lines: vec![line],
+        before_lines: ed.textarea.lines().to_vec(),
         reason,
     });
     ed.vim.mode = Mode::Insert;
@@ -4369,5 +4386,31 @@ mod tests {
         run_keys(&mut e, "<C-b>");
         // No explicit assert beyond "didn't panic".
         assert!(!e.textarea.lines().is_empty());
+    }
+
+    /// Regression: arrow-navigation during a count-insert session must
+    /// not pull unrelated rows into the "inserted" replay string.
+    /// Before the fix, `before_lines` only snapshotted the entry row,
+    /// so the diff at Esc spuriously saw the navigated-over row as
+    /// part of the insert — count-replay then duplicated cross-row
+    /// content across the buffer.
+    #[test]
+    fn count_insert_with_arrow_nav_does_not_leak_rows() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("row0\nrow1\nrow2");
+        // `3i`, type X, arrow down, Esc.
+        run_keys(&mut e, "3iX<Down><Esc>");
+        // Row 0 keeps the originally-typed X.
+        assert!(e.textarea.lines()[0].contains('X'));
+        // Row 1 must not contain a fragment of row 0 ("row0") — that
+        // was the buggy leak from the before-diff window.
+        assert!(
+            !e.textarea.lines()[1].contains("row0"),
+            "row1 leaked row0 contents: {:?}",
+            e.textarea.lines()[1]
+        );
+        // Buffer stays the same number of rows — no extra lines
+        // injected by a multi-line "inserted" replay.
+        assert_eq!(e.textarea.lines().len(), 3);
     }
 }
