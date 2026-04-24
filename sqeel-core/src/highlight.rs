@@ -891,6 +891,60 @@ mod tests {
     }
 
     #[test]
+    fn debug_dump_with_alter_tail() {
+        // Match user's actual buffer: the header lines + 40 repeated
+        // `-- ALTER TABLE …` lines at the bottom, totalling ~64 rows.
+        let header = "select * from ppc_third.searches_182 order by id desc;\n\
+                   select * from ppc_third.searches_181 order by id desc;\n\
+                   select count(*), status from ppc_third.searches_182 group by status;\n\
+                   \n\
+                   -- TODO: \n\
+                   -- test\n\
+                   \n\
+                   -- TODO test\n\
+                   \n\
+                   -- TODO: this is a test\n\
+                   -- FIXME: this is a test\n\
+                   -- this is a test\n\
+                   -- FIX:\n\
+                   \n\
+                   -- NOTE: another note\n\
+                   -- WARN: woah...\n\
+                   -- this is a warning\n\
+                   -- INFO:  this is \n\
+                   \n\
+                   select * from users;\n\
+                   \n\
+                   DESC users;\n\
+                   \n\
+                   DESC users;\n\
+                   \n";
+        let alter = "-- ALTER TABLE ppc_third.`searches_182` ADD COLUMN `error` TEXT NULL AFTER `status`;\n";
+        let mut src = header.to_string();
+        for _ in 0..40 {
+            src.push_str(alter);
+        }
+
+        let mut h = Highlighter::new().unwrap();
+        let spans = h.highlight(&src, Dialect::MySql);
+        for s in &spans {
+            let t = &src[s.start_byte..s.end_byte];
+            let sr = s.start_row;
+            if (19..=25).contains(&sr) {
+                println!(
+                    "{:?} r{}:{}-{}:{} byte={}..{} text={:?}",
+                    s.kind, sr, s.start_col, s.end_row, s.end_col, s.start_byte, s.end_byte, t
+                );
+            }
+        }
+        let desc_count = spans
+            .iter()
+            .filter(|s| s.kind == TokenKind::Keyword && &src[s.start_byte..s.end_byte] == "DESC")
+            .count();
+        println!("DESC keyword count = {}", desc_count);
+    }
+
+    #[test]
     fn debug_dump_full_buffer_spans() {
         let src = "select * from ppc_third.searches_182 order by id desc;\n\
                    select * from ppc_third.searches_181 order by id desc;\n\

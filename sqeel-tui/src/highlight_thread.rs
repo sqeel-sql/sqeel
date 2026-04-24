@@ -60,6 +60,42 @@ impl HighlightThread {
                     };
 
                     let spans = highlighter.highlight_shared(&req.source, req.dialect);
+                    if let Ok(path) = std::env::var("SQEEL_DEBUG_HL_DUMP") {
+                        use std::io::Write;
+                        if let Ok(mut f) =
+                            std::fs::OpenOptions::new().create(true).append(true).open(&path)
+                        {
+                            let _ = writeln!(
+                                f,
+                                "=== worker parsed: start_row={} row_count={} source_bytes={} dialect={:?}",
+                                req.start_row,
+                                req.row_count,
+                                req.source.len(),
+                                req.dialect,
+                            );
+                            for s in &spans {
+                                let text: String = req
+                                    .source
+                                    .get(s.start_byte..s.end_byte)
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(60)
+                                    .collect();
+                                let _ = writeln!(
+                                    f,
+                                    "  {:?} slice-r{}:{}-{}:{} byte={}..{} text={:?}",
+                                    s.kind,
+                                    s.start_row,
+                                    s.start_col,
+                                    s.end_row,
+                                    s.end_col,
+                                    s.start_byte,
+                                    s.end_byte,
+                                    text,
+                                );
+                            }
+                        }
+                    }
 
                     if result_tx
                         .send(HighlightResult {
