@@ -466,6 +466,10 @@ async fn run_loop(
     // swallow, so the next iteration processes it instead of calling
     // `event::read` again.
     let mut pending_event: Option<Event> = None;
+    // Last cursor shape sent to the terminal. Each `SetCursorStyle`
+    // emit is an ANSI escape → blocking write to stdout; skip it when
+    // the shape hasn't changed since the last draw.
+    let mut last_cursor_shape: Option<CursorShape> = None;
     // Force redraw on first iteration and after every event.
     let mut event_triggered_redraw = true;
     // Last time we ran the schema-freshness sweep. Rate-limited to once a
@@ -1045,48 +1049,59 @@ async fn run_loop(
         last_pending_loads = pending_loads;
 
         if needs_redraw {
-            let cmd_snap = command_input.clone();
-            let rename_snap = rename_input.clone();
-            let picker_snap = file_picker.clone();
-            let delete_snap = delete_confirm.clone();
-            let quit_prompt_snap: Option<Vec<String>> = quit_prompt
+            // Only the two things that can't be referenced directly
+            // (need the state lock or a type adapt) get snapshotted;
+            // everything else passes through by ref.
+            let quit_prompt_dirty: Option<Vec<String>> = quit_prompt
                 .as_ref()
                 .map(|_| state.lock().unwrap().dirty_tab_names());
-            let schema_search_snap = schema_search.clone();
-            let editor_search_text_snap: Option<String> =
-                editor.search_prompt().map(|p| p.text.clone());
-            let last_editor_search_snap = editor.last_search().map(str::to_owned);
-            let toast_snap: Vec<(String, ToastKind)> = toasts
-                .iter()
-                .map(|(msg, kind, _)| (msg.clone(), *kind))
-                .collect();
+            // toast_snap only materializes when there are toasts to
+            // render — the empty case is the common one during drag /
+            // steady-state and skipping the Vec alloc keeps per-frame
+            // work minimal.
+            let toast_snap: Vec<(String, ToastKind)> = if toasts.is_empty() {
+                Vec::new()
+            } else {
+                toasts
+                    .iter()
+                    .map(|(msg, kind, _)| (msg.clone(), *kind))
+                    .collect()
+            };
+            let editor_search_text = editor.search_prompt().map(|p| p.text.as_str().to_owned());
+            let last_editor_search = editor.last_search().map(str::to_owned);
             terminal.draw(|f| {
                 let s = state.lock().unwrap();
                 last_draw_areas = draw(
                     f,
                     &s,
                     &mut editor,
-                    cmd_snap.as_ref(),
-                    rename_snap.as_ref(),
-                    picker_snap.as_ref(),
-                    delete_snap.as_deref(),
-                    quit_prompt_snap.as_deref(),
-                    &schema_search_snap,
-                    editor_search_text_snap.as_deref(),
-                    last_editor_search_snap.as_deref(),
+                    command_input.as_ref(),
+                    rename_input.as_ref(),
+                    file_picker.as_ref(),
+                    delete_confirm.as_deref(),
+                    quit_prompt_dirty.as_deref(),
+                    &schema_search,
+                    editor_search_text.as_deref(),
+                    last_editor_search.as_deref(),
                     &toast_snap,
                 );
             })?;
             // Apply the cursor shape requested by draw(). Hidden is handled by
             // ratatui (no set_cursor_position call leaves the cursor hidden).
-            match last_draw_areas.cursor_shape {
-                CursorShape::Bar => {
-                    let _ = execute!(terminal.backend_mut(), SetCursorStyle::SteadyBar);
+            // Skip the ANSI escape when the shape hasn't changed — this
+            // runs on every frame otherwise and each emit is a blocking
+            // stdout write.
+            if last_cursor_shape != Some(last_draw_areas.cursor_shape) {
+                match last_draw_areas.cursor_shape {
+                    CursorShape::Bar => {
+                        let _ = execute!(terminal.backend_mut(), SetCursorStyle::SteadyBar);
+                    }
+                    CursorShape::Block => {
+                        let _ = execute!(terminal.backend_mut(), SetCursorStyle::SteadyBlock);
+                    }
+                    CursorShape::Hidden => {}
                 }
-                CursorShape::Block => {
-                    let _ = execute!(terminal.backend_mut(), SetCursorStyle::SteadyBlock);
-                }
-                CursorShape::Hidden => {}
+                last_cursor_shape = Some(last_draw_areas.cursor_shape);
             }
             last_terminal_size = terminal.size()?;
         }
