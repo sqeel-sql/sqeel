@@ -279,23 +279,27 @@ pub enum ResultsCursor {
 }
 
 /// Bump `col_scroll` so column `col` lies inside a viewport of width `width`
-/// cells, given the column widths baked into `r.col_widths` (plus the 1-cell
-/// `│` separator between columns). Leaves `col_scroll` unchanged if already
-/// visible.
-fn scroll_cols_into_view(r: &QueryResult, col_scroll: &mut usize, col: usize, width: u16) {
+/// cells, given `col_widths` (plus the 1-cell `│` separator between columns).
+/// Leaves `col_scroll` unchanged if already visible. Shared between results
+/// pane and hover popup so both clamp identically.
+pub(crate) fn scroll_cols_into_view_slice(
+    col_widths: &[u16],
+    col_scroll: &mut usize,
+    col: usize,
+    width: u16,
+) {
     if col < *col_scroll {
         *col_scroll = col;
         return;
     }
-    if width == 0 || r.col_widths.is_empty() {
+    if width == 0 || col_widths.is_empty() {
         return;
     }
     // Shrink col_scroll until the cursor column's right edge fits in the
     // viewport. Each column contributes its width plus a 1-cell separator
     // (except after the final column, but over-counting by 1 is safe).
     loop {
-        let used: u32 = r
-            .col_widths
+        let used: u32 = col_widths
             .iter()
             .skip(*col_scroll)
             .take(col + 1 - *col_scroll)
@@ -384,6 +388,15 @@ pub struct AppState {
     /// Focus that was active when the hover grid opened. Esc restores
     /// it so the user lands back on whatever pane they were driving.
     pub hover_prev_focus: Option<Focus>,
+    /// Height of the hover popup's body area (rows currently visible
+    /// between the header separator and the popup's bottom padding).
+    /// Published by the render path each frame so nav helpers can
+    /// clamp the row scroll offset when the cursor leaves the window.
+    pub hover_body_height: AtomicU16,
+    /// Width of the hover popup's body area in terminal cells. Feeds
+    /// the column-scroll clamp so `l` past the right edge advances
+    /// `hover_col_scroll` instead of parking the cursor off-screen.
+    pub hover_body_width: AtomicU16,
     pub active_connection: Option<String>,
     /// SQL dialect of the current connection. Drives per-dialect
     /// keyword highlighting; `Generic` before any connection opens.
@@ -823,12 +836,12 @@ impl AppState {
                     tab.scroll = row + 1 - rows;
                 }
                 if let ResultsPane::Results(r) = &tab.kind {
-                    scroll_cols_into_view(r, &mut tab.col_scroll, col, width);
+                    scroll_cols_into_view_slice(&r.col_widths, &mut tab.col_scroll, col, width);
                 }
             }
             ResultsCursor::Header(col) => {
                 if let ResultsPane::Results(r) = &tab.kind {
-                    scroll_cols_into_view(r, &mut tab.col_scroll, col, width);
+                    scroll_cols_into_view_slice(&r.col_widths, &mut tab.col_scroll, col, width);
                 }
             }
             ResultsCursor::MessageLine(line) => {
@@ -1108,7 +1121,8 @@ impl AppState {
     }
 
     /// Move the hover-grid cursor. `dr`/`dc` are deltas (positive =
-    /// down / right). Clamped to the grid's bounds.
+    /// down / right). Clamped to the grid's bounds; row and column
+    /// scroll follow the cursor so it never leaves the popup window.
     pub fn hover_cursor_move(&mut self, dr: i32, dc: i32) {
         let Some(ref t) = self.hover_table else {
             return;
@@ -1126,6 +1140,33 @@ impl AppState {
             row: new_row,
             col: new_col,
         };
+        self.clamp_hover_scroll();
+    }
+
+    /// Re-clamp the hover row + column scroll offsets so the cursor
+    /// cell stays inside the visible viewport. Published dimensions
+    /// come from the render path; if they're 0 (popup hasn't drawn
+    /// yet) we leave scroll alone and let the next frame fix it up.
+    pub fn clamp_hover_scroll(&mut self) {
+        let Some(ref t) = self.hover_table else {
+            return;
+        };
+        let (cur_row, cur_col) = match self.hover_cursor {
+            ResultsCursor::Cell { row, col } => (row, col),
+            _ => return,
+        };
+        let rows = self.hover_body_height.load(Ordering::Relaxed) as usize;
+        if rows > 0 {
+            if cur_row < self.hover_scroll {
+                self.hover_scroll = cur_row;
+            } else if cur_row >= self.hover_scroll + rows {
+                self.hover_scroll = cur_row + 1 - rows;
+            }
+        }
+        let width = self.hover_body_width.load(Ordering::Relaxed);
+        if width > 0 {
+            scroll_cols_into_view_slice(&t.col_widths, &mut self.hover_col_scroll, cur_col, width);
+        }
     }
 
     /// Jump the hover cursor to the first / last row (`gg` / `G`) or
@@ -1154,6 +1195,7 @@ impl AppState {
                 col: t.columns.len() - 1,
             },
         };
+        self.clamp_hover_scroll();
     }
 
     /// Yank the current hover-cell, or the selection if one is active.

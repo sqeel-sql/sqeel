@@ -2245,8 +2245,63 @@ async fn run_loop(
                             .saturating_add((c as u8 - b'0') as usize);
                     }
                     // ── Hover popup (Focus::Hover) — grid nav + yank ─────
+                    // Esc first cancels an active visual selection so
+                    // the second press closes the popup, mirroring the
+                    // results-pane idiom.
                     (KeyModifiers::NONE, KeyCode::Esc) if focus == Focus::Hover => {
-                        state.lock().unwrap().close_hover();
+                        let mut s = state.lock().unwrap();
+                        if s.hover_selection.is_some() {
+                            s.hover_selection = None;
+                        } else {
+                            s.close_hover();
+                        }
+                    }
+                    // `V` / `v` / `Ctrl-V` — visual-line / block
+                    // selection inside the hover grid. Toggles off on
+                    // the same key, exactly like the results pane.
+                    (KeyModifiers::SHIFT, KeyCode::Char('V'))
+                    | (KeyModifiers::NONE, KeyCode::Char('V'))
+                        if focus == Focus::Hover =>
+                    {
+                        use sqeel_core::state::{ResultsSelection, ResultsSelectionMode};
+                        let mut s = state.lock().unwrap();
+                        let already = matches!(
+                            s.hover_selection,
+                            Some(ResultsSelection {
+                                mode: ResultsSelectionMode::Line,
+                                ..
+                            })
+                        );
+                        if already {
+                            s.hover_selection = None;
+                        } else if let ResultsCursor::Cell { row, col } = s.hover_cursor {
+                            s.hover_selection = Some(ResultsSelection {
+                                anchor: (row, col),
+                                mode: ResultsSelectionMode::Line,
+                            });
+                        }
+                    }
+                    (KeyModifiers::CONTROL, KeyCode::Char('v'))
+                    | (KeyModifiers::NONE, KeyCode::Char('v'))
+                        if focus == Focus::Hover =>
+                    {
+                        use sqeel_core::state::{ResultsSelection, ResultsSelectionMode};
+                        let mut s = state.lock().unwrap();
+                        let already = matches!(
+                            s.hover_selection,
+                            Some(ResultsSelection {
+                                mode: ResultsSelectionMode::Block,
+                                ..
+                            })
+                        );
+                        if already {
+                            s.hover_selection = None;
+                        } else if let ResultsCursor::Cell { row, col } = s.hover_cursor {
+                            s.hover_selection = Some(ResultsSelection {
+                                anchor: (row, col),
+                                mode: ResultsSelectionMode::Block,
+                            });
+                        }
                     }
                     (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down)
                         if focus == Focus::Hover =>
@@ -5314,11 +5369,21 @@ fn draw_hover_table(
     );
     let hr: String = "─".repeat(inner.width as usize);
     f.render_widget(Paragraph::new(hr).style(sep_style), chunks[2]);
+    let body_rect = chunks[3];
+    // Publish the body dimensions so `clamp_hover_scroll` can follow
+    // the cursor with the row + column scroll offsets. Without this
+    // `l` past the viewport leaves the cursor off-screen.
+    state
+        .hover_body_height
+        .store(body_rect.height, std::sync::atomic::Ordering::Relaxed);
+    state
+        .hover_body_width
+        .store(body_rect.width, std::sync::atomic::Ordering::Relaxed);
     f.render_widget(
         Paragraph::new(body_lines)
             .style(bg)
             .scroll((0, char_offset)),
-        chunks[3],
+        body_rect,
     );
 }
 
