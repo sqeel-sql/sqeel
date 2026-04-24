@@ -3835,6 +3835,36 @@ fn apply_window_spans(
     for row_spans in by_row.iter_mut().take(window_end).skip(window_start) {
         row_spans.sort_by_key(|&(s, _, _)| s);
     }
+    // Opt-in debug dump: set SQEEL_DEBUG_HL_DUMP=/path/to/file and the
+    // post-apply span table will be appended there each call. Used to
+    // diagnose why live rendering differs from library unit tests.
+    if let Ok(path) = std::env::var("SQEEL_DEBUG_HL_DUMP") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(
+                f,
+                "--- apply_window_spans window=[{window_start},{window_end}) cursor_row={cursor_row}"
+            );
+            for (row, spans) in by_row
+                .iter()
+                .enumerate()
+                .take(window_end)
+                .skip(window_start)
+            {
+                if !spans.is_empty() {
+                    let line_preview: String = textarea_lines
+                        .get(row)
+                        .map(|l| l.chars().take(60).collect())
+                        .unwrap_or_default();
+                    let _ = writeln!(f, "row {row} [{line_preview:?}]: {spans:?}");
+                }
+            }
+        }
+    }
     textarea.set_syntax_spans(by_row);
 }
 
@@ -4908,5 +4938,67 @@ mod tests {
         row.sort_by_key(|&(s, _, _)| s);
         let ranges: Vec<(usize, usize)> = row.iter().map(|&(s, e, _)| (s, e)).collect();
         assert_eq!(ranges, vec![(0, 10), (10, 15), (15, 30)]);
+    }
+
+    #[test]
+    fn apply_window_spans_keeps_both_desc_keyword_spans() {
+        use super::HighlightResult;
+        use super::theme;
+        use sqeel_core::highlight::{Dialect, Highlighter};
+
+        let src = "select * from ppc_third.searches_182 order by id desc;\n\
+                   select * from ppc_third.searches_181 order by id desc;\n\
+                   select count(*), status from ppc_third.searches_182 group by status;\n\
+                   \n\
+                   -- TODO: \n\
+                   -- test\n\
+                   \n\
+                   -- TODO test\n\
+                   \n\
+                   -- TODO: this is a test\n\
+                   -- FIXME: this is a test\n\
+                   -- this is a test\n\
+                   -- FIX:\n\
+                   \n\
+                   -- NOTE: another note\n\
+                   -- WARN: woah...\n\
+                   -- this is a warning\n\
+                   -- INFO:  this is \n\
+                   \n\
+                   select * from users;\n\
+                   \n\
+                   DESC users;\n\
+                   \n\
+                   DESC users;\n";
+        let _ = theme::load();
+
+        let mut h = Highlighter::new().unwrap();
+        let spans = h.highlight(src, Dialect::MySql);
+        let lines: Vec<String> = src.lines().map(|l| l.to_string()).collect();
+        let row_count = lines.len();
+        let result = HighlightResult {
+            spans,
+            start_row: 0,
+            row_count,
+        };
+
+        let mut ta = tui_textarea::TextArea::new(lines);
+        super::apply_window_spans(&mut ta, &result, row_count, 0);
+        let by_row = ta.take_syntax_spans();
+
+        // Row 21 and row 23 each hold `DESC users;`. Both should have
+        // at least one span starting at col 0 with Keyword styling.
+        let keyword_style =
+            super::token_kind_style(sqeel_core::highlight::TokenKind::Keyword).unwrap();
+        for row in [21usize, 23] {
+            let spans = &by_row[row];
+            let has_kw_at_zero = spans
+                .iter()
+                .any(|&(s, e, st)| s == 0 && e >= 4 && st == keyword_style);
+            assert!(
+                has_kw_at_zero,
+                "row {row} missing Keyword span at col 0..4; row spans = {spans:?}"
+            );
+        }
     }
 }
