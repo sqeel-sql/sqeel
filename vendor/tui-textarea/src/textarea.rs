@@ -1660,7 +1660,13 @@ impl<'a> TextArea<'a> {
         }
     }
 
-    fn compute_row_fingerprint(&self, line: &str, row: usize, lnum_len: u8, col_offset: usize) -> u64 {
+    fn compute_row_fingerprint(
+        &self,
+        line: &str,
+        row: usize,
+        lnum_len: u8,
+        col_offset: usize,
+    ) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
@@ -1713,7 +1719,13 @@ impl<'a> TextArea<'a> {
         h.finish()
     }
 
-    pub(crate) fn line_spans<'b>(&'b self, line: &'b str, row: usize, lnum_len: u8, col_offset: usize) -> Line<'b> {
+    pub(crate) fn line_spans<'b>(
+        &'b self,
+        line: &'b str,
+        row: usize,
+        lnum_len: u8,
+        col_offset: usize,
+    ) -> Line<'b> {
         // Per-row render cache. The input fingerprint captures every
         // thing that can change the produced Line for this row; if it
         // matches the cached entry we return the owned `'static` copy
@@ -1762,7 +1774,10 @@ impl<'a> TextArea<'a> {
         }
 
         if row == self.cursor.0 {
-            hl.cursor_line(self.cursor.1.saturating_sub(col_offset), self.cursor_line_style);
+            hl.cursor_line(
+                self.cursor.1.saturating_sub(col_offset),
+                self.cursor_line_style,
+            );
         }
 
         #[cfg(feature = "search")]
@@ -1788,7 +1803,11 @@ impl<'a> TextArea<'a> {
                 }
                 let s = s.saturating_sub(byte_offset).min(line_len);
                 let e = e.saturating_sub(byte_offset).min(line_len);
-                if s >= e { None } else { Some((s, e, sty)) }
+                if s >= e {
+                    None
+                } else {
+                    Some((s, e, sty))
+                }
             });
             hl.syntax(shifted);
         }
@@ -2634,5 +2653,51 @@ mod tests {
         assert_eq!(textarea.cursor(), (15, 0));
         textarea.scroll((-5, 0));
         assert_eq!(textarea.cursor(), (12, 0));
+    }
+
+    #[test]
+    fn row_cache_hits_on_stable_input() {
+        let textarea: TextArea = ["alpha", "beta", "gamma"].iter().copied().collect();
+        let line0 = textarea.lines()[0].clone();
+        // First call — miss, populates cache for row 0.
+        let _ = textarea.line_spans(&line0, 0, 1, 0);
+        let entry_after_first = textarea.row_cache.borrow().first().cloned();
+        assert!(entry_after_first
+            .as_ref()
+            .and_then(|e| e.line.as_ref())
+            .is_some());
+        let fp_first = entry_after_first.unwrap().fingerprint;
+        // Second call — same inputs, must be a hit (fingerprint unchanged).
+        let _ = textarea.line_spans(&line0, 0, 1, 0);
+        let fp_second = textarea.row_cache.borrow()[0].fingerprint;
+        assert_eq!(fp_first, fp_second);
+    }
+
+    #[test]
+    fn row_cache_invalidates_on_edit() {
+        let mut textarea: TextArea = ["foo", "bar"].iter().copied().collect();
+        let line0 = textarea.lines()[0].clone();
+        let _ = textarea.line_spans(&line0, 0, 1, 0);
+        let fp_before = textarea.row_cache.borrow()[0].fingerprint;
+        // Any edit bumps render_gen via push_history, invalidating all rows.
+        textarea.insert_char('X');
+        let line0_after = textarea.lines()[0].clone();
+        let _ = textarea.line_spans(&line0_after, 0, 1, 0);
+        let fp_after = textarea.row_cache.borrow()[0].fingerprint;
+        assert_ne!(fp_before, fp_after);
+    }
+
+    #[test]
+    fn row_cache_invalidates_on_cursor_row_flip() {
+        let mut textarea: TextArea = ["one", "two", "three"].iter().copied().collect();
+        let line1 = textarea.lines()[1].clone();
+        // Cursor starts at (0, 0) — row 1 is NOT the cursor row.
+        let _ = textarea.line_spans(&line1, 1, 1, 0);
+        let fp_not_cursor = textarea.row_cache.borrow()[1].fingerprint;
+        // Move cursor to row 1 — it's now the cursor row, fingerprint changes.
+        textarea.move_cursor(CursorMove::Jump(1, 0));
+        let _ = textarea.line_spans(&line1, 1, 1, 0);
+        let fp_is_cursor = textarea.row_cache.borrow()[1].fingerprint;
+        assert_ne!(fp_not_cursor, fp_is_cursor);
     }
 }

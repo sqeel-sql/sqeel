@@ -58,7 +58,12 @@ impl Viewport {
         let (row_top, col_top, width, height) = self.rect();
         let row_bottom = row_top.saturating_add(height as usize).saturating_sub(1);
         let col_bottom = col_top.saturating_add(width as usize).saturating_sub(1);
-        (row_top, col_top, row_top.max(row_bottom), col_top.max(col_bottom))
+        (
+            row_top,
+            col_top,
+            row_top.max(row_bottom),
+            col_top.max(col_bottom),
+        )
     }
 
     fn store(&self, row: usize, col: usize, width: u16, height: u16) {
@@ -160,7 +165,10 @@ impl Widget for &TextArea<'_> {
         let (text, style) = if !self.placeholder.is_empty() && self.is_empty() {
             (self.placeholder_widget(), self.placeholder_style)
         } else {
-            (self.text_widget(top_row, height as _, large_col_offset), self.style())
+            (
+                self.text_widget(top_row, height as _, large_col_offset),
+                self.style(),
+            )
         };
 
         // To get fine control over the text color and the surrrounding block they have to be rendered separately

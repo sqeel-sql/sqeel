@@ -213,7 +213,15 @@ impl<'a> LineHighlighter<'a> {
         let mut builder = DisplayTextBuilder::new(tab_len, mask);
 
         if boundaries.is_empty() {
-            emit_with_syntax(&mut spans, &mut builder, line, 0, line.len(), style_begin, &syntax_spans);
+            emit_with_syntax(
+                &mut spans,
+                &mut builder,
+                line,
+                0,
+                line.len(),
+                style_begin,
+                &syntax_spans,
+            );
             if cursor_at_end {
                 spans.push(Span::styled(" ", cursor_style));
             } else if select_at_end {
@@ -233,7 +241,15 @@ impl<'a> LineHighlighter<'a> {
 
         for (next_boundary, end) in boundaries {
             if start < end {
-                emit_with_syntax(&mut spans, &mut builder, line, start, end, style, &syntax_spans);
+                emit_with_syntax(
+                    &mut spans,
+                    &mut builder,
+                    line,
+                    start,
+                    end,
+                    style,
+                    &syntax_spans,
+                );
             }
 
             style = if let Some(s) = next_boundary.style() {
@@ -246,7 +262,15 @@ impl<'a> LineHighlighter<'a> {
         }
 
         if start != line.len() {
-            emit_with_syntax(&mut spans, &mut builder, line, start, line.len(), style, &syntax_spans);
+            emit_with_syntax(
+                &mut spans,
+                &mut builder,
+                line,
+                start,
+                line.len(),
+                style,
+                &syntax_spans,
+            );
         }
 
         if cursor_at_end {

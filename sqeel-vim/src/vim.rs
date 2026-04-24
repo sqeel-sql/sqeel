@@ -5575,4 +5575,28 @@ mod tests {
         let (r, _) = e.textarea.cursor();
         assert!(r <= 4);
     }
+
+    // ─── Search / jumplist interaction ───────────────────────────────
+
+    #[test]
+    fn forward_search_commit_pushes_jump() {
+        let mut e = editor_with("alpha beta\nfoo target end\nmore");
+        e.textarea.move_cursor(CursorMove::Jump(0, 0));
+        run_keys(&mut e, "/target<CR>");
+        // Cursor moved to the match.
+        assert_ne!(e.textarea.cursor(), (0, 0));
+        // Ctrl-o returns to the pre-search position.
+        run_keys(&mut e, "<C-o>");
+        assert_eq!(e.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn search_commit_no_match_does_not_push_jump() {
+        let mut e = editor_with("alpha beta\nfoo end");
+        e.textarea.move_cursor(CursorMove::Jump(0, 3));
+        let pre_len = e.vim.jump_back.len();
+        run_keys(&mut e, "/zzznotfound<CR>");
+        // No match → cursor stays, jumplist shouldn't grow.
+        assert_eq!(e.vim.jump_back.len(), pre_len);
+    }
 }

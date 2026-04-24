@@ -1,5 +1,12 @@
 [workspace]
-members = ["sqeel-core", "sqeel-tui", "sqeel-gui", "sqeel-vim", "sqeel"]
+members = [
+    "sqeel-core",
+    "sqeel-tui",
+    "sqeel-gui",
+    "sqeel-vim",
+    "sqeel",
+    "vendor/tui-textarea",
+]
 resolver = "2"
 
 [patch.crates-io]
