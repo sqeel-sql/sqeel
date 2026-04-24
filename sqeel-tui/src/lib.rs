@@ -3736,6 +3736,12 @@ fn apply_window_spans(
     for row_spans in by_row.iter_mut().take(window_end).skip(window_start) {
         row_spans.clear();
     }
+    // Per-row comment bodies derived from tree-sitter's Comment spans,
+    // so we only treat `--` / `/*` as a comment when the parser agrees
+    // (no false positives inside string literals, and block comments
+    // end at `*/` not at EOL).
+    let mut comment_ranges_by_row: Vec<Vec<CommentBody>> = vec![Vec::new(); buffer_rows];
+    let textarea_lines = textarea.lines();
     for s in &result.spans {
         let Some(style) = token_kind_style(s.kind) else {
             continue;
@@ -3748,6 +3754,13 @@ fn apply_window_spans(
         if sr == er {
             if s.end_col > s.start_col {
                 by_row[sr].push((s.start_col, s.end_col, style));
+                if s.kind == TokenKind::Comment {
+                    comment_ranges_by_row[sr].push(comment_body_from_span(
+                        &textarea_lines[sr],
+                        s.start_col,
+                        s.end_col,
+                    ));
+                }
             }
         } else {
             by_row[sr].push((s.start_col, usize::MAX, style));
@@ -3756,6 +3769,26 @@ fn apply_window_spans(
             }
             if er < buffer_rows && s.end_col > 0 {
                 by_row[er].push((0, s.end_col, style));
+            }
+            if s.kind == TokenKind::Comment {
+                let first_end = textarea_lines[sr].len();
+                comment_ranges_by_row[sr].push(comment_body_from_span(
+                    &textarea_lines[sr],
+                    s.start_col,
+                    first_end,
+                ));
+                for row in (sr + 1)..er.min(buffer_rows) {
+                    comment_ranges_by_row[row].push(CommentBody {
+                        start: 0,
+                        end: textarea_lines[row].len(),
+                    });
+                }
+                if er < buffer_rows && s.end_col > 0 {
+                    comment_ranges_by_row[er].push(CommentBody {
+                        start: 0,
+                        end: s.end_col.min(textarea_lines[er].len()),
+                    });
+                }
             }
         }
     }
@@ -3777,11 +3810,11 @@ fn apply_window_spans(
         .take(window_end)
         .skip(window_start)
     {
-        let line = &textarea.lines()[row];
+        let line = &textarea_lines[row];
         let on_cursor_line = row == cursor_row;
-        let comments: Vec<CommentBody> = comment_body_from_line(line).into_iter().collect();
+        let comments = &comment_ranges_by_row[row];
         active_color =
-            apply_marker_overlay(row_spans, line, &comments, active_color, on_cursor_line);
+            apply_marker_overlay(row_spans, line, comments, active_color, on_cursor_line);
     }
     // Sort each touched row so `line_spans` sees them in start-byte order.
     for row_spans in by_row.iter_mut().take(window_end).skip(window_start) {
@@ -3800,19 +3833,41 @@ struct Marker {
 
 /// Byte range of a single comment's *body* on a given line — the span
 /// between the comment's start delimiter (e.g. `--`, `/*`) and its end.
-/// Authoritative source is tree-sitter; for pre-window lines we fall
-/// back to [`comment_body_from_line`] which scans `line.find("--")` /
-/// `line.find("/*")`.
+/// Sourced from tree-sitter comment spans inside the highlight window;
+/// the backward seed scan that runs outside that window uses the
+/// [`comment_body_from_line`] string fallback.
 #[derive(Clone, Copy)]
 struct CommentBody {
     start: usize,
     end: usize,
 }
 
-/// Pure-byte fallback used when no tree-sitter output is available for
-/// the row (e.g. during the backward seed scan outside the highlight
-/// window). Picks the first line comment `--` or block comment `/*`
-/// start on the line.
+/// Build a `CommentBody` from a tree-sitter comment span's byte range
+/// on `line`. Skips the `--` or `/*` delimiter (2 bytes) if the span
+/// starts with one; otherwise (continuation row of a multi-line block
+/// comment) uses the span start as-is.
+fn comment_body_from_span(line: &str, span_start: usize, span_end: usize) -> CommentBody {
+    let bytes = line.as_bytes();
+    let delim = if span_start + 1 < bytes.len() {
+        let (a, b) = (bytes[span_start], bytes[span_start + 1]);
+        if (a == b'-' && b == b'-') || (a == b'/' && b == b'*') {
+            2
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    CommentBody {
+        start: (span_start + delim).min(line.len()),
+        end: span_end.min(line.len()),
+    }
+}
+
+/// String-scan fallback for rows outside the tree-sitter window (the
+/// backward seed scan). Known to false-positive inside string literals
+/// — OK for the 500-row seed cap where a small mis-read self-corrects
+/// at the first real marker.
 fn comment_body_from_line(line: &str) -> Option<CommentBody> {
     let hit = [line.find("--"), line.find("/*")]
         .into_iter()
@@ -4771,6 +4826,61 @@ mod tests {
             super::apply_marker_overlay(&mut row, line, &comments, Some(u.sql_marker_warn), false);
         assert_eq!(new, None);
         assert!(row.is_empty());
+    }
+
+    #[test]
+    fn comment_body_from_span_skips_line_delim() {
+        let line = "SELECT 1; -- FIX: x";
+        let body = super::comment_body_from_span(line, 10, line.len());
+        // `--` at 10..12 skipped; body covers everything after it.
+        assert_eq!(body.start, 12);
+        assert_eq!(body.end, line.len());
+    }
+
+    #[test]
+    fn comment_body_from_span_skips_block_delim() {
+        let line = "/* FIX: x */ more";
+        // Block comment span is only `/* FIX: x */` → end before ` more`.
+        let body = super::comment_body_from_span(line, 0, 12);
+        assert_eq!(body.start, 2);
+        assert_eq!(body.end, 12);
+    }
+
+    #[test]
+    fn comment_body_from_span_continuation_row_has_no_delim() {
+        // Middle row of a multi-line /* … */ block comment — the span
+        // starts at col 0 on a line that begins with comment content
+        // (no delimiter), so we must not skip 2 bytes.
+        let line = "continuation";
+        let body = super::comment_body_from_span(line, 0, line.len());
+        assert_eq!(body.start, 0);
+        assert_eq!(body.end, line.len());
+    }
+
+    #[test]
+    fn marker_in_string_literal_not_highlighted_without_comment_body() {
+        use ratatui::style::Style;
+        // Caller passes an empty comments slice — emulates tree-sitter
+        // reporting no comment on this row, e.g. because the `--` is
+        // inside a string literal.
+        let mut row: Vec<(usize, usize, Style)> = Vec::new();
+        let new =
+            super::apply_marker_overlay(&mut row, "SELECT '-- FIXME: x' FROM t", &[], None, false);
+        assert_eq!(new, None);
+        assert!(row.is_empty());
+    }
+
+    #[test]
+    fn marker_tail_stops_at_block_comment_end() {
+        use ratatui::style::Style;
+        let line = "/* FIX: hi */ SELECT 1";
+        let body = super::comment_body_from_span(line, 0, 12);
+        let mut row: Vec<(usize, usize, Style)> = Vec::new();
+        super::apply_marker_overlay(&mut row, line, &[body], None, false);
+        // Every emitted span must end at or before the `*/` (byte 12).
+        for (s, e, _) in &row {
+            assert!(*e <= 12, "span {s}..{e} bled past `*/`");
+        }
     }
 
     #[test]
