@@ -5275,7 +5275,10 @@ fn draw_hover_table(
     let popup_w = (natural_w as u16)
         .saturating_add(4) // 2-col pad each side
         .clamp(40, area.width.saturating_sub(4).min(100));
-    let max_body = area.height.saturating_sub(6);
+    // Body max = terminal height - vertical padding (2) - borders
+    // space (none) - header/hr (2). Popup height = header + hr + body
+    // + 1 top + 1 bottom pad.
+    let max_body = area.height.saturating_sub(4);
     let body_h = (table.rows.len() as u16).min(max_body.max(1));
     let popup_h = (body_h + 4).min(area.height.saturating_sub(2));
 
@@ -5294,22 +5297,15 @@ fn draw_hover_table(
         width: popup.width.saturating_sub(4),
         height: popup.height.saturating_sub(2),
     };
+    // No title row — the popup is chromeless apart from `dialog_bg`.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(1),
             Constraint::Min(1),
         ])
         .split(inner);
-
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled("󰋼 Hover", bg.add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  ({} rows)", table.rows.len()), bg),
-    ]))
-    .style(bg);
-    f.render_widget(title, chunks[0]);
 
     let sep_style = Style::default().fg(u.results_sep).bg(u.dialog_bg);
     let header_style = bg.add_modifier(Modifier::BOLD).fg(u.results_header_active);
@@ -5375,11 +5371,11 @@ fn draw_hover_table(
         Paragraph::new(header_line)
             .style(bg)
             .scroll((0, char_offset)),
-        chunks[1],
+        chunks[0],
     );
     let hr: String = "─".repeat(inner.width as usize);
-    f.render_widget(Paragraph::new(hr).style(sep_style), chunks[2]);
-    let body_rect = chunks[3];
+    f.render_widget(Paragraph::new(hr).style(sep_style), chunks[1]);
+    let body_rect = chunks[2];
     // Publish the body dimensions so `clamp_hover_scroll` can follow
     // the cursor with the row + column scroll offsets. Without this
     // `l` past the viewport leaves the cursor off-screen.
@@ -5418,8 +5414,9 @@ fn draw_hover_popup(f: &mut ratatui::Frame<'_>, area: Rect, scroll: usize, text:
         .max()
         .unwrap_or(0);
     let popup_w = (longest + 4).clamp(30, area.width.saturating_sub(4).min(80));
-    let content_h = (lines.len() as u16 + 1).min(area.height.saturating_sub(4));
-    let popup_h = (content_h + 3).min(area.height.saturating_sub(2));
+    let content_h = (lines.len() as u16).min(area.height.saturating_sub(4));
+    // popup = content + 2 rows of vertical padding.
+    let popup_h = (content_h + 2).min(area.height.saturating_sub(2));
 
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(popup_w)) / 2,
@@ -5435,22 +5432,13 @@ fn draw_hover_popup(f: &mut ratatui::Frame<'_>, area: Rect, scroll: usize, text:
         width: popup.width.saturating_sub(4),
         height: popup.height.saturating_sub(2),
     };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(inner);
-    let title = Paragraph::new(Line::from(Span::styled(
-        "󰋼 Hover",
-        bg.add_modifier(Modifier::BOLD),
-    )))
-    .style(bg);
-    f.render_widget(title, chunks[0]);
+    // Chromeless — no title row, content takes the whole inner area.
     f.render_widget(
         Paragraph::new(lines)
             .style(bg)
             .scroll((scroll as u16, 0))
             .wrap(ratatui::widgets::Wrap { trim: false }),
-        chunks[1],
+        inner,
     );
 }
 
