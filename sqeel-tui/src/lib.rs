@@ -485,6 +485,12 @@ async fn run_loop(
     // `0` is context-dependent: a leading `0` is "row start", an `0` mid-
     // count is a digit. Cleared after the next nav keystroke.
     let mut results_count: usize = 0;
+    // Live `/` prompt over the results pane. `Some` while the user is
+    // typing; commit stashes the pattern and clears this.
+    let mut results_search_prompt: Option<TextInput> = None;
+    // Most recent committed results-pane search pattern — kept so
+    // `n` / `N` have something to repeat after the prompt closes.
+    let mut results_search_pattern: Option<String> = None;
     loop {
         let mut needs_redraw = event_triggered_redraw;
         event_triggered_redraw = false;
@@ -1075,6 +1081,7 @@ async fn run_loop(
             };
             let editor_search_text = editor.search_prompt().map(|p| p.text.as_str().to_owned());
             let last_editor_search = editor.last_search().map(str::to_owned);
+            let results_search_text = results_search_prompt.as_ref().map(|p| p.text.clone());
             terminal.draw(|f| {
                 let s = state.lock().unwrap();
                 last_draw_areas = draw(
@@ -1089,6 +1096,7 @@ async fn run_loop(
                     &schema_search,
                     editor_search_text.as_deref(),
                     last_editor_search.as_deref(),
+                    results_search_text.as_deref(),
                     &toast_snap,
                 );
             })?;
@@ -1141,6 +1149,12 @@ async fn run_loop(
         event_triggered_redraw = true;
         match ev {
             Event::Mouse(mouse) => {
+                // Help overlay swallows all mouse events — without this
+                // a click on the overlay would fall through and focus /
+                // edit whatever pane sits underneath.
+                if state.lock().unwrap().show_help {
+                    continue;
+                }
                 let area = terminal.size()?;
                 let schema_width = (area.width * 15 / 100).max(30);
                 let show_results = state.lock().unwrap().has_results();
@@ -1845,6 +1859,37 @@ async fn run_loop(
                     continue;
                 }
 
+                // ── Results-pane `/` search prompt ───────────────────────────────
+                if let Some(ref mut prompt) = results_search_prompt {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            results_search_prompt = None;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            let text = results_search_prompt.take().unwrap_or_default().text;
+                            if !text.is_empty() {
+                                let mut s = state.lock().unwrap();
+                                let found = s.results_find(&text, true, false);
+                                results_search_pattern = Some(text);
+                                drop(s);
+                                if !found {
+                                    toasts.push((
+                                        "Pattern not found".into(),
+                                        ToastKind::Info,
+                                        std::time::Instant::now(),
+                                    ));
+                                }
+                            }
+                        }
+                        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                            prompt.insert_char(c);
+                        }
+                        (KeyModifiers::NONE, code) if prompt.handle_nav(code) => {}
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // ── Schema search box (typing mode) ─────────────────────────────
                 if schema_search.focused {
                     match (key.modifiers, key.code) {
@@ -1914,7 +1959,8 @@ async fn run_loop(
                 // ── Help overlay ─────────────────────────────────────────────────
                 if show_help {
                     match (key.modifiers, key.code) {
-                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                        (KeyModifiers::NONE, KeyCode::Esc)
+                        | (KeyModifiers::NONE, KeyCode::Char('q' | '?')) => {
                             state.lock().unwrap().close_help();
                         }
                         (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
@@ -2253,6 +2299,40 @@ async fn run_loop(
                     {
                         state.lock().unwrap().results_cursor_row_end();
                         results_count = 0;
+                    }
+                    // `/` → open the results-pane search prompt.
+                    (KeyModifiers::NONE, KeyCode::Char('/')) if focus == Focus::Results => {
+                        results_search_prompt = Some(TextInput::default());
+                    }
+                    // `n` / `N` → repeat the last committed results search.
+                    (KeyModifiers::NONE, KeyCode::Char('n')) if focus == Focus::Results => {
+                        if let Some(pat) = results_search_pattern.clone() {
+                            let mut s = state.lock().unwrap();
+                            if !s.results_find(&pat, true, true) {
+                                drop(s);
+                                toasts.push((
+                                    "Pattern not found".into(),
+                                    ToastKind::Info,
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                        }
+                    }
+                    (KeyModifiers::SHIFT, KeyCode::Char('N'))
+                    | (KeyModifiers::NONE, KeyCode::Char('N'))
+                        if focus == Focus::Results =>
+                    {
+                        if let Some(pat) = results_search_pattern.clone() {
+                            let mut s = state.lock().unwrap();
+                            if !s.results_find(&pat, false, true) {
+                                drop(s);
+                                toasts.push((
+                                    "Pattern not found".into(),
+                                    ToastKind::Info,
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                        }
                     }
                     // Enter visual-line / visual-block selection in results.
                     (KeyModifiers::SHIFT, KeyCode::Char('V'))
@@ -2737,6 +2817,7 @@ fn draw(
     schema_search: &SchemaSearch,
     editor_search_text: Option<&str>,
     last_editor_search: Option<&str>,
+    results_search_text: Option<&str>,
     toasts: &[(String, ToastKind)],
 ) -> DrawAreas {
     let area = f.area();
@@ -2864,7 +2945,13 @@ fn draw(
     );
 
     if show_results {
-        draw_results(f, state, right_chunks[1], results_focused);
+        draw_results(
+            f,
+            state,
+            right_chunks[1],
+            results_focused,
+            results_search_text,
+        );
     }
 
     // Completion popup (overlay).  Use viewport-relative coordinates so
@@ -3686,7 +3773,13 @@ fn build_tab_title(state: &AppState) -> Line<'_> {
     Line::from(spans)
 }
 
-fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focused: bool) {
+fn draw_results(
+    f: &mut ratatui::Frame<'_>,
+    state: &AppState,
+    area: Rect,
+    focused: bool,
+    search_text: Option<&str>,
+) {
     // Fill pane background (full area), then inset content by 1 on all sides.
     f.render_widget(
         Block::default().style(Style::default().bg(ui().results_pane_bg)),
@@ -3696,6 +3789,18 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
         horizontal: 1,
         vertical: 0,
     });
+    // When the `/` prompt is live, carve one row off the bottom and
+    // render the search input there; the rest of the pane lays out as
+    // usual in the shrunk area.
+    let (area, prompt_area) = if search_text.is_some() && area.height > 1 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
 
     // Split off a separator + 1-row tab bar at the top when there are multiple
     // result tabs. The separator sits above the tab strip.
@@ -4007,6 +4112,13 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
             );
         }
         ResultsPane::Empty => unreachable!(),
+    }
+
+    // Paint the `/` prompt row last so it sits on top of whatever the
+    // content renderer drew above.
+    if let (Some(rect), Some(text)) = (prompt_area, search_text) {
+        let style = Style::default().fg(ui().status_mode_normal);
+        f.render_widget(Paragraph::new(format!("/{text}")).style(style), rect);
     }
 }
 
@@ -5190,6 +5302,8 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
                 ("h / l", "Left / right (count prefix)"),
                 ("gg / G", "First / last row"),
                 ("0 / $", "First / last column"),
+                ("/", "Search cells"),
+                ("n / N", "Next / previous match"),
                 ("H / L", "Prev / next result tab"),
                 ("V", "Visual-line select rows"),
                 ("v / Ctrl+V", "Visual-block select rectangle"),

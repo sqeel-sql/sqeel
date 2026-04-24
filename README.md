@@ -8,19 +8,22 @@ Fast, vim-native SQL client. No Electron. No JVM.
 ## Features
 
 - Native Rust — instant startup
-- Vim bindings — first class
+- Vim bindings — first class (operators, text objects, visual modes, marks,
+  jumplist, page scroll, H/M/L, case/indent ops, dot-repeat)
 - Mouse support in all panes
 - Two UIs: terminal (`sqeel`) or native GUI (`sqeel-gui`)
 - MySQL, SQLite, PostgreSQL via sqlx
 - tree-sitter SQL syntax highlighting (dialect-aware)
-- LSP integration (`sqls`) — completions + inline diagnostic underlines,
-  tree-sitter fallback for parse errors, auto-generated `sqls` config from the
-  active connection
+- LSP integration (`sqls`) — completions + inline diagnostic underlines + gutter
+  signs, tree-sitter fallback for parse errors, auto-generated `sqls` config
+  from the active connection
 - Schema browser — click or keyboard to expand/collapse
 - Editor tabs with lazy loading and 5-min RAM eviction
 - Auto-save SQL buffers, result history, query history
 - tmux-aware pane navigation
 - Vim-style status bar + command mode (`:`)
+- Vim-style results pane — cell cursor, visual-line / visual-block selection
+  with TSV yank, `/` search, count prefix nav
 
 ## Layout
 
@@ -135,14 +138,29 @@ Press `?` in normal mode to open the help overlay.
 
 ### Editor — Vim
 
-| Key                 | Action                    |
-| ------------------- | ------------------------- |
-| `i`                 | Insert mode               |
-| `Esc`               | Normal mode               |
-| `v`                 | Visual mode               |
-| `:`                 | Command mode              |
-| `/`                 | Search                    |
-| `Ctrl+P` / `Ctrl+N` | Query history prev / next |
+Core motions, operators, text objects, and visual modes all work. The help
+overlay (`?`) is the authoritative list; the table below is a cheat sheet of
+features that go beyond basic vim.
+
+| Key                     | Action                                    |
+| ----------------------- | ----------------------------------------- |
+| `i` / `Esc`             | Insert / Normal                           |
+| `v` / `V` / `Ctrl+V`    | Visual (char / line / block)              |
+| `:`                     | Command mode                              |
+| `/` + `n` / `N`         | Search + next / previous                  |
+| `*` / `#`               | Search word under cursor fwd / back       |
+| `Ctrl+d` / `Ctrl+u`     | Half-page scroll (cursor follows)         |
+| `Ctrl+f` / `Ctrl+b`     | Full-page scroll                          |
+| `H` / `M` / `L`         | Cursor to viewport top / middle / bottom  |
+| `gg` / `G`              | First / last line                         |
+| `zz` / `zt` / `zb`      | Center / top / bottom viewport on cursor  |
+| `m{a-z}`                | Set mark                                  |
+| `` `{a-z} `` / `'{a-z}` | Jump to mark (charwise / linewise)        |
+| `Ctrl+o` / `Ctrl+i`     | Jumplist back / forward                   |
+| `gU` / `gu` / `g~`      | Uppercase / lowercase / toggle-case op    |
+| `>` / `<`               | Indent / outdent op                       |
+| `Ctrl+a` / `Ctrl+x`     | Increment / decrement number under cursor |
+| `Ctrl+P` / `Ctrl+N`     | Query history prev / next                 |
 
 ### Explorer Pane
 
@@ -154,10 +172,18 @@ Press `?` in normal mode to open the help overlay.
 
 ### Results Pane
 
+Vim-native navigation over the cell grid. Arrow keys mirror `hjkl`.
+
 | Key / Mouse           | Action                                           |
 | --------------------- | ------------------------------------------------ |
-| `j` / `k`             | Scroll down / up                                 |
-| `h` / `l`             | Scroll left / right                              |
+| `j` / `k` / `h` / `l` | Cursor / scroll (count-prefixable, arrows alias) |
+| `gg` / `G`            | First / last row                                 |
+| `0` / `$`             | First / last column of current row               |
+| `/` + `n` / `N`       | Search cells (case-insensitive) + next / prev    |
+| `V`                   | Visual-line select rows                          |
+| `v` / `Ctrl+V`        | Visual-block select rectangle                    |
+| `y`                   | Yank selection / row (TSV)                       |
+| `Esc`                 | Clear selection / close `/` prompt               |
 | `Shift+H` / `Shift+L` | Prev / next result tab                           |
 | `Enter`               | Jump editor cursor to error line:col (error tab) |
 | Left click            | Copy column value                                |
@@ -195,10 +221,12 @@ Press `?` in normal mode to open the help overlay.
 ## Workspace
 
 ```
-sqeel-core/   # state, DB, query runner, schema, config
-sqeel-tui/    # ratatui terminal provider
-sqeel-gui/    # iced native GUI provider
-sqeel/        # binaries: sqeel + sqeel-gui
+sqeel-core/            # state, DB, query runner, schema, config
+sqeel-tui/             # ratatui terminal provider
+sqeel-gui/             # iced native GUI provider
+sqeel-vim/             # vim-mode editor widget (on top of tui-textarea)
+sqeel/                 # binaries: sqeel + sqeel-gui
+vendor/tui-textarea/   # vendored + patched text area (render cache, signs)
 ```
 
 ## License

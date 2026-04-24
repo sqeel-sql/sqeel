@@ -955,6 +955,53 @@ impl AppState {
         });
     }
 
+    /// Scan result cells for the first occurrence of `needle` (case-
+    /// insensitive) and park the cursor on the matching cell. `forward`
+    /// picks the scan direction; `skip_current` starts from the cell
+    /// after the cursor (`n` / `N` don't get stuck on their current
+    /// match). Wraps around the buffer end. Returns `true` when a match
+    /// was found and the cursor moved.
+    pub fn results_find(&mut self, needle: &str, forward: bool, skip_current: bool) -> bool {
+        if needle.is_empty() {
+            return false;
+        }
+        let needle_lc = needle.to_lowercase();
+        let tab_idx = self.active_result_tab;
+        let Some(tab) = self.result_tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let ResultsPane::Results(r) = &tab.kind else {
+            return false;
+        };
+        if r.rows.is_empty() || r.columns.is_empty() {
+            return false;
+        }
+        let total_cols = r.columns.len();
+        let total_rows = r.rows.len();
+        let (cur_row, cur_col) = match tab.cursor {
+            ResultsCursor::Cell { row, col } => (row, col),
+            ResultsCursor::Header(c) => (0, c),
+            _ => (0, 0),
+        };
+        let total = total_rows * total_cols;
+        let start = cur_row * total_cols + cur_col;
+        let step = if forward { 1 } else { total - 1 };
+        let skip = if skip_current { 1 } else { 0 };
+        for i in skip..total {
+            let probe = (start + i * step) % total;
+            let row = probe / total_cols;
+            let col = probe % total_cols;
+            let cell = r.rows.get(row).and_then(|r| r.get(col));
+            if let Some(v) = cell
+                && v.to_lowercase().contains(&needle_lc)
+            {
+                tab.cursor = ResultsCursor::Cell { row, col };
+                return true;
+            }
+        }
+        false
+    }
+
     /// `$` — jump to the last column of the current row.
     pub fn results_cursor_row_end(&mut self) {
         self.with_active_tab(|t| {
@@ -2771,6 +2818,75 @@ mod tests {
         assert_eq!(
             s.result_tabs[0].cursor,
             ResultsCursor::Cell { row: 2, col: 2 }
+        );
+    }
+
+    #[test]
+    fn results_find_forward_jumps_to_first_match() {
+        let state = seeded_results();
+        let mut s = state.lock().unwrap();
+        s.result_tabs[0].cursor = ResultsCursor::Cell { row: 0, col: 0 };
+        assert!(s.results_find("2b", true, false));
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 2, col: 1 }
+        );
+    }
+
+    #[test]
+    fn results_find_skip_current_walks_past_active_match() {
+        let state = seeded_results();
+        let mut s = state.lock().unwrap();
+        // "a" appears in every row, col 0. Seed cursor on a match and
+        // confirm skip_current advances to the next one.
+        s.result_tabs[0].cursor = ResultsCursor::Cell { row: 1, col: 0 };
+        assert!(s.results_find("a", true, true));
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 2, col: 0 }
+        );
+    }
+
+    #[test]
+    fn results_find_backward_wraps_around() {
+        let state = seeded_results();
+        let mut s = state.lock().unwrap();
+        s.result_tabs[0].cursor = ResultsCursor::Cell { row: 0, col: 0 };
+        // Backward from (0,0) should wrap to the last match in the grid.
+        assert!(s.results_find("4c", false, false));
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 4, col: 2 }
+        );
+    }
+
+    #[test]
+    fn results_find_is_case_insensitive() {
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.set_results(QueryResult {
+            columns: vec!["x".into()],
+            rows: vec![vec!["Alpha".into()], vec!["beta".into()]],
+            col_widths: vec![],
+        });
+        s.result_tabs[0].cursor = ResultsCursor::Cell { row: 0, col: 0 };
+        assert!(s.results_find("BETA", true, true));
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 1, col: 0 }
+        );
+    }
+
+    #[test]
+    fn results_find_no_match_returns_false() {
+        let state = seeded_results();
+        let mut s = state.lock().unwrap();
+        s.result_tabs[0].cursor = ResultsCursor::Cell { row: 0, col: 0 };
+        assert!(!s.results_find("zzz", true, false));
+        // Cursor unchanged on miss.
+        assert_eq!(
+            s.result_tabs[0].cursor,
+            ResultsCursor::Cell { row: 0, col: 0 }
         );
     }
 
