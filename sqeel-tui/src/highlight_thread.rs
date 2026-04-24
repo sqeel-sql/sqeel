@@ -1,4 +1,4 @@
-use sqeel_core::highlight::{HighlightSpan, Highlighter};
+use sqeel_core::highlight::{Dialect, HighlightSpan, Highlighter};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -11,6 +11,7 @@ pub struct HighlightRequest {
     pub source: Arc<String>,
     pub start_row: usize,
     pub row_count: usize,
+    pub dialect: Dialect,
 }
 
 /// Result returned by the highlight thread: slice-local spans + the
@@ -58,7 +59,7 @@ impl HighlightThread {
                         }
                     };
 
-                    let spans = highlighter.highlight_shared(&req.source);
+                    let spans = highlighter.highlight_shared(&req.source, req.dialect);
 
                     if result_tx
                         .send(HighlightResult {
@@ -77,12 +78,19 @@ impl HighlightThread {
     }
 
     /// Submit new content for highlighting. Replaces any not-yet-processed value.
-    pub fn submit(&self, source: Arc<String>, start_row: usize, row_count: usize) {
+    pub fn submit(
+        &self,
+        source: Arc<String>,
+        start_row: usize,
+        row_count: usize,
+        dialect: Dialect,
+    ) {
         let (lock, cvar) = &*self.pending;
         *lock.lock().unwrap() = Some(HighlightRequest {
             source,
             start_row,
             row_count,
+            dialect,
         });
         cvar.notify_one();
     }

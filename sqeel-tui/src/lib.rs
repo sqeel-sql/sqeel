@@ -40,7 +40,7 @@ use sqeel_core::{
     completion_ctx::{self, CompletionCtx},
     config::load_main_config,
     highlight::{
-        Highlighter, TokenKind, first_syntax_error, is_show_create, statement_at_byte,
+        Dialect, Highlighter, TokenKind, first_syntax_error, is_show_create, statement_at_byte,
         statement_ranges, strip_sql_comments,
     },
     lsp::{LspClient, LspEvent},
@@ -561,7 +561,8 @@ async fn run_loop(
                     }
                     src.push_str(l);
                 }
-                highlight_thread.submit(Arc::new(src), start, slice.len());
+                let dialect = state.lock().unwrap().active_dialect;
+                highlight_thread.submit(Arc::new(src), start, slice.len(), dialect);
                 last_highlight_top = viewport_top;
             }
         }
@@ -3157,8 +3158,8 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
                 } else {
                     " Results (DDL)".to_string()
                 };
-                let query_line = highlight_query_line(&query_text);
-                let body_lines = highlight_sql_lines(ddl);
+                let query_line = highlight_query_line(&query_text, state.active_dialect);
+                let body_lines = highlight_sql_lines(ddl, state.active_dialect);
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
@@ -3290,7 +3291,7 @@ fn draw_results(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect, focuse
                 .map(|(i, row)| build_row(i, row))
                 .collect();
 
-            let mut query_line = highlight_query_line(&query_text);
+            let mut query_line = highlight_query_line(&query_text, state.active_dialect);
             if cursor == Some(ResultsCursor::Query) {
                 let qbg = results_cursor_bg(focused);
                 query_line = Line::from(
@@ -3492,7 +3493,7 @@ fn render_framed_pane(
     );
     f.render_widget(Paragraph::new(hr.clone()).style(sep_style), chunks[2]);
     let body_chunk = if show_query {
-        let mut query_line = highlight_query_line(&query_text);
+        let mut query_line = highlight_query_line(&query_text, state.active_dialect);
         let cursor = state.active_result().map(|t| t.cursor);
         if state.focus == Focus::Results && cursor == Some(ResultsCursor::Query) {
             let qbg = results_cursor_bg(state.focus == Focus::Results);
@@ -3575,7 +3576,7 @@ fn results_tab_bar(state: &AppState) -> Line<'static> {
 /// Render `source` as syntax-highlighted lines. Spans crossing line breaks
 /// are split per row. Shared tree-sitter parser kept in TLS (same pattern as
 /// `highlight_query_line`).
-fn highlight_sql_lines(source: &str) -> Vec<Line<'static>> {
+fn highlight_sql_lines(source: &str, dialect: Dialect) -> Vec<Line<'static>> {
     use std::cell::RefCell;
     thread_local! {
         static HL: RefCell<Option<Highlighter>> = const { RefCell::new(None) };
@@ -3589,7 +3590,7 @@ fn highlight_sql_lines(source: &str) -> Vec<Line<'static>> {
             *slot = Some(h);
         }
         slot.as_mut()
-            .map(|h| h.highlight(source))
+            .map(|h| h.highlight(source, dialect))
             .unwrap_or_default()
     });
 
@@ -3643,7 +3644,7 @@ fn highlight_sql_lines(source: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn highlight_query_line(query: &str) -> Line<'static> {
+fn highlight_query_line(query: &str, dialect: Dialect) -> Line<'static> {
     use std::cell::RefCell;
     thread_local! {
         static HL: RefCell<Option<Highlighter>> = const { RefCell::new(None) };
@@ -3661,7 +3662,7 @@ fn highlight_query_line(query: &str) -> Line<'static> {
             *slot = Some(h);
         }
         slot.as_mut()
-            .map(|h| h.highlight(query))
+            .map(|h| h.highlight(query, dialect))
             .unwrap_or_default()
     });
 

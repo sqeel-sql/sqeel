@@ -326,6 +326,7 @@ async fn connect_and_spawn(
                 let already_loaded = s.active_connection.as_deref() == Some(conn_name.as_str())
                     && !s.tabs.is_empty();
                 s.active_connection = Some(conn_name.clone());
+                s.active_dialect = sqeel_core::highlight::Dialect::from_url(url);
                 if !already_loaded {
                     s.load_tabs_for_connection(&slug);
                     if session_active_tab < s.tabs.len() {

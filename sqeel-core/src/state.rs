@@ -1,7 +1,7 @@
 use crate::completion_ctx::CompletionCtx;
 use crate::config::ConnectionConfig;
 use crate::ddl::DdlEffect;
-use crate::highlight::HighlightSpan;
+use crate::highlight::{Dialect, HighlightSpan};
 use crate::lsp::Diagnostic;
 use crate::persistence;
 use crate::schema::{
@@ -242,6 +242,9 @@ pub struct AppState {
     pub show_completions: bool,
     pub completion_cursor: usize,
     pub active_connection: Option<String>,
+    /// SQL dialect of the current connection. Drives per-dialect
+    /// keyword highlighting; `Generic` before any connection opens.
+    pub active_dialect: Dialect,
     pub status_message: Option<String>,
     pub schema_nodes: Vec<SchemaNode>,
     pub schema_cursor: usize,

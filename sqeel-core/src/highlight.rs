@@ -12,6 +12,98 @@ pub enum TokenKind {
     Plain,
 }
 
+/// SQL dialect the current connection is speaking. Drives per-dialect
+/// keyword promotion in the highlighter so things like `ILIKE` show as
+/// keywords on Postgres, `AUTO_INCREMENT` on MySQL, `PRAGMA` on SQLite,
+/// etc. `Generic` means no dialect-specific extras — useful before any
+/// connection has been established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    #[default]
+    Generic,
+    MySql,
+    Postgres,
+    Sqlite,
+}
+
+impl Dialect {
+    /// Pick a dialect from a sqlx-style URL scheme, matching the
+    /// dispatch in `DbConnection::connect`.
+    pub fn from_url(url: &str) -> Self {
+        if url.starts_with("mysql://") || url.starts_with("mariadb://") {
+            Dialect::MySql
+        } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+            Dialect::Postgres
+        } else if url.starts_with("sqlite://") || url.starts_with("sqlite:") {
+            Dialect::Sqlite
+        } else {
+            Dialect::Generic
+        }
+    }
+
+    /// Extra identifiers that should render as keywords in this dialect,
+    /// but aren't part of the shared tree-sitter-sequel keyword set.
+    /// Compared case-insensitively against the token text.
+    fn extra_keywords(self) -> &'static [&'static str] {
+        match self {
+            Dialect::MySql => &[
+                "AUTO_INCREMENT",
+                "ENGINE",
+                "CHARSET",
+                "COLLATE",
+                "ZEROFILL",
+                "UNSIGNED",
+                "ROW_FORMAT",
+                "KEY_BLOCK_SIZE",
+                "DELAYED",
+                "STRAIGHT_JOIN",
+                "SQL_CALC_FOUND_ROWS",
+                "LOW_PRIORITY",
+                "HIGH_PRIORITY",
+                "IGNORE",
+            ],
+            Dialect::Postgres => &[
+                "ILIKE",
+                "RETURNING",
+                "SERIAL",
+                "BIGSERIAL",
+                "SMALLSERIAL",
+                "BYTEA",
+                "JSONB",
+                "TSQUERY",
+                "TSVECTOR",
+                "GENERATED",
+                "MATERIALIZED",
+                "LATERAL",
+                "DISTINCT",
+                "CONCURRENTLY",
+                "SIMILAR",
+                "OVERLAPS",
+            ],
+            Dialect::Sqlite => &[
+                "PRAGMA",
+                "AUTOINCREMENT",
+                "WITHOUT",
+                "ROWID",
+                "VACUUM",
+                "GLOB",
+                "ATTACH",
+                "DETACH",
+                "REINDEX",
+                "SAVEPOINT",
+            ],
+            Dialect::Generic => &[],
+        }
+    }
+
+    /// True iff `text` (any case) is one of this dialect's extra keywords.
+    fn is_extra_keyword(self, text: &str) -> bool {
+        self.extra_keywords()
+            .iter()
+            .any(|kw| kw.eq_ignore_ascii_case(text))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HighlightSpan {
     pub start_byte: usize,
@@ -47,20 +139,24 @@ impl Highlighter {
     /// `Arc<String>` should prefer [`Self::highlight_shared`] — this entry
     /// point has to allocate an `Arc<String>` copy to cache for the next
     /// diff.
-    pub fn highlight(&mut self, source: &str) -> Vec<HighlightSpan> {
+    pub fn highlight(&mut self, source: &str, dialect: Dialect) -> Vec<HighlightSpan> {
         if source.is_empty() {
             self.old_tree = None;
             self.old_source = None;
             return vec![];
         }
-        self.highlight_shared(&Arc::new(source.to_owned()))
+        self.highlight_shared(&Arc::new(source.to_owned()), dialect)
     }
 
     /// Highlight a shared source buffer.  The `Arc<String>` is retained
     /// (ref-count bumped) for use as the incremental-edit diff base on
     /// the next call — avoids the multi-MB `String::clone` the old design
     /// paid on every highlight of a huge file.
-    pub fn highlight_shared(&mut self, source: &Arc<String>) -> Vec<HighlightSpan> {
+    pub fn highlight_shared(
+        &mut self,
+        source: &Arc<String>,
+        dialect: Dialect,
+    ) -> Vec<HighlightSpan> {
         if source.is_empty() {
             self.old_tree = None;
             self.old_source = None;
@@ -86,7 +182,7 @@ impl Highlighter {
 
         let source_bytes = source.as_bytes();
         let mut spans = Vec::new();
-        collect_spans(tree.root_node(), source_bytes, &mut spans);
+        collect_spans(tree.root_node(), source_bytes, dialect, &mut spans);
 
         self.old_source = Some(Arc::clone(source));
         self.old_tree = Some(tree);
@@ -353,7 +449,7 @@ fn anon_node_kind(text: &str) -> TokenKind {
     }
 }
 
-fn collect_spans(node: Node, source: &[u8], spans: &mut Vec<HighlightSpan>) {
+fn collect_spans(node: Node, source: &[u8], dialect: Dialect, spans: &mut Vec<HighlightSpan>) {
     let start_byte = node.start_byte();
     let end_byte = node.end_byte();
     if start_byte >= end_byte || end_byte > source.len() {
@@ -365,7 +461,16 @@ fn collect_spans(node: Node, source: &[u8], spans: &mut Vec<HighlightSpan>) {
     let end = node.end_position();
 
     if node.child_count() == 0 && node.is_named() {
-        let kind = named_node_kind(node.kind());
+        let mut kind = named_node_kind(node.kind());
+        // Dialect post-promotion: tree-sitter-sequel's keyword set is
+        // the union across SQL dialects but misses some MySQL / Postgres
+        // / SQLite specials. Bump identifiers / plains up to keyword
+        // when they match the active dialect's extra-keyword list.
+        if matches!(kind, TokenKind::Identifier | TokenKind::Plain)
+            && dialect.is_extra_keyword(text)
+        {
+            kind = TokenKind::Keyword;
+        }
         if kind != TokenKind::Plain {
             spans.push(HighlightSpan {
                 start_byte,
@@ -381,7 +486,10 @@ fn collect_spans(node: Node, source: &[u8], spans: &mut Vec<HighlightSpan>) {
     }
 
     if node.child_count() == 0 {
-        let kind = anon_node_kind(text);
+        let mut kind = anon_node_kind(text);
+        if kind == TokenKind::Plain && dialect.is_extra_keyword(text) {
+            kind = TokenKind::Keyword;
+        }
         if kind != TokenKind::Plain {
             spans.push(HighlightSpan {
                 start_byte,
@@ -398,7 +506,7 @@ fn collect_spans(node: Node, source: &[u8], spans: &mut Vec<HighlightSpan>) {
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_spans(child, source, spans);
+        collect_spans(child, source, dialect, spans);
     }
 }
 
@@ -437,7 +545,7 @@ mod tests {
     #[test]
     fn highlights_select_keyword() {
         let mut h = Highlighter::new().unwrap();
-        let spans = h.highlight("SELECT id FROM users");
+        let spans = h.highlight("SELECT id FROM users", Dialect::Generic);
         let keywords: Vec<_> = spans
             .iter()
             .filter(|s| s.kind == TokenKind::Keyword)
@@ -451,7 +559,7 @@ mod tests {
     #[test]
     fn highlights_identifier() {
         let mut h = Highlighter::new().unwrap();
-        let spans = h.highlight("SELECT id FROM users");
+        let spans = h.highlight("SELECT id FROM users", Dialect::Generic);
         let idents: Vec<_> = spans
             .iter()
             .filter(|s| s.kind == TokenKind::Identifier)
@@ -465,7 +573,7 @@ mod tests {
     #[test]
     fn highlights_string_literal() {
         let mut h = Highlighter::new().unwrap();
-        let spans = h.highlight("SELECT * FROM users WHERE name = 'alice'");
+        let spans = h.highlight("SELECT * FROM users WHERE name = 'alice'", Dialect::Generic);
         let strings: Vec<_> = spans
             .iter()
             .filter(|s| s.kind == TokenKind::String)
@@ -479,14 +587,14 @@ mod tests {
     #[test]
     fn empty_input_no_panic() {
         let mut h = Highlighter::new().unwrap();
-        let spans = h.highlight("");
+        let spans = h.highlight("", Dialect::Generic);
         assert!(spans.is_empty());
     }
 
     #[test]
     fn invalid_sql_no_panic() {
         let mut h = Highlighter::new().unwrap();
-        let _spans = h.highlight("??? !!! garbage");
+        let _spans = h.highlight("??? !!! garbage", Dialect::Generic);
     }
 
     #[test]
@@ -496,11 +604,52 @@ mod tests {
         let src2 = "SELECT id FROM users WHERE id = 1";
         let spans_full = {
             let mut h2 = Highlighter::new().unwrap();
-            h2.highlight(src2)
+            h2.highlight(src2, Dialect::Generic)
         };
-        h.highlight(src1);
-        let spans_incr = h.highlight(src2);
+        h.highlight(src1, Dialect::Generic);
+        let spans_incr = h.highlight(src2, Dialect::Generic);
         assert_eq!(spans_full.len(), spans_incr.len());
+    }
+
+    #[test]
+    fn dialect_from_url_dispatch() {
+        assert_eq!(Dialect::from_url("mysql://u:p@h/d"), Dialect::MySql);
+        assert_eq!(Dialect::from_url("mariadb://u:p@h/d"), Dialect::MySql);
+        assert_eq!(Dialect::from_url("postgres://h/d"), Dialect::Postgres);
+        assert_eq!(Dialect::from_url("postgresql://h/d"), Dialect::Postgres);
+        assert_eq!(Dialect::from_url("sqlite:///tmp/a.db"), Dialect::Sqlite);
+        assert_eq!(Dialect::from_url("sqlite:a.db"), Dialect::Sqlite);
+        assert_eq!(Dialect::from_url("other://x"), Dialect::Generic);
+    }
+
+    #[test]
+    fn mysql_auto_increment_promoted_to_keyword() {
+        let src = "CREATE TABLE t (id INT AUTO_INCREMENT)";
+        let mut h = Highlighter::new().unwrap();
+        let spans = h.highlight(src, Dialect::MySql);
+        let has = spans.iter().any(|s| {
+            s.kind == TokenKind::Keyword && &src[s.start_byte..s.end_byte] == "AUTO_INCREMENT"
+        });
+        assert!(has, "AUTO_INCREMENT should be a keyword on MySQL");
+    }
+
+    #[test]
+    fn dialect_extra_keyword_tables_are_non_empty() {
+        // The `Generic` dialect has no extras; every concrete dialect
+        // must carry at least one dialect-specific keyword so the
+        // post-pass actually does something.
+        assert!(!Dialect::MySql.extra_keywords().is_empty());
+        assert!(!Dialect::Postgres.extra_keywords().is_empty());
+        assert!(!Dialect::Sqlite.extra_keywords().is_empty());
+        assert!(Dialect::Generic.extra_keywords().is_empty());
+    }
+
+    #[test]
+    fn is_extra_keyword_is_case_insensitive() {
+        assert!(Dialect::MySql.is_extra_keyword("auto_increment"));
+        assert!(Dialect::MySql.is_extra_keyword("AUTO_INCREMENT"));
+        assert!(Dialect::Postgres.is_extra_keyword("ilike"));
+        assert!(!Dialect::MySql.is_extra_keyword("ilike"));
     }
 
     #[test]
