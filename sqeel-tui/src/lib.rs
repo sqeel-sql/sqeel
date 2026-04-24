@@ -465,6 +465,35 @@ async fn run_loop(
                 editor_dirty = false;
                 last_highlight_top = usize::MAX;
                 needs_redraw = true;
+                // Sync the LSP with the freshly loaded buffer so sqls can
+                // emit diagnostics even when the user never touches the
+                // editor after open / tab-switch.
+                if let Some(ref mut client) = lsp
+                    && content.len() <= LSP_MAX_BYTES
+                {
+                    {
+                        doc_version += 1;
+                        let _ = client
+                            .change_document(scratch_uri.clone(), doc_version, &content)
+                            .await;
+                        lsp_suspended = false;
+                        if let Ok(path) = std::env::var("SQEEL_DEBUG_HL_DUMP") {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&path)
+                            {
+                                let preview: String = content.chars().take(80).collect();
+                                let _ = writeln!(
+                                    f,
+                                    "### lsp didChange (tab-load) v{doc_version} bytes={} preview={preview:?}",
+                                    content.len()
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
 
