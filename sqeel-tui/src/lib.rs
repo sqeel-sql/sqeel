@@ -4164,8 +4164,8 @@ fn draw_results(
                 state.results_scroll(),
                 header_style,
                 sep_style,
-                cursor_bg,
-                col_bg,
+                Style::default().bg(cursor_bg),
+                Style::default().bg(col_bg),
             );
 
             let mut query_line = highlight_query_line(&query_text, state.active_dialect);
@@ -4338,8 +4338,8 @@ fn render_grid_lines(
     body_skip: usize,
     header_style: Style,
     sep_style: Style,
-    cursor_bg: Color,
-    col_bg: Color,
+    cursor_style: Style,
+    selection_style: Style,
 ) -> (Line<'static>, Vec<Line<'static>>) {
     let col_count = columns.len();
     let mut header_spans: Vec<Span<'static>> = Vec::with_capacity(col_count * 2);
@@ -4348,7 +4348,7 @@ fn render_grid_lines(
         let inner = w.saturating_sub(1);
         let mut st = header_style;
         if header_cursor_col == Some(i) {
-            st = st.bg(cursor_bg);
+            st = st.patch(cursor_style);
         }
         header_spans.push(Span::styled(format!(" {:<inner$}", c, inner = inner), st));
         if i + 1 < col_count {
@@ -4371,15 +4371,15 @@ fn render_grid_lines(
                 let is_cursor = cursor_row == Some(row_idx) && active_col == Some(i);
                 let is_selected = selection_bounds
                     .is_some_and(|(t, b, l, rr)| row_idx >= t && row_idx <= b && i >= l && i <= rr);
-                let bg = if is_cursor {
-                    Some(cursor_bg)
+                let style = if is_cursor {
+                    Some(cursor_style)
                 } else if is_selected {
-                    Some(col_bg)
+                    Some(selection_style)
                 } else {
                     None
                 };
-                if let Some(bg) = bg {
-                    spans.push(Span::styled(text, Style::default().bg(bg)));
+                if let Some(st) = style {
+                    spans.push(Span::styled(text, st));
                 } else {
                     spans.push(Span::raw(text));
                 }
@@ -5310,8 +5310,15 @@ fn draw_hover_table(
 
     let sep_style = Style::default().fg(u.results_sep).bg(u.dialog_bg);
     let header_style = bg.add_modifier(Modifier::BOLD).fg(u.results_header_active);
-    let col_bg = results_cursor_bg(true);
-    let cursor_bg = results_cursor_bg_strong(true);
+    // Highlights for the hover popup: results-pane bg colors read as
+    // identical to `dialog_bg` (both are dim neutral shades), so
+    // rolling `REVERSED` in inverts bg/fg of whatever cell the cursor
+    // or selection covers. Unconditionally visible regardless of the
+    // active theme.
+    let cursor_style = bg.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let selection_style = Style::default()
+        .fg(u.editor_search_fg)
+        .bg(u.editor_search_bg);
 
     let cursor_row = match state.hover_cursor {
         ResultsCursor::Cell { row, .. } => Some(row),
@@ -5350,8 +5357,8 @@ fn draw_hover_table(
         state.hover_scroll,
         header_style,
         sep_style,
-        cursor_bg,
-        col_bg,
+        cursor_style,
+        selection_style,
     );
 
     let char_offset: u16 = table
