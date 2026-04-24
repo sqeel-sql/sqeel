@@ -359,6 +359,15 @@ async fn run_loop(
         s.lsp_binary = lsp_binary.clone();
     }
 
+    // LSP restarts happen off the main loop (process spawn + initialize
+    // handshake costs 100-500ms each). The main loop parks a config
+    // path here, a helper task consumes it, and the finished
+    // `LspClient` is shipped back through this channel to be swapped in
+    // without blocking the render loop.
+    let (lsp_restart_tx, mut lsp_restart_rx) =
+        tokio::sync::mpsc::unbounded_channel::<anyhow::Result<LspClient>>();
+    let mut lsp_restart_in_flight = false;
+
     let mut editor_dirty = false;
     // Prompt asking the user whether to save dirty buffers before exit.
     let mut quit_prompt: Option<()> = None;
@@ -762,40 +771,58 @@ async fn run_loop(
         }
 
         // When a DB connection resolves, `connect_and_spawn` writes a
-        // sqls config file and parks the path on the state. Swap the
-        // running LSP over to it so sqls can resolve schema.
-        let pending_cfg = state.lock().unwrap().pending_sqls_config.take();
-        if let Some(cfg_path) = pending_cfg {
-            // Drop the old client (kill_on_drop SIGKILLs sqls).
-            lsp = None;
-            let args: Vec<String> = vec!["-config".into(), cfg_path.to_string_lossy().into_owned()];
-            let restart = LspClient::start(&lsp_binary, None, &args).await;
-            if let Ok(path) = std::env::var("SQEEL_DEBUG_HL_DUMP") {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                {
-                    match &restart {
-                        Ok(_) => {
-                            let _ = writeln!(f, "### lsp restarted with config={cfg_path:?}");
-                        }
-                        Err(e) => {
-                            let _ =
-                                writeln!(f, "### lsp restart FAILED config={cfg_path:?} err={e}");
+        // sqls config file and parks the path on the state. Spawn the
+        // LSP restart off the main loop so the 100-500ms process spawn
+        // + initialize handshake doesn't freeze render. The finished
+        // client ships back via `lsp_restart_rx`.
+        if !lsp_restart_in_flight {
+            let pending_cfg = state.lock().unwrap().pending_sqls_config.take();
+            if let Some(cfg_path) = pending_cfg {
+                lsp = None; // kill_on_drop SIGKILLs the previous sqls
+                let args: Vec<String> =
+                    vec!["-config".into(), cfg_path.to_string_lossy().into_owned()];
+                let binary = lsp_binary.clone();
+                let tx = lsp_restart_tx.clone();
+                lsp_restart_in_flight = true;
+                tokio::spawn(async move {
+                    let result = LspClient::start(&binary, None, &args).await;
+                    if let Ok(path) = std::env::var("SQEEL_DEBUG_HL_DUMP") {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                        {
+                            match &result {
+                                Ok(_) => {
+                                    let _ =
+                                        writeln!(f, "### lsp restarted with config={cfg_path:?}");
+                                }
+                                Err(e) => {
+                                    let _ = writeln!(
+                                        f,
+                                        "### lsp restart FAILED config={cfg_path:?} err={e}"
+                                    );
+                                }
+                            }
                         }
                     }
-                }
+                    let _ = tx.send(result);
+                });
             }
-            if let Ok(mut client) = restart {
-                // Re-open the scratch doc with current editor content so
-                // the new LSP has state; sync the version counter.
+        }
+        // Swap in a finished restart if one is ready. The `open_document`
+        // call is cheap (just writes to the child's stdin) so leave it
+        // inline.
+        while let Ok(result) = lsp_restart_rx.try_recv() {
+            lsp_restart_in_flight = false;
+            if let Ok(mut client) = result {
                 let content = editor.content();
                 let _ = client.open_document(scratch_uri.clone(), &content).await;
                 doc_version = 1;
                 lsp = Some(client);
                 lsp_suspended = false;
+                needs_redraw = true;
             }
         }
 
