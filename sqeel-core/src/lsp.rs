@@ -75,6 +75,11 @@ pub enum LspEvent {
     /// (request_id, markdown/plain text) — hover payload for the `K`
     /// binding. Caller drops if id doesn't match the latest request.
     Hover(i64, String),
+    /// (request_id, target uri, 0-based line, 0-based char column) —
+    /// resolved location for a `gd` goto-definition. Caller jumps
+    /// the editor cursor to the target (or surfaces the uri in a
+    /// toast if it's outside the active buffer).
+    Definition(i64, String, u32, u32),
 }
 
 #[derive(Serialize)]
@@ -168,6 +173,10 @@ impl LspClient {
                     hover: Some(HoverClientCapabilities {
                         content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
                         ..Default::default()
+                    }),
+                    definition: Some(GotoCapability {
+                        dynamic_registration: Some(false),
+                        link_support: Some(true),
                     }),
                     ..Default::default()
                 }),
@@ -332,6 +341,30 @@ impl LspWriter {
         id
     }
 
+    /// Fire-and-forget goto-definition request. Response surfaces as
+    /// `LspEvent::Definition(id, uri, line, col)`; caller dedupes by id.
+    pub fn request_definition(&self, uri: Uri, line: u32, col: u32) -> i64 {
+        let id = next_id();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let params = json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": col }
+            });
+            let msg = RpcRequest {
+                jsonrpc: "2.0",
+                id,
+                method: "textDocument/definition",
+                params,
+            };
+            if let Ok(body) = serde_json::to_string(&msg) {
+                let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+                let _ = tx.send(framed).await;
+            }
+        });
+        id
+    }
+
     /// Fire-and-forget hover request. Response surfaces as
     /// `LspEvent::Hover(id, text)`; caller dedupes by id.
     pub fn request_hover(&self, uri: Uri, line: u32, col: u32) -> i64 {
@@ -437,7 +470,31 @@ async fn read_loop(mut reader: BufReader<ChildStdout>, tx: mpsc::Sender<LspEvent
             // keeps hover replies from accidentally being routed
             // through the Completion branch on servers that return
             // odd shapes.
-            if let Ok(hover) = serde_json::from_value::<Hover>(result.clone()) {
+            // GotoDefinition can arrive as Location | [Location] |
+            // [LocationLink] | null. Probe that shape before hover /
+            // completion since its discriminant (`uri` field) is
+            // distinct from either.
+            if let Ok(def) = serde_json::from_value::<GotoDefinitionResponse>(result.clone()) {
+                let loc_opt = match def {
+                    GotoDefinitionResponse::Scalar(loc) => Some((loc.uri, loc.range.start)),
+                    GotoDefinitionResponse::Array(mut locs) => {
+                        locs.pop().map(|loc| (loc.uri, loc.range.start))
+                    }
+                    GotoDefinitionResponse::Link(mut links) => links
+                        .pop()
+                        .map(|l| (l.target_uri, l.target_selection_range.start)),
+                };
+                if let Some((uri, pos)) = loc_opt {
+                    let _ = tx
+                        .send(LspEvent::Definition(
+                            id,
+                            uri.to_string(),
+                            pos.line,
+                            pos.character,
+                        ))
+                        .await;
+                }
+            } else if let Ok(hover) = serde_json::from_value::<Hover>(result.clone()) {
                 if let Some(path) = &debug {
                     use std::io::Write;
                     if let Ok(mut f) = std::fs::OpenOptions::new()

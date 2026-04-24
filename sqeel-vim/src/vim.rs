@@ -2001,6 +2001,13 @@ fn handle_after_g(ed: &mut Editor<'_>, input: Input) -> bool {
                 });
             }
         }
+        Key::Char('d') => {
+            // `gd` — goto definition. sqeel-vim doesn't run an LSP
+            // itself; raise an intent the host drains and routes to
+            // `sqls`. The cursor stays put here — the host moves it
+            // once it has the target location.
+            ed.pending_lsp = Some(crate::editor::LspIntent::GotoDefinition);
+        }
         _ => {}
     }
     true

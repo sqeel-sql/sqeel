@@ -21,7 +21,7 @@ pub mod ex;
 mod render;
 mod vim;
 
-pub use editor::Editor;
+pub use editor::{Editor, LspIntent};
 pub use render::{
     GutterSign, paint_block_overlay, paint_char_overlay, paint_gutter_signs, paint_line_overlay,
 };

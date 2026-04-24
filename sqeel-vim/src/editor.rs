@@ -45,6 +45,19 @@ pub struct Editor<'a> {
     /// can clamp the cursor to stay visible without plumbing the height
     /// through every call.
     pub(super) viewport_height: AtomicU16,
+    /// Pending LSP intent set by a normal-mode chord (e.g. `gd` for
+    /// goto-definition). The host app drains this each step and fires
+    /// the matching request against its own LSP client.
+    pub(super) pending_lsp: Option<LspIntent>,
+}
+
+/// Host-observable LSP requests triggered by editor bindings. The
+/// sqeel-vim crate doesn't talk to an LSP itself — it just raises an
+/// intent that the TUI layer picks up and routes to `sqls`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspIntent {
+    /// `gd` — textDocument/definition at the cursor.
+    GotoDefinition,
 }
 
 impl<'a> Editor<'a> {
@@ -61,7 +74,14 @@ impl<'a> Editor<'a> {
             content_dirty: false,
             cached_content: None,
             viewport_height: AtomicU16::new(0),
+            pending_lsp: None,
         }
+    }
+
+    /// Drain any pending LSP intent raised by the last key. Returns
+    /// `None` when no intent is armed.
+    pub fn take_lsp_intent(&mut self) -> Option<LspIntent> {
+        self.pending_lsp.take()
     }
 
     /// Host apps call this each draw with the current text area height so

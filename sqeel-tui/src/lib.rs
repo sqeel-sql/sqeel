@@ -437,6 +437,10 @@ async fn run_loop(
     // ignored (stale request raced a newer one or the popup was
     // dismissed before the server answered).
     let mut last_hover_id: Option<i64> = None;
+    // Most recent `gd` goto-definition request id; responses with a
+    // different id belong to an earlier dismissed request and are
+    // dropped silently.
+    let mut last_definition_id: Option<i64> = None;
     let mut last_schema_completions: Vec<String> = Vec::new();
     // Last completion context + prefix, stashed so we can re-run the query
     // once a lazy schema load fills in tables/columns for that context.
@@ -1022,6 +1026,27 @@ async fn run_loop(
                             }
                         }
                         state.lock().unwrap().set_diagnostics(diags);
+                    }
+                    LspEvent::Definition(id, uri, line, col) => {
+                        if Some(id) == last_definition_id {
+                            last_definition_id = None;
+                            // Same-buffer jumps update the cursor +
+                            // push the current position onto the
+                            // jumplist (so `Ctrl-o` returns). Cross-
+                            // buffer / schema jumps can't be resolved
+                            // locally — surface the location as a
+                            // toast so the user still has a pointer.
+                            if uri == scratch_uri.to_string() {
+                                editor.jump_to(line as usize + 1, col as usize + 1);
+                            } else {
+                                toasts.push((
+                                    format!("Defined at: {uri} line {}:{}", line + 1, col + 1),
+                                    ToastKind::Info,
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                            needs_redraw = true;
+                        }
                     }
                     LspEvent::Hover(id, text) => {
                         if Some(id) == last_hover_id {
@@ -2996,6 +3021,20 @@ async fn run_loop(
                             editor.seed_yank(text);
                         }
                         editor.handle_key(key);
+                        // Drain any LSP intent raised by the vim
+                        // engine (e.g. `gd` → GotoDefinition) and
+                        // route it to `sqls`. Response lands on the
+                        // `LspEvent` channel and jumps the cursor.
+                        if let Some(sqeel_vim::LspIntent::GotoDefinition) = editor.take_lsp_intent()
+                            && let Some(ref client) = lsp
+                        {
+                            let (row, col) = editor.textarea.cursor();
+                            last_definition_id = Some(client.writer().request_definition(
+                                scratch_uri.clone(),
+                                row as u32,
+                                col as u32,
+                            ));
+                        }
                         if let Some(text) = editor.last_yank.take() {
                             let ok = clipboard.set_text(&text);
                             toasts.push((
