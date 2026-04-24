@@ -841,4 +841,21 @@ mod tests {
         assert_eq!(e.textarea.viewport_top_row(), 31);
         assert_eq!(e.textarea.cursor().0, 50);
     }
+
+    /// Contract that the TUI drain relies on: `set_content` flags the
+    /// editor dirty (so the next `take_dirty` call reports the change),
+    /// and a second `take_dirty` returns `false` after consumption. The
+    /// TUI drains this flag after every programmatic content load so
+    /// opening a tab doesn't get mistaken for a user edit and mark the
+    /// tab dirty (which would then trigger the quit-prompt on `:q`).
+    #[test]
+    fn set_content_dirties_then_take_dirty_clears() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        assert!(
+            e.take_dirty(),
+            "set_content should leave content_dirty=true"
+        );
+        assert!(!e.take_dirty(), "take_dirty should clear the flag");
+    }
 }

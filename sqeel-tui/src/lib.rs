@@ -438,6 +438,11 @@ async fn run_loop(
             let pending = state.lock().unwrap().tab_content_pending.take();
             if let Some(content) = pending {
                 editor.set_content(&content);
+                // `set_content` flips the editor's dirty flag internally
+                // (textarea rebuild). Consume it here so the main-loop
+                // `take_dirty()` below doesn't mistake the programmatic
+                // load for a user edit and mark the tab dirty.
+                let _ = editor.take_dirty();
                 editor_dirty = false;
                 last_highlight_top = usize::MAX;
                 needs_redraw = true;
@@ -552,10 +557,15 @@ async fn run_loop(
         let viewport_top = editor.textarea.viewport_top_row();
         let viewport_height = editor.viewport_height_value() as usize;
         let current_dialect = state.lock().unwrap().active_dialect;
-        let dialect_changed = current_dialect != last_highlight_dialect;
         let viewport_scrolled = last_highlight_top == usize::MAX
             || viewport_top.abs_diff(last_highlight_top) >= HIGHLIGHT_WINDOW_MARGIN / 2;
-        if (content_changed || viewport_scrolled || dialect_changed) && viewport_height > 0 {
+        let should_submit = should_resubmit_highlight(
+            content_changed,
+            viewport_scrolled,
+            current_dialect,
+            last_highlight_dialect,
+        );
+        if should_submit && viewport_height > 0 {
             let lines = editor.textarea.lines();
             if !lines.is_empty() {
                 let start = viewport_top.saturating_sub(HIGHLIGHT_WINDOW_MARGIN);
@@ -852,6 +862,7 @@ async fn run_loop(
                                 };
                                 if let Some(c) = content {
                                     editor.set_content(&c);
+                                    let _ = editor.take_dirty();
                                     editor_dirty = false;
                                     last_highlight_top = usize::MAX;
                                 }
@@ -1121,6 +1132,7 @@ async fn run_loop(
                                 };
                                 if let Some(c) = content {
                                     editor.set_content(&c);
+                                    let _ = editor.take_dirty();
                                     editor_dirty = false;
                                     last_highlight_top = usize::MAX;
                                 }
@@ -1634,6 +1646,7 @@ async fn run_loop(
                         };
                         if let Some(c) = content {
                             editor.set_content(&c);
+                            let _ = editor.take_dirty();
                             editor_dirty = false;
                             last_highlight_top = usize::MAX;
                         }
@@ -1653,6 +1666,7 @@ async fn run_loop(
                         };
                         if let Some(c) = content {
                             editor.set_content(&c);
+                            let _ = editor.take_dirty();
                             editor_dirty = false;
                             last_highlight_top = usize::MAX;
                         }
@@ -3716,6 +3730,25 @@ fn highlight_query_line(query: &str, dialect: Dialect) -> Line<'static> {
     Line::from(out)
 }
 
+/// Decide whether the highlight worker needs a fresh submission.
+///
+/// Fires on:
+/// - `content_changed` — user edited the buffer.
+/// - `viewport_scrolled` — viewport moved far enough that the current
+///   parse window no longer covers what's on screen.
+/// - A dialect flip — the DB handshake is async, so the first parse at
+///   startup runs under `Dialect::Generic`. Once the connection resolves
+///   and sets the concrete dialect we need to re-parse so dialect-specific
+///   keyword promotion (DESC / SHOW / PRAGMA / …) kicks in.
+fn should_resubmit_highlight(
+    content_changed: bool,
+    viewport_scrolled: bool,
+    current_dialect: Dialect,
+    last_dialect: Dialect,
+) -> bool {
+    content_changed || viewport_scrolled || current_dialect != last_dialect
+}
+
 fn token_kind_style(kind: TokenKind) -> Option<Style> {
     let u = ui();
     match kind {
@@ -4904,6 +4937,40 @@ mod tests {
         for (s, e, _) in &row {
             assert!(*e <= 12, "span {s}..{e} bled past `*/`");
         }
+    }
+
+    #[test]
+    fn should_resubmit_triggers_on_dialect_flip() {
+        use sqeel_core::highlight::Dialect;
+        // Steady state: no content change, no scroll, no dialect change.
+        assert!(!super::should_resubmit_highlight(
+            false,
+            false,
+            Dialect::Generic,
+            Dialect::Generic
+        ));
+        // Dialect changes (e.g. async DB handshake completes) → force
+        // re-parse even when content is idle.
+        assert!(super::should_resubmit_highlight(
+            false,
+            false,
+            Dialect::MySql,
+            Dialect::Generic
+        ));
+        // Content change fires regardless of dialect match.
+        assert!(super::should_resubmit_highlight(
+            true,
+            false,
+            Dialect::Generic,
+            Dialect::Generic
+        ));
+        // Viewport scroll fires regardless of dialect match.
+        assert!(super::should_resubmit_highlight(
+            false,
+            true,
+            Dialect::Generic,
+            Dialect::Generic
+        ));
     }
 
     #[test]

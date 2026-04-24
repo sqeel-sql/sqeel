@@ -891,6 +891,33 @@ mod tests {
     }
 
     #[test]
+    fn generic_dialect_skips_desc_keyword_promotion() {
+        // Regression: if the TUI plumbs `Generic` to the highlight
+        // worker (e.g. because `active_dialect` wasn't updated after
+        // connect), our dialect-specific sweep no-ops and DESC stays
+        // unhighlighted. Confirms the dialect actually drives the
+        // promotion so a dialect-propagation regression flips the count.
+        let src = "select * from users;\n\nDESC users;\n\nDESC users;\n";
+        let mut h = Highlighter::new().unwrap();
+        let generic = h
+            .highlight(src, Dialect::Generic)
+            .into_iter()
+            .filter(|s| s.kind == TokenKind::Keyword && &src[s.start_byte..s.end_byte] == "DESC")
+            .count();
+        let mut h2 = Highlighter::new().unwrap();
+        let mysql = h2
+            .highlight(src, Dialect::MySql)
+            .into_iter()
+            .filter(|s| s.kind == TokenKind::Keyword && &src[s.start_byte..s.end_byte] == "DESC")
+            .count();
+        assert!(
+            mysql > generic,
+            "MySql must promote more DESCs to keyword than Generic (mysql={mysql}, generic={generic})"
+        );
+        assert_eq!(mysql, 2, "expected both DESCs highlighted under MySql");
+    }
+
+    #[test]
     fn debug_dump_with_alter_tail() {
         // Match user's actual buffer: the header lines + 40 repeated
         // `-- ALTER TABLE …` lines at the bottom, totalling ~64 rows.
