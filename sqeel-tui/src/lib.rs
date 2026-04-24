@@ -3855,13 +3855,18 @@ fn apply_window_spans(
                 .take(window_end)
                 .skip(window_start)
             {
-                if !spans.is_empty() {
-                    let line_preview: String = textarea_lines
-                        .get(row)
-                        .map(|l| l.chars().take(60).collect())
-                        .unwrap_or_default();
-                    let _ = writeln!(f, "row {row} [{line_preview:?}]: {spans:?}");
-                }
+                let line_preview: String = textarea_lines
+                    .get(row)
+                    .map(|l| l.chars().take(80).collect())
+                    .unwrap_or_default();
+                let line_bytes: Vec<u8> = textarea_lines
+                    .get(row)
+                    .map(|l| l.bytes().collect())
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    f,
+                    "row {row} [{line_preview:?}] bytes={line_bytes:?}: {spans:?}"
+                );
             }
         }
     }
@@ -4938,6 +4943,72 @@ mod tests {
         row.sort_by_key(|&(s, _, _)| s);
         let ranges: Vec<(usize, usize)> = row.iter().map(|&(s, e, _)| (s, e)).collect();
         assert_eq!(ranges, vec![(0, 10), (10, 15), (15, 30)]);
+    }
+
+    #[test]
+    fn apply_window_spans_with_alter_tail_repro() {
+        use super::HighlightResult;
+        use super::theme;
+        use sqeel_core::highlight::{Dialect, Highlighter};
+
+        let header = "select * from ppc_third.searches_182 order by id desc;\n\
+                   select * from ppc_third.searches_181 order by id desc;\n\
+                   select count(*), status from ppc_third.searches_182 group by status;\n\
+                   \n\
+                   -- TODO: \n\
+                   -- test\n\
+                   \n\
+                   -- TODO test\n\
+                   \n\
+                   -- TODO: this is a test\n\
+                   -- FIXME: this is a test\n\
+                   -- this is a test\n\
+                   -- FIX:\n\
+                   \n\
+                   -- NOTE: another note\n\
+                   -- WARN: woah...\n\
+                   -- this is a warning\n\
+                   -- INFO:  this is \n\
+                   \n\
+                   select * from users;\n\
+                   \n\
+                   DESC users;\n\
+                   \n\
+                   DESC users;\n\
+                   \n";
+        let alter = "-- ALTER TABLE ppc_third.`searches_182` ADD COLUMN `error` TEXT NULL AFTER `status`;\n";
+        let mut src = header.to_string();
+        for _ in 0..40 {
+            src.push_str(alter);
+        }
+        let _ = theme::load();
+
+        let mut h = Highlighter::new().unwrap();
+        let spans = h.highlight(&src, Dialect::MySql);
+        let lines: Vec<String> = src.lines().map(|l| l.to_string()).collect();
+        let row_count = lines.len();
+        let result = HighlightResult {
+            spans,
+            start_row: 0,
+            row_count,
+        };
+
+        let mut ta = tui_textarea::TextArea::new(lines);
+        super::apply_window_spans(&mut ta, &result, row_count, 0);
+        let by_row = ta.take_syntax_spans();
+
+        let keyword_style =
+            super::token_kind_style(sqeel_core::highlight::TokenKind::Keyword).unwrap();
+        for row in [21usize, 23] {
+            let spans = &by_row[row];
+            let has_kw_at_zero = spans
+                .iter()
+                .any(|&(s, e, st)| s == 0 && e >= 4 && st == keyword_style);
+            assert!(
+                has_kw_at_zero,
+                "row {row} missing Keyword span; row spans = {spans:?}"
+            );
+        }
     }
 
     #[test]
