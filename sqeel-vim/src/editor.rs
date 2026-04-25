@@ -879,7 +879,10 @@ impl<'a> Editor<'a> {
 
     /// Translate a terminal mouse position into a (row, col) inside the document.
     /// `area` is the outer editor rect: 1-row tab bar at top (flush), then the
-    /// textarea with 1 cell of horizontal pane padding on each side.
+    /// textarea with 1 cell of horizontal pane padding on each side. Clicks
+    /// past the line's last character clamp to the last char (Normal-mode
+    /// invariant) — never past it. Char-counted, not byte-counted, so
+    /// multibyte runs land where the user expects.
     fn mouse_to_doc_pos(&self, area: Rect, col: u16, row: u16) -> (usize, usize) {
         let lines = self.buffer.lines();
         let inner_top = area.y.saturating_add(1); // tab bar row
@@ -889,8 +892,9 @@ impl<'a> Editor<'a> {
         let top = self.buffer.viewport().top_row;
         let doc_row = (top + rel_row).min(lines.len().saturating_sub(1));
         let rel_col = col.saturating_sub(content_x) as usize;
-        let line_len = lines.get(doc_row).map(|l| l.len()).unwrap_or(0);
-        (doc_row, rel_col.min(line_len))
+        let line_chars = lines.get(doc_row).map(|l| l.chars().count()).unwrap_or(0);
+        let last_col = line_chars.saturating_sub(1);
+        (doc_row, rel_col.min(last_col))
     }
 
     /// Jump the cursor to the given 1-based line/column, clamped to the document.
@@ -1490,5 +1494,46 @@ mod tests {
         let b = e.content_arc();
         assert!(!std::sync::Arc::ptr_eq(&a, &b));
         assert!(b.starts_with("two"));
+    }
+
+    /// Click past the last char of a line should land the cursor on
+    /// the line's last char (Normal mode), not one past it. The
+    /// previous bug clamped to the line's BYTE length and used `>=`
+    /// past-end, so clicking deep into the trailing space parked the
+    /// cursor at `chars().count()` — past where Normal mode lives.
+    #[test]
+    fn mouse_click_past_eol_lands_on_last_char() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello");
+        // Outer editor area: x=0, y=0, width=80. mouse_to_doc_pos
+        // reserves row 0 for the tab bar and adds gutter padding,
+        // so click row 1, way past the line end.
+        let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        e.mouse_click(area, 78, 1);
+        assert_eq!(e.cursor(), (0, 4));
+    }
+
+    #[test]
+    fn mouse_click_past_eol_handles_multibyte_line() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        // 5 chars, 6 bytes — old code's `String::len()` clamp was
+        // wrong here.
+        e.set_content("héllo");
+        let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        e.mouse_click(area, 78, 1);
+        assert_eq!(e.cursor(), (0, 4));
+    }
+
+    #[test]
+    fn mouse_click_inside_line_lands_on_clicked_char() {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content("hello world");
+        // Gutter is `lnum_width + 1` = (1-digit row count + 2) + 1
+        // pane padding = 4 cells; click col 4 is the first char.
+        let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        e.mouse_click(area, 4, 1);
+        assert_eq!(e.cursor(), (0, 0));
+        e.mouse_click(area, 6, 1);
+        assert_eq!(e.cursor(), (0, 2));
     }
 }
