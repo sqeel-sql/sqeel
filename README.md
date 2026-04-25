@@ -1,7 +1,7 @@
 # SQEEL
 
-[![CI](https://github.com/sqeel-sql/sqeel/actions/workflows/ci.yml/badge.svg)](https://github.com/sqeel-sql/sqeel/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/sqeel-sql/sqeel)](https://github.com/sqeel-sql/sqeel/releases/latest)
+[![CI](https://github.com/kryptic-sh/sqeel/actions/workflows/ci.yml/badge.svg)](https://github.com/kryptic-sh/sqeel/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/kryptic-sh/sqeel)](https://github.com/kryptic-sh/sqeel/releases/latest)
 
 Fast, vim-native SQL client. No Electron. No JVM.
 
@@ -49,14 +49,14 @@ Results hidden → editor fills right pane. Query runs → results expand to 50%
 ## Install
 
 ```sh
-cargo install --git https://github.com/sqeel-sql/sqeel --bin sqeel
-cargo install --git https://github.com/sqeel-sql/sqeel --bin sqeel-gui
+cargo install --git https://github.com/kryptic-sh/sqeel --bin sqeel
+cargo install --git https://github.com/kryptic-sh/sqeel --bin sqeel-gui
 ```
 
 Or build from source:
 
 ```sh
-git clone https://github.com/sqeel-sql/sqeel
+git clone https://github.com/kryptic-sh/sqeel
 cd sqeel
 cargo build --release
 ```
