@@ -240,6 +240,11 @@ pub enum Motion {
     SentencePrev,
     /// `)` — next sentence boundary.
     SentenceNext,
+    /// `gj` — `count` visual rows down (one screen segment per step
+    /// under `:set wrap`; falls back to `Down` otherwise).
+    ScreenDown,
+    /// `gk` — `count` visual rows up; mirror of [`Motion::ScreenDown`].
+    ScreenUp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2045,7 +2050,10 @@ fn is_vertical_motion(motion: &Motion) -> bool {
     // Only j / k preserve the sticky column. Everything else (search,
     // gg / G, word jumps, etc.) lands at the match's own column so the
     // sticky value should sync to the new cursor column.
-    matches!(motion, Motion::Up | Motion::Down)
+    matches!(
+        motion,
+        Motion::Up | Motion::Down | Motion::ScreenUp | Motion::ScreenDown
+    )
 }
 
 fn apply_motion_cursor(ed: &mut Editor<'_>, motion: &Motion, count: usize) {
@@ -2079,6 +2087,14 @@ fn apply_motion_cursor_ctx(ed: &mut Editor<'_>, motion: &Motion, count: usize, a
         }
         Motion::Down => {
             ed.buffer_mut().move_down(count);
+            ed.push_buffer_cursor_to_textarea();
+        }
+        Motion::ScreenUp => {
+            ed.buffer_mut().move_screen_up(count);
+            ed.push_buffer_cursor_to_textarea();
+        }
+        Motion::ScreenDown => {
+            ed.buffer_mut().move_screen_down(count);
             ed.push_buffer_cursor_to_textarea();
         }
         Motion::WordFwd => {
@@ -2478,6 +2494,8 @@ fn handle_op_after_g(ed: &mut Editor<'_>, input: Input, op: Operator, count1: us
         Key::Char('g') => Motion::FileTop,
         Key::Char('e') => Motion::WordEndBack,
         Key::Char('E') => Motion::BigWordEndBack,
+        Key::Char('j') => Motion::ScreenDown,
+        Key::Char('k') => Motion::ScreenUp,
         _ => return true,
     };
     apply_op_with_motion(ed, op, &motion, total);
@@ -2536,10 +2554,11 @@ fn handle_after_g(ed: &mut Editor<'_>, input: Input) -> bool {
                 ed.jump_cursor(snap.cursor.0, snap.cursor.1);
             }
         }
-        // `gj` / `gk` — display-line down / up. Identical to j/k
-        // until soft-wrap exists; alias now so muscle memory works.
-        Key::Char('j') => execute_motion(ed, Motion::Down, count),
-        Key::Char('k') => execute_motion(ed, Motion::Up, count),
+        // `gj` / `gk` — display-line down / up. Walks one screen
+        // segment at a time under `:set wrap`; falls back to `j`/`k`
+        // when wrap is off (Buffer::move_screen_* handles the branch).
+        Key::Char('j') => execute_motion(ed, Motion::ScreenDown, count),
+        Key::Char('k') => execute_motion(ed, Motion::ScreenUp, count),
         // Case operators: `gU` / `gu` / `g~`. Enter operator-pending
         // so the next input is treated as the motion / text object /
         // shorthand double (`gUU`, `guu`, `g~~`).
@@ -3094,7 +3113,7 @@ fn apply_op_with_text_object(ed: &mut Editor<'_>, op: Operator, obj: TextObject,
 
 fn motion_kind(motion: &Motion) -> MotionKind {
     match motion {
-        Motion::Up | Motion::Down => MotionKind::Linewise,
+        Motion::Up | Motion::Down | Motion::ScreenUp | Motion::ScreenDown => MotionKind::Linewise,
         Motion::FileTop | Motion::FileBottom => MotionKind::Linewise,
         Motion::ViewportTop | Motion::ViewportMiddle | Motion::ViewportBottom => {
             MotionKind::Linewise

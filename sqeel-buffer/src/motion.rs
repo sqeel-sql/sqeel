@@ -22,6 +22,17 @@ fn last_col(line: &str) -> usize {
     line_chars(line).saturating_sub(1)
 }
 
+/// Pick a target column inside the screen segment `[start, end)` for
+/// a `gj` / `gk` step that wants `visual_col` cells from the segment
+/// start. Clamps to the segment's last position and to the line's
+/// last char so the cursor never lands past the line end.
+fn clamp_to_segment(start: usize, end: usize, visual_col: usize, line: &str) -> usize {
+    let line_max = last_col(line);
+    let seg_max = if end > start { end - 1 } else { start };
+    let want = start.saturating_add(visual_col);
+    want.min(seg_max).min(line_max).max(start.min(line_max))
+}
+
 impl Buffer {
     // ── Horizontal motions ──────────────────────────────────────
 
@@ -151,6 +162,21 @@ impl Buffer {
     /// `j` — `count` rows down; sticky col preserved across short rows.
     pub fn move_down(&mut self, count: usize) {
         self.move_vertical(count.max(1) as isize);
+    }
+
+    /// `gk` — `count` visual rows up. With `Wrap::None` (or before
+    /// the host has published `text_width`), falls back to `move_up`
+    /// so existing tests + non-wrap callers behave unchanged. Under
+    /// wrap, walks one screen segment at a time, crossing into the
+    /// previous doc row only after exhausting the current row's
+    /// segments.
+    pub fn move_screen_up(&mut self, count: usize) {
+        self.move_screen_vertical(-(count.max(1) as isize));
+    }
+
+    /// `gj` — `count` visual rows down. See [`Buffer::move_screen_up`].
+    pub fn move_screen_down(&mut self, count: usize) {
+        self.move_screen_vertical(count.max(1) as isize);
     }
 
     /// `gg` — first row, first non-blank.
@@ -377,6 +403,73 @@ impl Buffer {
     }
 
     // ── Internals ──────────────────────────────────────────────
+
+    fn move_screen_vertical(&mut self, delta: isize) {
+        let v = self.viewport();
+        if matches!(v.wrap, crate::Wrap::None) || v.text_width == 0 {
+            self.move_vertical(delta);
+            return;
+        }
+        // Snapshot the visual col (offset within the current segment)
+        // up front so a chain of `gj` / `gk` presses lands at the
+        // same visual column even when crossing short visual lines.
+        let cursor = self.cursor();
+        let line = self.line(cursor.row).unwrap_or("");
+        let segs = crate::wrap::wrap_segments(line, v.text_width, v.wrap);
+        let seg_idx = crate::wrap::segment_for_col(&segs, cursor.col);
+        let visual_col = cursor.col.saturating_sub(segs[seg_idx].0);
+        let down = delta > 0;
+        for _ in 0..delta.unsigned_abs() {
+            if !self.step_screen(down, visual_col) {
+                break;
+            }
+        }
+        self.set_sticky_col(Some(self.cursor().col));
+    }
+
+    /// One visual-row step under wrap. Returns false when stepping
+    /// would leave the buffer (top of buffer for `down=false`,
+    /// bottom for `down=true`).
+    fn step_screen(&mut self, down: bool, visual_col: usize) -> bool {
+        let v = self.viewport();
+        let cursor = self.cursor();
+        let line = self.line(cursor.row).unwrap_or("");
+        let segs = crate::wrap::wrap_segments(line, v.text_width, v.wrap);
+        let seg_idx = crate::wrap::segment_for_col(&segs, cursor.col);
+        if down {
+            if seg_idx + 1 < segs.len() {
+                let (s, e) = segs[seg_idx + 1];
+                let target = clamp_to_segment(s, e, visual_col, line);
+                self.set_cursor(Position::new(cursor.row, target));
+                return true;
+            }
+            let Some(next_row) = self.next_visible_row(cursor.row) else {
+                return false;
+            };
+            let next_line = self.line(next_row).unwrap_or("");
+            let next_segs = crate::wrap::wrap_segments(next_line, v.text_width, v.wrap);
+            let (s, e) = next_segs[0];
+            let target = clamp_to_segment(s, e, visual_col, next_line);
+            self.set_cursor(Position::new(next_row, target));
+            true
+        } else {
+            if seg_idx > 0 {
+                let (s, e) = segs[seg_idx - 1];
+                let target = clamp_to_segment(s, e, visual_col, line);
+                self.set_cursor(Position::new(cursor.row, target));
+                return true;
+            }
+            let Some(prev_row) = self.prev_visible_row(cursor.row) else {
+                return false;
+            };
+            let prev_line = self.line(prev_row).unwrap_or("");
+            let prev_segs = crate::wrap::wrap_segments(prev_line, v.text_width, v.wrap);
+            let (s, e) = *prev_segs.last().unwrap_or(&(0, 0));
+            let target = clamp_to_segment(s, e, visual_col, prev_line);
+            self.set_cursor(Position::new(prev_row, target));
+            true
+        }
+    }
 
     fn move_vertical(&mut self, delta: isize) {
         let cursor = self.cursor();
@@ -897,5 +990,77 @@ mod tests {
         let mut b = Buffer::from_str("abcd");
         b.move_right_in_line(0);
         assert_eq!(at(&b), Position::new(0, 1));
+    }
+
+    fn enable_wrap(b: &mut Buffer, mode: crate::Wrap, text_width: u16) {
+        let v = b.viewport_mut();
+        v.wrap = mode;
+        v.text_width = text_width;
+        v.height = 10;
+    }
+
+    #[test]
+    fn screen_down_falls_back_to_move_down_when_wrap_off() {
+        let mut b = Buffer::from_str("a\nb\nc");
+        b.move_screen_down(1);
+        assert_eq!(at(&b), Position::new(1, 0));
+        b.move_screen_down(1);
+        assert_eq!(at(&b), Position::new(2, 0));
+    }
+
+    #[test]
+    fn screen_down_walks_within_wrapped_row() {
+        // 12-char line, width 4 → segments (0,4), (4,8), (8,12).
+        let mut b = Buffer::from_str("aaaabbbbcccc\nx");
+        enable_wrap(&mut b, crate::Wrap::Char, 4);
+        b.set_cursor(Position::new(0, 1));
+        b.move_screen_down(1);
+        // visual_col = 1 → next segment starts at 4 → land col 5.
+        assert_eq!(at(&b), Position::new(0, 5));
+        b.move_screen_down(1);
+        assert_eq!(at(&b), Position::new(0, 9));
+        // Past the last segment crosses to the next doc row.
+        b.move_screen_down(1);
+        assert_eq!(at(&b), Position::new(1, 0));
+    }
+
+    #[test]
+    fn screen_up_walks_within_wrapped_row() {
+        let mut b = Buffer::from_str("aaaabbbbcccc");
+        enable_wrap(&mut b, crate::Wrap::Char, 4);
+        b.set_cursor(Position::new(0, 9));
+        b.move_screen_up(1);
+        // visual_col = 9 - 8 = 1 → previous segment col = 4 + 1 = 5.
+        assert_eq!(at(&b), Position::new(0, 5));
+        b.move_screen_up(1);
+        assert_eq!(at(&b), Position::new(0, 1));
+        // Already on first segment of first row — no further move.
+        b.move_screen_up(1);
+        assert_eq!(at(&b), Position::new(0, 1));
+    }
+
+    #[test]
+    fn screen_down_clamps_to_short_segment() {
+        // First row wraps into a 6-char then a 2-char segment; second
+        // row is only 1 char. Visual col 4 should clamp to row 1's
+        // last col (0) when crossing into the short row.
+        let mut b = Buffer::from_str("aaaaaabb\nx");
+        enable_wrap(&mut b, crate::Wrap::Char, 6);
+        b.set_cursor(Position::new(0, 4));
+        b.move_screen_down(1);
+        // visual_col = 4 → segment 1 is (6, 8); want=10 clamps to 7.
+        assert_eq!(at(&b), Position::new(0, 7));
+        b.move_screen_down(1);
+        // crosses into row 1, segment (0, 1) — clamps to col 0.
+        assert_eq!(at(&b), Position::new(1, 0));
+    }
+
+    #[test]
+    fn screen_down_count_compounds() {
+        let mut b = Buffer::from_str("aaaabbbbcccc");
+        enable_wrap(&mut b, crate::Wrap::Char, 4);
+        b.set_cursor(Position::new(0, 0));
+        b.move_screen_down(2);
+        assert_eq!(at(&b), Position::new(0, 8));
     }
 }

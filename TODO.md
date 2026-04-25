@@ -258,8 +258,17 @@ Today: `:q`, `:q!`, `:w`, `:wq`, `:x`, `:noh`, `:s/`, `:%s/`, `:g/`, `:v/`, `:N`
   aware: when wrap is on it walks doc rows from `top_row`, sums their segment
   counts, and pushes `top_row` past visible rows until the cursor's screen row
   fits inside `viewport.height`. sqeel-tui publishes `text_width = area.width
-  - gutter_width`each frame. Still TODO:`gj`/`gk`visual-line motion,`:set wrap`
-    ex command + Editor settings plumbing, scrolloff under wrap.
+  - gutter*width` each frame. \_Phase 3 (visual-line motion) shipped.*
+    `Buffer::move_screen_down` / `move_screen_up` walk one screen segment at a
+    time under wrap, falling back to `move_down` / `move_up` when wrap is off so
+    the existing `j` / `k` semantics survive untouched. The visual col (cursor
+    col minus segment start) is snapshotted up front so a chain of `gj` / `gk`
+    presses preserves the same display column even when crossing short visual
+    lines. New `Motion::ScreenDown` / `ScreenUp` wired into
+    `apply_motion_cursor`, the `g`-prefix chord registry (replaces the old
+    `gj`→`Down` aliases), and `handle_op_after_g` so `dgj` / `dgk` work as
+    linewise operator motions. Still TODO: `:set wrap` ex command + Editor
+    settings plumbing, scrolloff under wrap.
 - ~~**Concealed regions (M).**~~ Done. `BufferView` takes a `conceals` slice;
   each entry is `Conceal { row, start_byte, end_byte, replacement }`. The render
   walker checks each row's conceal list, paints the replacement when entering a
