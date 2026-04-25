@@ -13,6 +13,7 @@
 //! at once. See `TODO.md` at the repo root for the migration plan.
 
 mod buffer;
+mod motion;
 mod position;
 mod selection;
 mod span;

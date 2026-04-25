@@ -108,6 +108,32 @@ impl Buffer {
         self.dirty_gen
     }
 
+    /// Set cursor without scrolling. Caller is responsible for calling
+    /// [`Buffer::ensure_cursor_visible`] when they want viewport
+    /// follow. Clamps `row` and `col` to valid positions so motion
+    /// helpers don't have to repeat the bound check.
+    pub fn set_cursor(&mut self, pos: Position) {
+        let last_row = self.lines.len().saturating_sub(1);
+        let row = pos.row.min(last_row);
+        let line_chars = self.lines[row].chars().count();
+        let col = pos.col.min(line_chars);
+        self.cursor = Position::new(row, col);
+    }
+
+    /// Replace the sticky col (vim's `curswant`). Motion code sets
+    /// this after vertical / horizontal moves; the buffer doesn't
+    /// touch it on its own.
+    pub fn set_sticky_col(&mut self, col: Option<usize>) {
+        self.sticky_col = col;
+    }
+
+    /// Bring the cursor into the visible viewport, scrolling by the
+    /// minimum amount needed.
+    pub fn ensure_cursor_visible(&mut self) {
+        let cursor = self.cursor;
+        self.viewport.ensure_visible(cursor);
+    }
+
     pub fn marks(&self) -> &BTreeMap<char, Position> {
         &self.marks
     }
