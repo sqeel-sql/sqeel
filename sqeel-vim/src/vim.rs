@@ -546,7 +546,26 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
     if input.ctrl {
         match input.key {
             Key::Char('w') => {
-                ed.mutate(|t| t.delete_word());
+                use sqeel_buffer::{Edit, MotionKind};
+                ed.sync_buffer_content_from_textarea();
+                let cursor = ed.buffer().cursor();
+                if cursor.row == 0 && cursor.col == 0 {
+                    return true;
+                }
+                // Find the previous word start by stepping the buffer
+                // cursor (vim `b` semantics) and snapshot it.
+                ed.buffer_mut().move_word_back(false, 1);
+                let word_start = ed.buffer().cursor();
+                if word_start == cursor {
+                    return true;
+                }
+                ed.buffer_mut().set_cursor(cursor);
+                ed.mutate_edit(Edit::DeleteRange {
+                    start: word_start,
+                    end: cursor,
+                    kind: MotionKind::Char,
+                });
+                ed.push_buffer_cursor_to_textarea();
                 return true;
             }
             Key::Char('u') => {
