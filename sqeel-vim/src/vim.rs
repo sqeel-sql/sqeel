@@ -1249,7 +1249,13 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
     }
 
     // `z` prefix (zz / zt / zb — cursor-relative viewport scrolls).
-    if !input.ctrl && input.key == Key::Char('z') && ed.vim.mode == Mode::Normal {
+    if !input.ctrl
+        && input.key == Key::Char('z')
+        && matches!(
+            ed.vim.mode,
+            Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+        )
+    {
         ed.vim.pending = Pending::Z;
         return true;
     }
@@ -2121,10 +2127,51 @@ fn handle_after_g(ed: &mut Editor<'_>, input: Input) -> bool {
 
 fn handle_after_z(ed: &mut Editor<'_>, input: Input) -> bool {
     use crate::editor::CursorScrollTarget;
+    let row = ed.cursor().0;
     match input.key {
         Key::Char('z') => ed.scroll_cursor_to(CursorScrollTarget::Center),
         Key::Char('t') => ed.scroll_cursor_to(CursorScrollTarget::Top),
         Key::Char('b') => ed.scroll_cursor_to(CursorScrollTarget::Bottom),
+        // Folds — operate on the fold under the cursor (or the
+        // whole buffer for `R` / `M`).
+        Key::Char('o') => {
+            ed.buffer_mut().open_fold_at(row);
+        }
+        Key::Char('c') => {
+            ed.buffer_mut().close_fold_at(row);
+        }
+        Key::Char('a') => {
+            ed.buffer_mut().toggle_fold_at(row);
+        }
+        Key::Char('R') => {
+            ed.buffer_mut().open_all_folds();
+        }
+        Key::Char('M') => {
+            ed.buffer_mut().close_all_folds();
+        }
+        Key::Char('d') => {
+            ed.buffer_mut().remove_fold_at(row);
+        }
+        Key::Char('f')
+            if matches!(
+                ed.vim.mode,
+                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            ) =>
+        {
+            // `zf` over a Visual selection creates a fold. Outside
+            // visual mode it's a no-op for now (vim's `zf{motion}`
+            // chord would need a pending-state extension).
+            let anchor_row = match ed.vim.mode {
+                Mode::VisualLine => ed.vim.visual_line_anchor,
+                Mode::VisualBlock => ed.vim.block_anchor.0,
+                _ => ed.vim.visual_anchor.0,
+            };
+            let cur = ed.cursor().0;
+            let top = anchor_row.min(cur);
+            let bot = anchor_row.max(cur);
+            ed.buffer_mut().add_fold(top, bot, true);
+            ed.vim.mode = Mode::Normal;
+        }
         _ => {}
     }
     true
@@ -6145,6 +6192,62 @@ mod tests {
         let combined = e.registers().read('a').unwrap().text.clone();
         assert!(combined.starts_with(&first));
         assert!(combined.contains("bar"));
+    }
+
+    #[test]
+    fn zf_in_visual_line_creates_closed_fold() {
+        let mut e = editor_with("a\nb\nc\nd\ne");
+        // VisualLine over rows 1..=3 then zf.
+        e.jump_cursor(1, 0);
+        run_keys(&mut e, "Vjjzf");
+        assert_eq!(e.buffer().folds().len(), 1);
+        let f = e.buffer().folds()[0];
+        assert_eq!(f.start_row, 1);
+        assert_eq!(f.end_row, 3);
+        assert!(f.closed);
+    }
+
+    #[test]
+    fn za_toggles_fold_under_cursor() {
+        let mut e = editor_with("a\nb\nc\nd");
+        e.buffer_mut().add_fold(1, 2, true);
+        e.jump_cursor(1, 0);
+        run_keys(&mut e, "za");
+        assert!(!e.buffer().folds()[0].closed);
+        run_keys(&mut e, "za");
+        assert!(e.buffer().folds()[0].closed);
+    }
+
+    #[test]
+    fn zr_opens_all_folds_zm_closes_all() {
+        let mut e = editor_with("a\nb\nc\nd\ne\nf");
+        e.buffer_mut().add_fold(0, 1, true);
+        e.buffer_mut().add_fold(2, 3, true);
+        e.buffer_mut().add_fold(4, 5, true);
+        run_keys(&mut e, "zR");
+        assert!(e.buffer().folds().iter().all(|f| !f.closed));
+        run_keys(&mut e, "zM");
+        assert!(e.buffer().folds().iter().all(|f| f.closed));
+    }
+
+    #[test]
+    fn editing_inside_fold_invalidates_it() {
+        let mut e = editor_with("a\nb\nc\nd");
+        e.buffer_mut().add_fold(1, 2, true);
+        e.jump_cursor(1, 0);
+        // Insert a char on a row covered by the fold.
+        run_keys(&mut e, "iX<Esc>");
+        // Fold should be gone — vim opens (drops) folds on edit.
+        assert!(e.buffer().folds().is_empty());
+    }
+
+    #[test]
+    fn zd_removes_fold_under_cursor() {
+        let mut e = editor_with("a\nb\nc\nd");
+        e.buffer_mut().add_fold(1, 2, true);
+        e.jump_cursor(2, 0);
+        run_keys(&mut e, "zd");
+        assert!(e.buffer().folds().is_empty());
     }
 
     #[test]

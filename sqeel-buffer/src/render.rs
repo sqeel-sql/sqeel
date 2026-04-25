@@ -91,9 +91,9 @@ impl<R: StyleResolver> Widget for BufferView<'_, R> {
         let cursor = self.buffer.cursor();
         let lines = self.buffer.lines();
         let spans = self.buffer.spans();
+        let folds = self.buffer.folds();
         let top_row = viewport.top_row;
         let top_col = viewport.top_col;
-        let visible_rows = (area.height as usize).min(lines.len().saturating_sub(top_row));
 
         let gutter_width = self.gutter.map(|g| g.width).unwrap_or(0);
         let text_area = Rect {
@@ -103,21 +103,42 @@ impl<R: StyleResolver> Widget for BufferView<'_, R> {
             height: area.height,
         };
 
-        for screen_row in 0..visible_rows {
-            let doc_row = top_row + screen_row;
+        let total_rows = lines.len();
+        let mut doc_row = top_row;
+        let mut screen_row: u16 = 0;
+        // Walk the document forward, skipping rows hidden by closed
+        // folds. Emit the start row of a closed fold as a marker
+        // line instead of its actual content.
+        while doc_row < total_rows && screen_row < area.height {
+            // Skip rows hidden by a closed fold (any row past start
+            // of a closed fold).
+            if folds.iter().any(|f| f.hides(doc_row)) {
+                doc_row += 1;
+                continue;
+            }
+            let folded_at_start = folds
+                .iter()
+                .find(|f| f.closed && f.start_row == doc_row)
+                .copied();
             let line = &lines[doc_row];
             let row_spans = spans.get(doc_row).map(Vec::as_slice).unwrap_or(&[]);
             let sel_range = self.selection.and_then(|s| s.row_span(doc_row));
             let is_cursor_row = doc_row == cursor.row;
             if let Some(gutter) = self.gutter {
-                self.paint_gutter(term_buf, area, screen_row as u16, doc_row, gutter);
-                self.paint_signs(term_buf, area, screen_row as u16, doc_row);
+                self.paint_gutter(term_buf, area, screen_row, doc_row, gutter);
+                self.paint_signs(term_buf, area, screen_row, doc_row);
+            }
+            if let Some(fold) = folded_at_start {
+                self.paint_fold_marker(term_buf, text_area, screen_row, fold, is_cursor_row);
+                screen_row += 1;
+                doc_row = fold.end_row + 1;
+                continue;
             }
             let search_ranges = self.row_search_ranges(line);
             self.paint_row(
                 term_buf,
                 text_area,
-                screen_row as u16,
+                screen_row,
                 line,
                 row_spans,
                 sel_range,
@@ -126,6 +147,8 @@ impl<R: StyleResolver> Widget for BufferView<'_, R> {
                 cursor.col,
                 top_col,
             );
+            screen_row += 1;
+            doc_row += 1;
         }
     }
 }
@@ -145,6 +168,45 @@ impl<R: StyleResolver> BufferView<'_, R> {
                 (start, end)
             })
             .collect()
+    }
+
+    fn paint_fold_marker(
+        &self,
+        term_buf: &mut TermBuffer,
+        area: Rect,
+        screen_row: u16,
+        fold: crate::Fold,
+        is_cursor_row: bool,
+    ) {
+        let y = area.y + screen_row;
+        let style = if is_cursor_row && self.cursor_line_bg != Style::default() {
+            self.cursor_line_bg
+        } else {
+            Style::default()
+        };
+        // Bg the whole row first so the marker reads like one cell.
+        for x in area.x..(area.x + area.width) {
+            if let Some(cell) = term_buf.cell_mut((x, y)) {
+                cell.set_style(style);
+            }
+        }
+        let label = format!("+-- {} lines folded --", fold.line_count());
+        let mut x = area.x;
+        let row_end_x = area.x + area.width;
+        for ch in label.chars() {
+            if x >= row_end_x {
+                break;
+            }
+            let width = ch.width().unwrap_or(1) as u16;
+            if x + width > row_end_x {
+                break;
+            }
+            if let Some(cell) = term_buf.cell_mut((x, y)) {
+                cell.set_char(ch);
+                cell.set_style(style);
+            }
+            x = x.saturating_add(width);
+        }
     }
 
     fn paint_signs(&self, term_buf: &mut TermBuffer, area: Rect, screen_row: u16, doc_row: usize) {
@@ -515,6 +577,57 @@ mod tests {
         assert_eq!(term.cell((0, 0)).unwrap().fg, Color::Red);
         // Row 1 has no sign — leftmost cell stays as gutter content.
         assert_ne!(term.cell((0, 1)).unwrap().symbol(), "E");
+    }
+
+    #[test]
+    fn closed_fold_collapses_rows_and_paints_marker() {
+        let mut b = Buffer::from_str("a\nb\nc\nd\ne");
+        b.viewport_mut().width = 30;
+        b.viewport_mut().height = 5;
+        // Fold rows 1-3 closed. Visible should be: 'a', marker, 'e'.
+        b.add_fold(1, 3, true);
+        let view = BufferView {
+            buffer: &b,
+            selection: None,
+            resolver: &(no_styles as fn(u32) -> Style),
+            cursor_line_bg: Style::default(),
+            selection_bg: Style::default().bg(Color::Blue),
+            cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: None,
+            search_bg: Style::default(),
+            signs: &[],
+        };
+        let term = run_render(view, 30, 5);
+        // Row 0: "a"
+        assert_eq!(term.cell((0, 0)).unwrap().symbol(), "a");
+        // Row 1: fold marker "+--"
+        assert_eq!(term.cell((0, 1)).unwrap().symbol(), "+");
+        assert_eq!(term.cell((1, 1)).unwrap().symbol(), "-");
+        // Row 2: "e" (the 5th doc row, after the collapsed range)
+        assert_eq!(term.cell((0, 2)).unwrap().symbol(), "e");
+    }
+
+    #[test]
+    fn open_fold_renders_normally() {
+        let mut b = Buffer::from_str("a\nb\nc");
+        b.viewport_mut().width = 5;
+        b.viewport_mut().height = 3;
+        b.add_fold(0, 2, false); // open
+        let view = BufferView {
+            buffer: &b,
+            selection: None,
+            resolver: &(no_styles as fn(u32) -> Style),
+            cursor_line_bg: Style::default(),
+            selection_bg: Style::default().bg(Color::Blue),
+            cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: None,
+            search_bg: Style::default(),
+            signs: &[],
+        };
+        let term = run_render(view, 5, 3);
+        assert_eq!(term.cell((0, 0)).unwrap().symbol(), "a");
+        assert_eq!(term.cell((0, 1)).unwrap().symbol(), "b");
+        assert_eq!(term.cell((0, 2)).unwrap().symbol(), "c");
     }
 
     #[test]

@@ -288,8 +288,17 @@ impl<'a> Editor<'a> {
     /// yank pipe) keep observing the same content. Returns the
     /// inverse for the host's undo stack.
     pub(super) fn mutate_edit(&mut self, edit: sqeel_buffer::Edit) -> sqeel_buffer::Edit {
+        let pre_row = self.buffer.cursor().row;
         let inverse = self.buffer.apply_edit(edit);
         let pos = self.buffer.cursor();
+        // Drop any folds the edit's range overlapped — vim opens the
+        // surrounding fold automatically when you edit inside it. The
+        // approximation here invalidates folds covering either the
+        // pre-edit cursor row or the post-edit cursor row, which
+        // catches the common single-line / multi-line edit shapes.
+        let lo = pre_row.min(pos.row);
+        let hi = pre_row.max(pos.row);
+        self.buffer.invalidate_folds_in_range(lo, hi);
         self.vim.last_edit_pos = Some((pos.row, pos.col));
         self.push_buffer_content_to_textarea();
         self.mark_content_dirty();

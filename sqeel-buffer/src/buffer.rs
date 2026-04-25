@@ -39,6 +39,9 @@ pub struct Buffer {
     /// other buffer state so the `Buffer` API can drive `n` / `N`
     /// without the host plumbing a separate index through.
     search: SearchState,
+    /// Manual folds — closed ranges hide rows in the render path.
+    /// `pub(crate)` so the [`folds`] module can read/write directly.
+    pub(crate) folds: Vec<crate::folds::Fold>,
 }
 
 impl Default for Buffer {
@@ -60,6 +63,7 @@ impl Buffer {
             marks: BTreeMap::new(),
             dirty_gen: 0,
             search: SearchState::new(),
+            folds: Vec::new(),
         }
     }
 
@@ -82,6 +86,7 @@ impl Buffer {
             marks: BTreeMap::new(),
             dirty_gen: 0,
             search: SearchState::new(),
+            folds: Vec::new(),
         }
     }
 

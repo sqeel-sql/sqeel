@@ -14,6 +14,7 @@
 
 mod buffer;
 mod edit;
+mod folds;
 mod motion;
 mod position;
 mod render;
@@ -24,6 +25,7 @@ mod viewport;
 
 pub use buffer::Buffer;
 pub use edit::{Edit, MotionKind};
+pub use folds::Fold;
 pub use position::Position;
 pub use render::{BufferView, Gutter, Sign, StyleResolver};
 pub use selection::{RowSpan, Selection};
