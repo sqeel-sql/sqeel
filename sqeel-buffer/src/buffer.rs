@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::search::SearchState;
 use crate::{Position, Span, Viewport};
 
 /// In-memory text buffer + cursor + viewport + per-row span cache.
@@ -34,6 +35,10 @@ pub struct Buffer {
     /// Bumps on every mutation; render cache keys against this so a
     /// per-row Line gets recomputed when its source row changes.
     dirty_gen: u64,
+    /// Lazy per-row match cache for `/` search. Lives next to the
+    /// other buffer state so the `Buffer` API can drive `n` / `N`
+    /// without the host plumbing a separate index through.
+    search: SearchState,
 }
 
 impl Default for Buffer {
@@ -54,6 +59,7 @@ impl Buffer {
             spans: Vec::new(),
             marks: BTreeMap::new(),
             dirty_gen: 0,
+            search: SearchState::new(),
         }
     }
 
@@ -75,6 +81,7 @@ impl Buffer {
             spans: Vec::new(),
             marks: BTreeMap::new(),
             dirty_gen: 0,
+            search: SearchState::new(),
         }
     }
 
@@ -149,6 +156,16 @@ impl Buffer {
     /// this; outside callers go through [`Buffer::apply_edit`].
     pub(crate) fn lines_mut(&mut self) -> &mut Vec<String> {
         &mut self.lines
+    }
+
+    /// Crate-internal accessor for the search state. Search code
+    /// keeps its lazy match cache here; the public surface is
+    /// [`Buffer::set_search_pattern`] etc.
+    pub(crate) fn search_state(&self) -> &SearchState {
+        &self.search
+    }
+    pub(crate) fn search_state_mut(&mut self) -> &mut SearchState {
+        &mut self.search
     }
 
     /// Bump the render-cache generation. Crate-internal — every

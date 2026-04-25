@@ -17,6 +17,7 @@ mod edit;
 mod motion;
 mod position;
 mod render;
+mod search;
 mod selection;
 mod span;
 mod viewport;
