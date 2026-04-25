@@ -5373,6 +5373,10 @@ fn apply_marker_overlay(
 /// cost per highlight refresh.
 fn seed_active_color(lines: &[String], window_start: usize) -> Option<Color> {
     const SEED_SCAN_CAP: usize = 500;
+    // Clamp to the slice so a caller passing an absolute row that
+    // exceeds the materialised window (race against a buffer that
+    // shrank since the parse was submitted) doesn't OOB-slice.
+    let window_start = window_start.min(lines.len());
     if window_start == 0 {
         return None;
     }
