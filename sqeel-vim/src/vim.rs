@@ -2228,55 +2228,30 @@ fn run_operator_over_range(
         return;
     }
 
-    match kind {
-        MotionKind::Linewise => {
-            select_full_lines(ed, top.0, bot.0);
-            ed.vim.yank_linewise = true;
-        }
-        MotionKind::Inclusive => {
-            ed.textarea.move_cursor(CursorMove::Jump(top.0, top.1));
-            ed.textarea.start_selection();
-            ed.textarea.move_cursor(CursorMove::Jump(bot.0, bot.1));
-            ed.textarea.move_cursor(CursorMove::Forward);
-            ed.vim.yank_linewise = false;
-        }
-        MotionKind::Exclusive => {
-            ed.textarea.move_cursor(CursorMove::Jump(top.0, top.1));
-            ed.textarea.start_selection();
-            ed.textarea.move_cursor(CursorMove::Jump(bot.0, bot.1));
-            ed.vim.yank_linewise = false;
-        }
-    }
-
     match op {
         Operator::Yank => {
-            let cursor_before = top;
-            ed.textarea.copy();
-            if let Some(y) = non_empty_yank(ed) {
-                ed.last_yank = Some(y);
+            let text = read_vim_range(ed, top, bot, kind);
+            if !text.is_empty() {
+                ed.last_yank = Some(text.clone());
+                ed.textarea.set_yank_text(text);
+                ed.vim.yank_linewise = matches!(kind, MotionKind::Linewise);
             }
-            ed.textarea.cancel_selection();
-            ed.textarea
-                .move_cursor(CursorMove::Jump(cursor_before.0, cursor_before.1));
+            ed.buffer_mut()
+                .set_cursor(sqeel_buffer::Position::new(top.0, top.1));
+            ed.push_buffer_cursor_to_textarea();
         }
         Operator::Delete => {
             ed.push_undo();
-            ed.mutate(|t| t.cut());
-            if let Some(y) = non_empty_yank(ed) {
-                ed.last_yank = Some(y);
-            }
+            cut_vim_range(ed, top, bot, kind);
             ed.vim.mode = Mode::Normal;
         }
         Operator::Change => {
             ed.push_undo();
-            ed.mutate(|t| t.cut());
-            if let Some(y) = non_empty_yank(ed) {
-                ed.last_yank = Some(y);
-            }
+            cut_vim_range(ed, top, bot, kind);
             begin_insert_noundo(ed, 1, InsertReason::AfterChange);
         }
         Operator::Uppercase | Operator::Lowercase | Operator::ToggleCase => {
-            apply_case_op_to_selection(ed, op, top);
+            apply_case_op_to_selection(ed, op, top, bot, kind);
         }
         Operator::Indent | Operator::Outdent => {
             // Indent / outdent are always linewise even when triggered
@@ -2293,30 +2268,39 @@ fn run_operator_over_range(
     }
 }
 
-/// Transform the active selection in place with the given case
-/// operator. Cursor lands on `top` afterward — vim convention for
-/// `gU{motion}` / `gu{motion}` / `g~{motion}`. Preserves the textarea
-/// yank buffer (vim's case operators don't touch registers).
-fn apply_case_op_to_selection(ed: &mut Editor<'_>, op: Operator, top: (usize, usize)) {
+/// Transform the range `[top, bot]` (vim `MotionKind`) in place with
+/// the given case operator. Cursor lands on `top` afterward — vim
+/// convention for `gU{motion}` / `gu{motion}` / `g~{motion}`.
+/// Preserves the textarea yank buffer (vim's case operators don't
+/// touch registers).
+fn apply_case_op_to_selection(
+    ed: &mut Editor<'_>,
+    op: Operator,
+    top: (usize, usize),
+    bot: (usize, usize),
+    kind: MotionKind,
+) {
+    use sqeel_buffer::{Edit, Position};
     ed.push_undo();
     let saved_yank = ed.textarea.yank_text().to_string();
     let saved_yank_linewise = ed.vim.yank_linewise;
-    // Cut first — tui-textarea's `copy()` consumes the selection,
-    // leaving a subsequent `cut()` with nothing to delete. Cutting
-    // removes the range AND fills the yank buffer; we read from there
-    // for the transform then restore the previous yank so vim's case
-    // operators don't clobber registers.
-    ed.mutate(|t| t.cut());
-    let selection = ed.textarea.yank_text().to_string();
+    let selection = cut_vim_range(ed, top, bot, kind);
     let transformed = match op {
         Operator::Uppercase => selection.to_uppercase(),
         Operator::Lowercase => selection.to_lowercase(),
         Operator::ToggleCase => toggle_case_str(&selection),
         _ => unreachable!(),
     };
-    ed.mutate(|t| t.insert_str(&transformed));
+    if !transformed.is_empty() {
+        let cursor = ed.buffer().cursor();
+        ed.mutate_edit(Edit::InsertStr {
+            at: cursor,
+            text: transformed,
+        });
+    }
+    ed.buffer_mut().set_cursor(Position::new(top.0, top.1));
+    ed.push_buffer_cursor_to_textarea();
     ed.textarea.cancel_selection();
-    ed.textarea.move_cursor(CursorMove::Jump(top.0, top.1));
     ed.textarea.set_yank_text(saved_yank);
     ed.vim.yank_linewise = saved_yank_linewise;
     ed.vim.mode = Mode::Normal;
@@ -2515,8 +2499,7 @@ fn execute_line_op(ed: &mut Editor<'_>, op: Operator, count: usize) {
             // `gUU` / `guu` / `g~~` — linewise case transform over
             // [row, end_row]. Preserve cursor on `row` (first non-blank
             // lines up with vim's behaviour).
-            select_full_lines(ed, row, end_row);
-            apply_case_op_to_selection(ed, op, (row, col));
+            apply_case_op_to_selection(ed, op, (row, col), (end_row, 0), MotionKind::Linewise);
             // After case-op on a linewise range vim puts the cursor on
             // the first non-blank of the starting line.
             move_first_non_whitespace(ed);
@@ -2575,8 +2558,8 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                     begin_insert_noundo(ed, 1, InsertReason::AfterChange);
                 }
                 Operator::Uppercase | Operator::Lowercase | Operator::ToggleCase => {
-                    finalize_visual_line_selection(ed);
-                    apply_case_op_to_selection(ed, op, (top, 0));
+                    let bot = ed.buffer().cursor().row.max(ed.vim.visual_line_anchor);
+                    apply_case_op_to_selection(ed, op, (top, 0), (bot, 0), MotionKind::Linewise);
                     move_first_non_whitespace(ed);
                 }
                 Operator::Indent | Operator::Outdent => {
@@ -2626,9 +2609,9 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                 Operator::Uppercase | Operator::Lowercase | Operator::ToggleCase => {
                     // Anchor stays where the visual selection started.
                     let anchor = ed.vim.visual_anchor;
-                    let cursor = ed.textarea.cursor();
-                    let (top, _) = order(anchor, cursor);
-                    apply_case_op_to_selection(ed, op, top);
+                    let cursor = ed.cursor();
+                    let (top, bot) = order(anchor, cursor);
+                    apply_case_op_to_selection(ed, op, top, bot, MotionKind::Inclusive);
                 }
                 Operator::Indent | Operator::Outdent => {
                     ed.push_undo();
@@ -3197,6 +3180,117 @@ fn paragraph_text_object(ed: &Editor<'_>, inner: bool) -> Option<((usize, usize)
 }
 
 // ─── Individual commands ───────────────────────────────────────────────────
+
+/// Read the text in a vim-shaped range without mutating. Used by
+/// `Operator::Yank` so we can pipe the same range translation as
+/// [`cut_vim_range`] but skip the delete + inverse extraction.
+fn read_vim_range(
+    ed: &mut Editor<'_>,
+    start: (usize, usize),
+    end: (usize, usize),
+    kind: MotionKind,
+) -> String {
+    let (top, bot) = order(start, end);
+    ed.sync_buffer_content_from_textarea();
+    let lines = ed.buffer().lines();
+    match kind {
+        MotionKind::Linewise => {
+            let lo = top.0;
+            let hi = bot.0.min(lines.len().saturating_sub(1));
+            let mut text = lines[lo..=hi].join("\n");
+            text.push('\n');
+            text
+        }
+        MotionKind::Inclusive | MotionKind::Exclusive => {
+            let inclusive = matches!(kind, MotionKind::Inclusive);
+            // Walk row-by-row collecting chars in `[top, end_exclusive)`.
+            let mut out = String::new();
+            for row in top.0..=bot.0 {
+                let line = lines.get(row).map(String::as_str).unwrap_or("");
+                let lo = if row == top.0 { top.1 } else { 0 };
+                let hi_unclamped = if row == bot.0 {
+                    if inclusive { bot.1 + 1 } else { bot.1 }
+                } else {
+                    line.chars().count() + 1
+                };
+                let row_chars: Vec<char> = line.chars().collect();
+                let hi = hi_unclamped.min(row_chars.len());
+                if lo < hi {
+                    out.push_str(&row_chars[lo..hi].iter().collect::<String>());
+                }
+                if row < bot.0 {
+                    out.push('\n');
+                }
+            }
+            out
+        }
+    }
+}
+
+/// Cut a vim-shaped range through the Buffer edit funnel and return
+/// the deleted text. Translates vim's `MotionKind`
+/// (Linewise/Inclusive/Exclusive) into the buffer's
+/// `sqeel_buffer::MotionKind` (Line/Char) and applies the right end-
+/// position adjustment so inclusive motions actually include the bot
+/// cell. Pushes the cut text into both `last_yank` and the textarea
+/// yank buffer (still observed by `p`/`P` until the paste path is
+/// ported), and updates `yank_linewise` for linewise cuts.
+fn cut_vim_range(
+    ed: &mut Editor<'_>,
+    start: (usize, usize),
+    end: (usize, usize),
+    kind: MotionKind,
+) -> String {
+    use sqeel_buffer::{Edit, MotionKind as BufKind, Position};
+    let (top, bot) = order(start, end);
+    ed.sync_buffer_content_from_textarea();
+    let (buf_start, buf_end, buf_kind) = match kind {
+        MotionKind::Linewise => (
+            Position::new(top.0, 0),
+            Position::new(bot.0, 0),
+            BufKind::Line,
+        ),
+        MotionKind::Inclusive => {
+            let line_chars = ed
+                .buffer()
+                .line(bot.0)
+                .map(|l| l.chars().count())
+                .unwrap_or(0);
+            // Advance one cell past `bot` so the buffer's exclusive
+            // `cut_chars` actually drops the inclusive endpoint. Wrap
+            // to the next row when bot already sits on the last char.
+            let next = if bot.1 + 1 <= line_chars {
+                Position::new(bot.0, bot.1 + 1)
+            } else if bot.0 + 1 < ed.buffer().row_count() {
+                Position::new(bot.0 + 1, 0)
+            } else {
+                Position::new(bot.0, line_chars)
+            };
+            (Position::new(top.0, top.1), next, BufKind::Char)
+        }
+        MotionKind::Exclusive => (
+            Position::new(top.0, top.1),
+            Position::new(bot.0, bot.1),
+            BufKind::Char,
+        ),
+    };
+    let inverse = ed.mutate_edit(Edit::DeleteRange {
+        start: buf_start,
+        end: buf_end,
+        kind: buf_kind,
+    });
+    let text = match inverse {
+        Edit::InsertStr { text, .. } => text,
+        _ => String::new(),
+    };
+    if !text.is_empty() {
+        ed.last_yank = Some(text.clone());
+        ed.textarea.set_yank_text(text.clone());
+        ed.vim.yank_linewise = matches!(kind, MotionKind::Linewise);
+    }
+    ed.push_buffer_cursor_to_textarea();
+    text
+}
 
 /// `D` / `C` — delete from cursor to end of line through the edit
 /// funnel. Mirrors the deleted text into both `ed.last_yank` and the
