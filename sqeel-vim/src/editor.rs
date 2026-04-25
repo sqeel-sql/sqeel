@@ -84,6 +84,11 @@ pub struct Editor<'a> {
     /// host-side persistence. Lowercase marks stay buffer-local on
     /// `vim.marks`.
     pub(super) file_marks: std::collections::HashMap<char, (usize, usize)>,
+    /// Block ranges (`(start_row, end_row)` inclusive) the host has
+    /// extracted from a syntax tree. `:foldsyntax` reads these to
+    /// populate folds. The host (sqeel-tui) refreshes them on every
+    /// re-parse via [`Editor::set_syntax_fold_ranges`].
+    pub(super) syntax_fold_ranges: Vec<(usize, usize)>,
 }
 
 /// Vim-style options surfaced by `:set`. New fields land here as
@@ -141,7 +146,15 @@ impl<'a> Editor<'a> {
             styled_spans: Vec::new(),
             settings: Settings::default(),
             file_marks: std::collections::HashMap::new(),
+            syntax_fold_ranges: Vec::new(),
         }
+    }
+
+    /// Host hook: replace the cached syntax-derived block ranges that
+    /// `:foldsyntax` consumes. sqeel-tui calls this on every re-parse;
+    /// the cost is just a `Vec` swap.
+    pub fn set_syntax_fold_ranges(&mut self, ranges: Vec<(usize, usize)>) {
+        self.syntax_fold_ranges = ranges;
     }
 
     /// Live settings (read-only). `:set` mutates these via

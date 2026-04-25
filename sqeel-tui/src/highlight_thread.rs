@@ -27,6 +27,11 @@ pub struct HighlightResult {
     /// inline diagnostic underlines as a fallback when the LSP is
     /// absent or not producing messages.
     pub parse_errors: Vec<ParseError>,
+    /// Block ranges (multi-row tree-sitter nodes) collected from the
+    /// same parse — drives `:foldsyntax`. Rows are relative to
+    /// `start_row`; the host re-anchors them via offset before
+    /// pushing to the editor.
+    pub block_ranges: Vec<(usize, usize)>,
 }
 
 /// Runs tree-sitter highlighting on a dedicated thread.
@@ -65,6 +70,7 @@ impl HighlightThread {
 
                     let spans = highlighter.highlight_shared(&req.source, req.dialect);
                     let parse_errors = highlighter.last_errors().to_vec();
+                    let block_ranges = highlighter.block_ranges();
 
                     if result_tx
                         .send(HighlightResult {
@@ -72,6 +78,7 @@ impl HighlightThread {
                             start_row: req.start_row,
                             row_count: req.row_count,
                             parse_errors,
+                            block_ranges,
                         })
                         .is_err()
                     {

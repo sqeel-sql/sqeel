@@ -100,6 +100,7 @@ pub fn run(editor: &mut Editor<'_>, input: &str) -> ExEffect {
             return ExEffect::Ok;
         }
         "foldindent" | "foldi" => return apply_fold_indent(editor),
+        "foldsyntax" | "folds" => return apply_fold_syntax(editor),
         _ => {}
     }
 
@@ -161,6 +162,23 @@ pub fn run(editor: &mut Editor<'_>, input: &str) -> ExEffect {
     }
 
     ExEffect::Unknown(cmd.to_string())
+}
+
+/// `:foldsyntax` / `:folds` — apply the host-supplied syntax-tree
+/// block ranges as closed folds. sqeel-tui calls
+/// [`Editor::set_syntax_fold_ranges`] on every tree-sitter re-parse;
+/// running this command consumes the latest snapshot. No-op when the
+/// host hasn't pushed any ranges yet.
+fn apply_fold_syntax(editor: &mut Editor<'_>) -> ExEffect {
+    let ranges = editor.syntax_fold_ranges.clone();
+    if ranges.is_empty() {
+        return ExEffect::Info("no syntax block ranges available".into());
+    }
+    let count = ranges.len();
+    for (start, end) in ranges {
+        editor.buffer_mut().add_fold(start, end, true);
+    }
+    ExEffect::Info(format!("created {count} fold(s)"))
 }
 
 /// `:foldindent` / `:foldi` — derive folds from leading-whitespace runs
@@ -1502,6 +1520,37 @@ mod tests {
             }
             other => panic!("expected Info, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn foldsyntax_applies_host_supplied_ranges() {
+        let mut e = new("a\nb\nc\nd\ne");
+        e.set_syntax_fold_ranges(vec![(0, 2), (3, 4)]);
+        match run(&mut e, "foldsyntax") {
+            ExEffect::Info(msg) => assert!(msg.contains("2 fold")),
+            other => panic!("expected Info, got {other:?}"),
+        }
+        let folds = e.buffer().folds();
+        assert_eq!(folds.len(), 2);
+        assert!(folds.iter().any(|f| f.start_row == 0 && f.end_row == 2));
+        assert!(folds.iter().any(|f| f.start_row == 3 && f.end_row == 4));
+    }
+
+    #[test]
+    fn foldsyntax_no_ranges_reports_info() {
+        let mut e = new("a\nb");
+        match run(&mut e, "foldsyntax") {
+            ExEffect::Info(msg) => assert!(msg.contains("no syntax block")),
+            other => panic!("expected Info, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn foldsyntax_short_alias() {
+        let mut e = new("a\nb\nc");
+        e.set_syntax_fold_ranges(vec![(0, 2)]);
+        assert!(matches!(run(&mut e, "folds"), ExEffect::Info(_)));
+        assert_eq!(e.buffer().folds().len(), 1);
     }
 
     #[test]

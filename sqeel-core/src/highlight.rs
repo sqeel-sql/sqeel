@@ -317,6 +317,39 @@ impl Highlighter {
 
         spans
     }
+
+    /// Walk the most recently parsed tree and return every node that
+    /// spans more than one row, as 0-based `(start_row, end_row)`
+    /// inclusive ranges. Intended as the data source for vim's
+    /// `foldmethod=syntax` — each multi-row block becomes a candidate
+    /// fold. Returns an empty vec if no tree is cached.
+    pub fn block_ranges(&self) -> Vec<(usize, usize)> {
+        let Some(tree) = self.old_tree.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        collect_block_ranges(tree.root_node(), &mut out);
+        // Outer-first ordering matches `add_fold`'s start-row sort and
+        // dedupes identical start rows (vim collapses nested folds at
+        // the same start anyway).
+        out.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        out.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        out
+    }
+}
+
+/// Recursively collect `(start_row, end_row)` for every node that
+/// covers more than one row. Skips zero-byte and single-row nodes.
+fn collect_block_ranges(node: Node, out: &mut Vec<(usize, usize)>) {
+    let start = node.start_position().row;
+    let end = node.end_position().row;
+    if end > start {
+        out.push((start, end));
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_block_ranges(child, out);
+    }
 }
 
 /// Walk the tree collecting error and missing nodes. Dialect-native

@@ -30,10 +30,12 @@ toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
   to ≤ opener level. Nested indented runs get their own fold (the algorithm
   advances by one row, not past the outer fold's end). Blank lines inside an
   indented block don't break it.
-- **`foldmethod=syntax` (L).** Tree-sitter already runs in sqeel- tui's
-  `apply_window_spans` flow. Tap the same parser to extract block ranges (CTEs,
-  subqueries, parenthesised lists) and pipe them as folds. Needs a per-row →
-  fold cache that survives edits via the same dirty-gen scheme spans use.
+- ~~**`foldmethod=syntax` (L).**~~ Done. `Highlighter::block_ranges` walks the
+  cached tree-sitter tree and returns every multi-row node as
+  `(start_row, end_row)`. `HighlightResult` carries those ranges back through
+  the highlight thread; sqeel-tui re-anchors them into absolute buffer rows and
+  pushes via `Editor::set_syntax_fold_ranges` on every parse. `:foldsyntax`
+  (`:folds`) reads the cached snapshot and creates a closed fold for each range.
 
 ---
 

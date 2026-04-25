@@ -726,6 +726,14 @@ async fn run_loop(
                 let diagnostics = merged_diagnostics(&s.lsp_diagnostics, &result.parse_errors);
                 apply_window_spans(&mut editor, &result, row_count, cursor_row, &diagnostics);
                 s.set_highlights(result.spans.clone());
+                // Re-anchor block ranges to absolute buffer rows so
+                // `:foldsyntax` can apply them on demand.
+                let absolute: Vec<(usize, usize)> = result
+                    .block_ranges
+                    .iter()
+                    .map(|&(rs, re)| (rs + result.start_row, re + result.start_row))
+                    .collect();
+                editor.set_syntax_fold_ranges(absolute);
                 last_marker_cursor_row = cursor_row;
                 last_marker_diag_len = diagnostics.len();
                 last_highlight_result = Some(result);
@@ -6969,6 +6977,7 @@ mod tests {
             start_row: 0,
             row_count,
             parse_errors: Vec::new(),
+            block_ranges: Vec::new(),
         };
 
         let mut editor = sqeel_vim::Editor::new(sqeel_vim::KeybindingMode::Vim);
@@ -7031,6 +7040,7 @@ mod tests {
             start_row: 0,
             row_count,
             parse_errors: Vec::new(),
+            block_ranges: Vec::new(),
         };
 
         let mut editor = sqeel_vim::Editor::new(sqeel_vim::KeybindingMode::Vim);
