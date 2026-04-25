@@ -157,6 +157,23 @@ impl Buffer {
         self.dirty_gen = self.dirty_gen.wrapping_add(1);
     }
 
+    /// Replace the per-row syntax span overlay. Used by the host
+    /// once tree-sitter (or any other producer) has fresh styling
+    /// for the visible window. `spans[row]` corresponds to row
+    /// `row`; rows beyond `spans.len()` get no styling.
+    pub fn set_spans(&mut self, spans: Vec<Vec<crate::Span>>) {
+        self.spans = spans;
+        self.dirty_gen_bump();
+    }
+
+    /// Same as [`Buffer::set_spans`] but exposed for in-crate tests
+    /// without crossing the dirty-gen / lifetime boundaries the
+    /// pub method advertises.
+    #[cfg(test)]
+    pub(crate) fn set_spans_for_test(&mut self, spans: Vec<Vec<crate::Span>>) {
+        self.spans = spans;
+    }
+
     pub fn marks(&self) -> &BTreeMap<char, Position> {
         &self.marks
     }
