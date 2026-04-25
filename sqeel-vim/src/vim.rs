@@ -3697,6 +3697,26 @@ fn do_redo(ed: &mut Editor<'_>) {
 
 // ─── Dot repeat ────────────────────────────────────────────────────────────
 
+/// Replay-side helper: insert `text` at the cursor through the
+/// edit funnel, then leave insert mode (the original change ended
+/// with Esc, so the dot-repeat must end the same way — including
+/// the cursor step-back vim does on Esc-from-insert).
+fn replay_insert_and_finish(ed: &mut Editor<'_>, text: &str) {
+    use sqeel_buffer::{Edit, Position};
+    let cursor = ed.cursor();
+    ed.mutate_edit(Edit::InsertStr {
+        at: Position::new(cursor.0, cursor.1),
+        text: text.to_string(),
+    });
+    if ed.vim.insert_session.take().is_some() {
+        if ed.cursor().1 > 0 {
+            ed.buffer_mut().move_left(1);
+            ed.push_buffer_cursor_to_textarea();
+        }
+        ed.vim.mode = Mode::Normal;
+    }
+}
+
 fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
     let Some(change) = ed.vim.last_change.clone() else {
         return;
@@ -3713,16 +3733,7 @@ fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
             let total = count.max(1) * scale;
             apply_op_with_motion(ed, op, &motion, total);
             if let Some(text) = inserted {
-                ed.mutate(|t| t.insert_str(&text));
-                // Leave insert mode because the original c ended with Esc.
-                if ed.vim.insert_session.take().is_some() {
-                    let (row, col) = ed.cursor();
-                    if col > 0 {
-                        let _ = row;
-                        ed.textarea.move_cursor(CursorMove::Back);
-                    }
-                    ed.vim.mode = Mode::Normal;
-                }
+                replay_insert_and_finish(ed, &text);
             }
         }
         LastChange::OpTextObj {
@@ -3733,15 +3744,7 @@ fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
         } => {
             apply_op_with_text_object(ed, op, obj, inner);
             if let Some(text) = inserted {
-                ed.mutate(|t| t.insert_str(&text));
-                if ed.vim.insert_session.take().is_some() {
-                    let (row, col) = ed.cursor();
-                    if col > 0 {
-                        let _ = row;
-                        ed.textarea.move_cursor(CursorMove::Back);
-                    }
-                    ed.vim.mode = Mode::Normal;
-                }
+                replay_insert_and_finish(ed, &text);
             }
         }
         LastChange::LineOp {
@@ -3752,15 +3755,7 @@ fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
             let total = count.max(1) * scale;
             execute_line_op(ed, op, total);
             if let Some(text) = inserted {
-                ed.mutate(|t| t.insert_str(&text));
-                if ed.vim.insert_session.take().is_some() {
-                    let (row, col) = ed.cursor();
-                    if col > 0 {
-                        let _ = row;
-                        ed.textarea.move_cursor(CursorMove::Back);
-                    }
-                    ed.vim.mode = Mode::Normal;
-                }
+                replay_insert_and_finish(ed, &text);
             }
         }
         LastChange::CharDel { forward, count } => {
@@ -3785,10 +3780,15 @@ fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
             do_paste(ed, before, count * scale);
         }
         LastChange::DeleteToEol { inserted } => {
+            use sqeel_buffer::{Edit, Position};
             ed.push_undo();
             delete_to_eol(ed);
             if let Some(text) = inserted {
-                ed.mutate(|t| t.insert_str(&text));
+                let cursor = ed.cursor();
+                ed.mutate_edit(Edit::InsertStr {
+                    at: Position::new(cursor.0, cursor.1),
+                    text,
+                });
             }
         }
         LastChange::OpenLine { above, inserted } => {
@@ -3814,22 +3814,38 @@ fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
                 });
             }
             ed.push_buffer_cursor_to_textarea();
-            ed.mutate(|t| t.insert_str(&inserted));
+            let cursor = ed.cursor();
+            ed.mutate_edit(Edit::InsertStr {
+                at: Position::new(cursor.0, cursor.1),
+                text: inserted,
+            });
         }
         LastChange::InsertAt {
             entry,
             inserted,
             count,
         } => {
+            use sqeel_buffer::{Edit, Position};
             ed.push_undo();
             match entry {
                 InsertEntry::I => {}
                 InsertEntry::ShiftI => move_first_non_whitespace(ed),
-                InsertEntry::A => ed.textarea.move_cursor(CursorMove::Forward),
-                InsertEntry::ShiftA => ed.textarea.move_cursor(CursorMove::End),
+                InsertEntry::A => {
+                    ed.buffer_mut().move_right_to_end(1);
+                    ed.push_buffer_cursor_to_textarea();
+                }
+                InsertEntry::ShiftA => {
+                    ed.buffer_mut().move_line_end();
+                    ed.buffer_mut().move_right_to_end(1);
+                    ed.push_buffer_cursor_to_textarea();
+                }
             }
             for _ in 0..count.max(1) {
-                ed.mutate(|t| t.insert_str(&inserted));
+                let cursor = ed.cursor();
+                ed.mutate_edit(Edit::InsertStr {
+                    at: Position::new(cursor.0, cursor.1),
+                    text: inserted.clone(),
+                });
             }
         }
     }
