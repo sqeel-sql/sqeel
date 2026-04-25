@@ -395,6 +395,10 @@ pub struct VimState {
     /// [`Editor::last_search`] so their status line can render a hint
     /// and so `n` / `N` have something to repeat.
     pub(super) last_search: Option<String>,
+    /// Direction of the last committed search. `n` repeats this; `N`
+    /// inverts it. Defaults to forward so a never-searched buffer's
+    /// `n` still walks downward.
+    pub(super) last_search_forward: bool,
     /// Back half of the jumplist — `Ctrl-o` pops from here. Populated
     /// with the pre-motion cursor when a "big jump" motion fires
     /// (`gg`/`G`, `%`, `*`/`#`, `n`/`N`, `H`/`M`/`L`, committed `/` or
@@ -612,6 +616,7 @@ fn step_search_prompt(ed: &mut Editor<'_>, input: Input) -> bool {
                     }
                     record_search_history(ed, &pattern);
                     ed.vim.last_search = Some(pattern);
+                    ed.vim.last_search_forward = p.forward;
                 }
             }
             ed.vim.search_history_cursor = None;
@@ -2133,11 +2138,15 @@ fn apply_motion_cursor_ctx(ed: &mut Editor<'_>, motion: &Motion, count: usize, a
             if ed.buffer().search_pattern().is_none() {
                 return;
             }
+            // `n` repeats the last search in its committed direction;
+            // `N` inverts. So a `?` search makes `n` walk backward and
+            // `N` walk forward.
+            let forward = ed.vim.last_search_forward != *reverse;
             for _ in 0..count.max(1) {
-                if *reverse {
-                    ed.buffer_mut().search_backward(true);
-                } else {
+                if forward {
                     ed.buffer_mut().search_forward(true);
+                } else {
+                    ed.buffer_mut().search_backward(true);
                 }
             }
             ed.push_buffer_cursor_to_textarea();
@@ -2242,6 +2251,7 @@ fn word_at_cursor_search(ed: &mut Editor<'_>, forward: bool, whole_word: bool, c
     }
     // Remember the query so `n` / `N` keep working after the jump.
     ed.vim.last_search = Some(pattern);
+    ed.vim.last_search_forward = forward;
     for _ in 0..count.max(1) {
         if forward {
             ed.buffer_mut().search_forward(true);
@@ -7755,5 +7765,132 @@ mod tests {
                 head: Position::new(1, 1),
             })
         );
+    }
+
+    // ─── Audit batch: lock in known-good behaviour ───────────────────────
+
+    #[test]
+    fn n_after_question_mark_keeps_walking_backward() {
+        // After committing a `?` search, `n` should continue in the
+        // backward direction; `N` flips forward.
+        let mut e = editor_with("foo bar foo baz foo end");
+        e.jump_cursor(0, 22);
+        run_keys(&mut e, "?foo<CR>");
+        assert_eq!(e.cursor().1, 16);
+        run_keys(&mut e, "n");
+        assert_eq!(e.cursor().1, 8);
+        run_keys(&mut e, "N");
+        assert_eq!(e.cursor().1, 16);
+    }
+
+    #[test]
+    fn nested_macro_chord_records_literal_keys() {
+        // `qa@bq` should capture `@` and `b` as literal keys in `a`,
+        // not as a macro-replay invocation. Replay then re-runs them.
+        let mut e = editor_with("alpha\nbeta\ngamma");
+        // First record `b` as a noop-ish macro: just `l` (move right).
+        run_keys(&mut e, "qblq");
+        // Now record `a` as: enter insert, type X, exit, then trigger
+        // `@b` which should run the macro inline during recording too.
+        run_keys(&mut e, "qaIX<Esc>q");
+        // `@a` re-runs the captured key sequence on a different line.
+        e.jump_cursor(1, 0);
+        run_keys(&mut e, "@a");
+        assert_eq!(e.buffer().lines()[1], "Xbeta");
+    }
+
+    #[test]
+    fn shift_gt_motion_indents_one_line() {
+        // `>w` over a single-line buffer should indent that line by
+        // one shiftwidth — operator routes through the operator
+        // pipeline like `dw` / `cw`.
+        let mut e = editor_with("hello world");
+        run_keys(&mut e, ">w");
+        assert_eq!(e.buffer().lines()[0], "  hello world");
+    }
+
+    #[test]
+    fn shift_lt_motion_outdents_one_line() {
+        let mut e = editor_with("    hello world");
+        run_keys(&mut e, "<lt>w");
+        // Outdent strips up to one shiftwidth (default 2).
+        assert_eq!(e.buffer().lines()[0], "  hello world");
+    }
+
+    #[test]
+    fn shift_gt_text_object_indents_paragraph() {
+        let mut e = editor_with("alpha\nbeta\ngamma\n\nrest");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, ">ip");
+        assert_eq!(e.buffer().lines()[0], "  alpha");
+        assert_eq!(e.buffer().lines()[1], "  beta");
+        assert_eq!(e.buffer().lines()[2], "  gamma");
+        // Blank separator + the next paragraph stay untouched.
+        assert_eq!(e.buffer().lines()[4], "rest");
+    }
+
+    #[test]
+    fn ctrl_o_runs_exactly_one_normal_command() {
+        // `Ctrl-O dw` returns to insert after the single `dw`. A
+        // second `Ctrl-O` is needed for another normal command.
+        let mut e = editor_with("alpha beta gamma");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "i");
+        e.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        run_keys(&mut e, "dw");
+        // First `dw` ran in normal; we're back in insert.
+        assert_eq!(e.vim_mode(), VimMode::Insert);
+        // Typing a char now inserts.
+        run_keys(&mut e, "X");
+        assert_eq!(e.buffer().lines()[0], "Xbeta gamma");
+    }
+
+    #[test]
+    fn macro_replay_respects_mode_switching() {
+        // Recording `iX<Esc>0` should leave us in normal mode at col 0
+        // after replay — the embedded Esc in the macro must drop the
+        // replayed insert session.
+        let mut e = editor_with("hi");
+        run_keys(&mut e, "qaiX<Esc>0q");
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+        // Replay on a fresh line.
+        e.set_content("yo");
+        run_keys(&mut e, "@a");
+        assert_eq!(e.vim_mode(), VimMode::Normal);
+        assert_eq!(e.cursor().1, 0);
+        assert_eq!(e.buffer().lines()[0], "Xyo");
+    }
+
+    #[test]
+    fn yank_into_a_then_replay_a_runs_literal_text() {
+        // `"ay…` populates register `a` with text. `@a` today reads
+        // from the macro map, not the register — so replaying after a
+        // pure yank is a no-op (vim's behaviour requires the macro/
+        // register unification still listed in TODO). Lock in current
+        // behaviour so the M task that unifies them gets to flip this.
+        let mut e = editor_with("hello");
+        run_keys(&mut e, "\"ayw");
+        assert_eq!(e.registers().read('a').unwrap().text, "hello");
+        // No recorded macro under `a` — `@a` should be a no-op for now.
+        run_keys(&mut e, "@a");
+        assert_eq!(e.buffer().lines()[0], "hello");
+    }
+
+    #[test]
+    fn dot_after_macro_replays_macros_last_change() {
+        // After `@a` runs a macro whose last mutation was an insert,
+        // `.` should repeat that final change, not the whole macro.
+        let mut e = editor_with("ab\ncd\nef");
+        // Record: insert 'X' at line start, then move down. The last
+        // mutation is the insert — `.` should re-apply just that.
+        run_keys(&mut e, "qaIX<Esc>jq");
+        assert_eq!(e.buffer().lines()[0], "Xab");
+        run_keys(&mut e, "@a");
+        assert_eq!(e.buffer().lines()[1], "Xcd");
+        // `.` from the new cursor row repeats the last edit (the
+        // insert `X`), not the whole macro (which would also `j`).
+        let row_before_dot = e.cursor().0;
+        run_keys(&mut e, ".");
+        assert!(e.buffer().lines()[row_before_dot].starts_with('X'));
     }
 }

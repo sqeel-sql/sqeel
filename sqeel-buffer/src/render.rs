@@ -43,6 +43,9 @@ pub struct BufferView<'a, R: StyleResolver> {
     /// Bg painted across the cursor row (vim's `cursorline`). Pass
     /// `Style::default()` to disable.
     pub cursor_line_bg: Style,
+    /// Bg painted down the cursor column (vim's `cursorcolumn`). Pass
+    /// `Style::default()` to disable.
+    pub cursor_column_bg: Style,
     /// Bg painted under selected cells. Composed over syntax fg.
     pub selection_bg: Style,
     /// Style for the cursor cell. `REVERSED` is the conventional
@@ -129,7 +132,7 @@ impl<R: StyleResolver> Widget for BufferView<'_, R> {
                 self.paint_signs(term_buf, area, screen_row, doc_row);
             }
             if let Some(fold) = folded_at_start {
-                self.paint_fold_marker(term_buf, text_area, screen_row, fold, is_cursor_row);
+                self.paint_fold_marker(term_buf, text_area, screen_row, fold, line, is_cursor_row);
                 screen_row += 1;
                 doc_row = fold.end_row + 1;
                 continue;
@@ -149,6 +152,21 @@ impl<R: StyleResolver> Widget for BufferView<'_, R> {
             );
             screen_row += 1;
             doc_row += 1;
+        }
+        // Cursorcolumn pass: layer the bg over the cursor's visible
+        // column once every row is painted so it composes on top of
+        // syntax / cursorline backgrounds without disturbing fg.
+        if self.cursor_column_bg != Style::default()
+            && cursor.col >= top_col
+            && (cursor.col - top_col) < text_area.width as usize
+        {
+            let x = text_area.x + (cursor.col - top_col) as u16;
+            for sy in 0..screen_row {
+                let y = text_area.y + sy;
+                if let Some(cell) = term_buf.cell_mut((x, y)) {
+                    cell.set_style(cell.style().patch(self.cursor_column_bg));
+                }
+            }
         }
     }
 }
@@ -176,6 +194,7 @@ impl<R: StyleResolver> BufferView<'_, R> {
         area: Rect,
         screen_row: u16,
         fold: crate::Fold,
+        first_line: &str,
         is_cursor_row: bool,
     ) {
         let y = area.y + screen_row;
@@ -190,7 +209,23 @@ impl<R: StyleResolver> BufferView<'_, R> {
                 cell.set_style(style);
             }
         }
-        let label = format!("+-- {} lines folded --", fold.line_count());
+        // Build a label that hints at the fold's contents instead of
+        // a generic "+-- N lines folded --". Use the start row's
+        // trimmed text (truncated) plus the line count.
+        let prefix = first_line.trim();
+        let count = fold.line_count();
+        let label = if prefix.is_empty() {
+            format!("▸ {count} lines folded")
+        } else {
+            const MAX_PREFIX: usize = 60;
+            let trimmed = if prefix.chars().count() > MAX_PREFIX {
+                let head: String = prefix.chars().take(MAX_PREFIX - 1).collect();
+                format!("{head}…")
+            } else {
+                prefix.to_string()
+            };
+            format!("▸ {trimmed}  ({count} lines)")
+        };
         let mut x = area.x;
         let row_end_x = area.x + area.width;
         for ch in label.chars() {
@@ -387,6 +422,7 @@ mod tests {
             selection: None,
             resolver: &(no_styles as fn(u32) -> Style),
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
@@ -411,6 +447,7 @@ mod tests {
             selection: None,
             resolver: &(no_styles as fn(u32) -> Style),
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
@@ -436,6 +473,7 @@ mod tests {
             }),
             resolver: &(no_styles as fn(u32) -> Style),
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
@@ -469,6 +507,7 @@ mod tests {
             selection: None,
             resolver: &resolver,
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
@@ -491,6 +530,7 @@ mod tests {
             selection: None,
             resolver: &(no_styles as fn(u32) -> Style),
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: Some(Gutter {
@@ -522,6 +562,7 @@ mod tests {
             selection: None,
             resolver: &(no_styles as fn(u32) -> Style),
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
@@ -563,6 +604,7 @@ mod tests {
             selection: None,
             resolver: &(no_styles as fn(u32) -> Style),
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: Some(Gutter {
@@ -591,6 +633,7 @@ mod tests {
             selection: None,
             resolver: &(no_styles as fn(u32) -> Style),
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
@@ -600,10 +643,10 @@ mod tests {
         let term = run_render(view, 30, 5);
         // Row 0: "a"
         assert_eq!(term.cell((0, 0)).unwrap().symbol(), "a");
-        // Row 1: fold marker "+--"
-        assert_eq!(term.cell((0, 1)).unwrap().symbol(), "+");
-        assert_eq!(term.cell((1, 1)).unwrap().symbol(), "-");
-        // Row 2: "e" (the 5th doc row, after the collapsed range)
+        // Row 1: fold marker — leading `▸ ` then the start row's
+        // trimmed content + line count.
+        assert_eq!(term.cell((0, 1)).unwrap().symbol(), "▸");
+        // Row 2: "e" (the 5th doc row, after the collapsed range).
         assert_eq!(term.cell((0, 2)).unwrap().symbol(), "e");
     }
 
@@ -618,6 +661,7 @@ mod tests {
             selection: None,
             resolver: &(no_styles as fn(u32) -> Style),
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
@@ -641,6 +685,7 @@ mod tests {
             selection: None,
             resolver: &(no_styles as fn(u32) -> Style),
             cursor_line_bg: Style::default(),
+            cursor_column_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,

@@ -41,9 +41,9 @@ toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
   register so `"ap` pastes the macro and `"ay` saves an edited macro back.
   Decide on an `Input ↔ string` encoding (probably vim's `<C-x>` notation), wire
   `record_*` / `read` to translate. Drop the separate map.
-- **Nested `@b` inside `qa` recording (S).** Today the recorder stops at the
-  bare `q`, so `qa@bq` captures the literal `@`/`b` keys; replay re-runs them.
-  That's actually correct for vim — but re-verify and add a test, then move on.
+- ~~**Nested `@b` inside `qa` recording (S).**~~ Verified — `qa@bq` captures the
+  literal `@`/`b` keys; replay invokes the previously recorded macro at that
+  point. Test added.
 - ~~**`Ctrl-R {reg}` in insert mode (S).**~~ Done. `Ctrl-R` arms an
   `insert_pending_register` flag; the next char selects the register and its
   text inserts inline (single `Edit::InsertStr`, cursor lands at end of
@@ -87,9 +87,11 @@ toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
 
 We support some `OpTextObj` chords. Audit + fill gaps:
 
-- **Audit existing.** Run through `i{`, `i(`, `i[`, `i<`, `i"`, `i'`, `it`,
-  `ip`, `iw`, `iW` and the matching `a*` variants. Add a test per shape.
-  Document the supported set in `lib.rs`.
+- ~~**Audit existing.**~~ Done. Added tests for every text object's inner +
+  around `d` form (word, big-word, quote, single-quote, backtick, paren / `b`,
+  bracket, brace / `B`, angle, paragraph) plus operator-pipeline spot checks for
+  `c`/`y`/`v` against word, paren, quote, paragraph. XML tag has full op
+  coverage from the `it`/`at` task.
 - ~~**`it` / `at` (M).**~~ Done. Added `TextObject::XmlTag` with a stack-based
   `tag_text_object` that flattens the buffer, walks `<…>` tokens, pairs opens to
   closes, and returns the innermost pair containing the cursor. Skips
@@ -124,9 +126,9 @@ We support some `OpTextObj` chords. Audit + fill gaps:
   restore prior content (vim has a per-char history for that — pragmatic gap).
 - **`gq{motion}` — text reflow (L).** Vim wraps to `textwidth`. SQL doesn't
   usually want this; hold off unless someone asks.
-- **`>>` / `<<` already exist; add `>{motion}` / `<{motion}` audit (S).**
-  Confirm the operator works against arbitrary motions, not just doubled-form.
-  Add tests.
+- ~~**`>>` / `<<` already exist; add `>{motion}` / `<{motion}` audit (S).**~~
+  Verified — `>w` / `<w` indent / outdent the line, `>ip` / `<ip` span paragraph
+  rows. Tests added.
 
 ---
 
@@ -137,8 +139,9 @@ We support some `OpTextObj` chords. Audit + fill gaps:
   already joins with the previous row and deletes the word now before the cursor
   (matches vim's `backspace=indent,eol,start` default). Two regression tests
   added.
-- **`Ctrl-O` already exists.** Double-check the one-shot semantics end up in
-  normal mode for exactly one command.
+- ~~**`Ctrl-O` already exists.**~~ Verified — runs exactly one normal command,
+  then drops back to insert. Test confirms a follow-up keypress lands as insert
+  text rather than a second normal command.
 - **Bracket auto-pairing (out of scope).** Leave for an opt-in plugin layer if
   it ever exists.
 
@@ -188,8 +191,11 @@ Today: `:q`, `:q!`, `:w`, `:wq`, `:x`, `:noh`, `:s/`, `:%s/`, `:g/`, `:v/`, `:N`
   `VimState` (cap 100, consecutive-dedupe). `Ctrl-P` / `Up` walks toward older
   entries, `Ctrl-N` / `Down` toward newer; typing or backspacing resets the walk
   cursor.
-- **`?` — backward search prompt (audit).** Verify it commits with
-  `search_backward(true)` and that `n` / `N` invert as vim expects.
+- ~~**`?` — backward search prompt (audit).**~~ Done. Found a real bug: `n`/`N`
+  always walked forward/backward regardless of search direction. Added
+  `last_search_forward` flag set on every commit and on `*`/`#`;
+  `Motion::SearchNext` now flips on it so `n` repeats the prompt's direction and
+  `N` inverts.
 - ~~**`/<CR>` — repeat last search (S).**~~ Done. Empty `<CR>` reuses
   `last_search` in the prompt's direction; `enter_search` no longer wipes the
   pattern when opening the prompt.
@@ -211,22 +217,29 @@ Today: `:q`, `:q!`, `:w`, `:wq`, `:x`, `:noh`, `:s/`, `:%s/`, `:g/`, `:v/`, `:N`
 - **Concealed regions (M).** Render-time hide/replace of byte ranges (e.g. URL
   prettying). Buffer ignores it; `BufferView` takes a list of
   `(row, byte_range, replacement)`.
-- **Cursorcolumn (S).** Vertical highlight column matching cursor. Add a bg pass
-  in `paint_row`.
-- **Better fold marker (S).** Use the surrounding row's content prefix instead
-  of `+-- N lines folded --` so the marker hints at what's inside.
+- ~~**Cursorcolumn (S).**~~ Done. `BufferView` gains `cursor_column_bg`; the
+  render walker layers that bg over the cursor's visible column after row
+  painting so it composes with cursorline / syntax. sqeel-tui ties it to the
+  existing cursor-line bg for now (no separate theme slot yet).
+- ~~**Better fold marker (S).**~~ Done. `paint_fold_marker` now reads the fold's
+  start-row content and renders `▸ {trimmed prefix} ({N} lines)` so the marker
+  hints at what's inside. Empty start rows fall back to `▸ {N} lines folded`.
 
 ---
 
 ## Polish / parity (S)
 
-- **Macro / register interop tests.** Confirm `"ay…@a` does what vim does.
-  Confirm `"ap` after `"ay`. Confirm capital-register append + macro append both
-  share semantics.
-- **Replay still respects mode-switching mid-macro.** Verify recording
-  `iX<Esc>0` then replay leaves us in normal at col 0.
-- **`.` after a macro** repeats the macro's last effective change, not the macro
-  itself. Test + fix if not.
+- ~~**Macro / register interop tests.**~~ Done. Locked in current behaviour:
+  `"ay…` populates register `a` with text but `@a` is a no-op since macros and
+  registers still live in separate stores. The follow-up M task ("macro storage
+  in registers") will flip this; the test will fail then and force the
+  unification.
+- ~~**Replay still respects mode-switching mid-macro.**~~ Verified — recording
+  `iX<Esc>0` and replaying lands the cursor in normal mode at col 0 with `X`
+  inserted at the start of the line.
+- ~~**`.` after a macro**~~ Verified — after `@a` runs a macro whose last edit
+  was an insert, `.` repeats only that final change, not the whole macro key
+  sequence.
 
 ---
 

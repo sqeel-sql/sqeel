@@ -4215,6 +4215,7 @@ fn draw_editor(
         selection,
         resolver: &resolver,
         cursor_line_bg: Style::default().bg(cursor_line_bg),
+        cursor_column_bg: Style::default().bg(cursor_line_bg),
         selection_bg: Style::default().add_modifier(Modifier::REVERSED),
         cursor_style: Style::default().bg(cursor_line_bg),
         gutter: Some(gutter),
