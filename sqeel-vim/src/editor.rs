@@ -133,6 +133,18 @@ impl<'a> Editor<'a> {
             .move_cursor(CursorMove::Jump(pos.row, pos.col));
     }
 
+    /// `(row, col)` cursor read sourced from the migration buffer.
+    /// Equivalent to `self.textarea.cursor()` when the two are in
+    /// sync — which is the steady state during Phase 7f because
+    /// every step opens with `sync_buffer_content_from_textarea` and
+    /// every ported motion pushes the result back. Prefer this over
+    /// `self.textarea.cursor()` so call sites keep working unchanged
+    /// once the textarea field is ripped.
+    pub fn cursor(&self) -> (usize, usize) {
+        let pos = self.buffer.cursor();
+        (pos.row, pos.col)
+    }
+
     /// Mirror the textarea's `(start, end, Style)` syntax span tuples
     /// into the migration buffer's `Vec<Vec<Span>>`. Drops zero-width
     /// runs and clamps `end` to `usize::MAX` sentinels (used by
