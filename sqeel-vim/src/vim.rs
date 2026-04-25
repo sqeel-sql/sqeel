@@ -7226,6 +7226,61 @@ mod tests {
         assert_eq!(e.cursor().0, 10);
     }
 
+    fn editor_with_wrap_lines(lines: &[&str], viewport: u16, text_width: u16) -> Editor<'static> {
+        let mut e = Editor::new(KeybindingMode::Vim);
+        e.set_content(&lines.join("\n"));
+        e.set_viewport_height(viewport);
+        let v = e.buffer_mut().viewport_mut();
+        v.height = viewport;
+        v.width = text_width;
+        v.text_width = text_width;
+        v.wrap = sqeel_buffer::Wrap::Char;
+        e.settings_mut().wrap = sqeel_buffer::Wrap::Char;
+        e
+    }
+
+    #[test]
+    fn scrolloff_wrap_keeps_cursor_off_bottom_edge() {
+        // 10 doc rows, each wraps to 3 segments → 30 screen rows.
+        // Viewport height 12, margin = SCROLLOFF.min(11/2) = 5,
+        // max bottom = 11 - 5 = 6. Plenty of headroom past row 4.
+        let lines = ["aaaabbbbcccc"; 10];
+        let mut e = editor_with_wrap_lines(&lines, 12, 4);
+        e.jump_cursor(4, 0);
+        e.ensure_cursor_in_scrolloff();
+        let csr = e.buffer().cursor_screen_row().unwrap();
+        assert!(csr <= 6, "csr={csr}");
+    }
+
+    #[test]
+    fn scrolloff_wrap_keeps_cursor_off_top_edge() {
+        let lines = ["aaaabbbbcccc"; 10];
+        let mut e = editor_with_wrap_lines(&lines, 12, 4);
+        // Force top down then bring cursor up so the top-edge margin
+        // path runs.
+        e.jump_cursor(7, 0);
+        e.ensure_cursor_in_scrolloff();
+        e.jump_cursor(2, 0);
+        e.ensure_cursor_in_scrolloff();
+        let csr = e.buffer().cursor_screen_row().unwrap();
+        // SCROLLOFF.min((height - 1) / 2) = 5.min(5) = 5.
+        assert!(csr >= 5, "csr={csr}");
+    }
+
+    #[test]
+    fn scrolloff_wrap_clamps_top_at_buffer_end() {
+        let lines = ["aaaabbbbcccc"; 5];
+        let mut e = editor_with_wrap_lines(&lines, 12, 4);
+        e.jump_cursor(4, 11);
+        e.ensure_cursor_in_scrolloff();
+        // max_top_for_height(12) on 15 screen rows: row 4 (3 segs) +
+        // row 3 (3 segs) + row 2 (3 segs) + row 1 (3 segs) = 12 —
+        // max_top = row 1. Margin can't be honoured at EOF (matches
+        // vim's behaviour — scrolloff is a soft constraint).
+        let top = e.buffer().viewport().top_row;
+        assert_eq!(top, 1);
+    }
+
     #[test]
     fn ctrl_u_moves_cursor_half_page_up() {
         let mut e = editor_with_rows(100, 20);

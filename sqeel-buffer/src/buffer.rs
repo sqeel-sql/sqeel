@@ -187,6 +187,75 @@ impl Buffer {
         self.viewport.top_col = 0;
     }
 
+    /// Cursor's screen row offset (0-based) from `viewport.top_row`
+    /// under the current wrap mode + `text_width`. `None` when wrap
+    /// is off, the cursor row is hidden by a fold, or the cursor sits
+    /// above `top_row`. Used by host-side scrolloff math.
+    pub fn cursor_screen_row(&self) -> Option<usize> {
+        if matches!(self.viewport.wrap, crate::Wrap::None) || self.viewport.text_width == 0 {
+            return None;
+        }
+        self.cursor_screen_row_from(self.viewport.top_row)
+    }
+
+    /// Number of screen rows the doc range `start..=end` occupies
+    /// under the current wrap mode. Skips fold-hidden rows. Empty /
+    /// past-end ranges return 0. `Wrap::None` returns the visible
+    /// doc-row count (one screen row per doc row).
+    pub fn screen_rows_between(&self, start: usize, end: usize) -> usize {
+        if start > end {
+            return 0;
+        }
+        let last = self.lines.len().saturating_sub(1);
+        let end = end.min(last);
+        let v = self.viewport;
+        let mut total = 0usize;
+        for r in start..=end {
+            if self.folds.iter().any(|f| f.hides(r)) {
+                continue;
+            }
+            if matches!(v.wrap, crate::Wrap::None) || v.text_width == 0 {
+                total += 1;
+            } else {
+                let line = self.lines.get(r).map(String::as_str).unwrap_or("");
+                total += crate::wrap::wrap_segments(line, v.text_width, v.wrap).len();
+            }
+        }
+        total
+    }
+
+    /// Earliest `top_row` such that `screen_rows_between(top, last)`
+    /// is at least `height`. Lets host-side scrolloff math clamp
+    /// `top_row` so the buffer never leaves blank rows below the
+    /// content. When the buffer's total screen rows are smaller than
+    /// `height` this returns 0.
+    pub fn max_top_for_height(&self, height: usize) -> usize {
+        if height == 0 {
+            return 0;
+        }
+        let last = self.lines.len().saturating_sub(1);
+        let mut total = 0usize;
+        let mut row = last;
+        loop {
+            if !self.folds.iter().any(|f| f.hides(row)) {
+                let v = self.viewport;
+                total += if matches!(v.wrap, crate::Wrap::None) || v.text_width == 0 {
+                    1
+                } else {
+                    let line = self.lines.get(row).map(String::as_str).unwrap_or("");
+                    crate::wrap::wrap_segments(line, v.text_width, v.wrap).len()
+                };
+            }
+            if total >= height {
+                return row;
+            }
+            if row == 0 {
+                return 0;
+            }
+            row -= 1;
+        }
+    }
+
     /// Returns the cursor's screen row (0-based, relative to `top`)
     /// under the current wrap mode + text width. `None` when the
     /// cursor row is hidden by a fold or sits above `top`.
@@ -394,6 +463,66 @@ mod tests {
         b.set_cursor(Position::new(1, 0));
         b.ensure_cursor_visible();
         assert_eq!(b.viewport().top_row, 1);
+    }
+
+    #[test]
+    fn screen_rows_between_sums_segments_under_wrap() {
+        // 9-char first row + 1-char second row + empty third.
+        let mut b = Buffer::from_str("aaaaaaaaa\nb\n");
+        {
+            let v = b.viewport_mut();
+            v.wrap = crate::Wrap::Char;
+            v.text_width = 4;
+        }
+        // Row 0 wraps to 3 segments; row 1 → 1; row 2 (empty) → 1.
+        assert_eq!(b.screen_rows_between(0, 0), 3);
+        assert_eq!(b.screen_rows_between(0, 1), 4);
+        assert_eq!(b.screen_rows_between(0, 2), 5);
+        assert_eq!(b.screen_rows_between(1, 2), 2);
+    }
+
+    #[test]
+    fn screen_rows_between_one_per_doc_row_when_wrap_off() {
+        let b = Buffer::from_str("aaaaa\nb\nc");
+        assert_eq!(b.screen_rows_between(0, 2), 3);
+    }
+
+    #[test]
+    fn max_top_for_height_walks_back_until_height_reached() {
+        // 5 rows, last row wraps to 3 segments under width 4.
+        let mut b = Buffer::from_str("a\nb\nc\nd\neeeeeeee");
+        {
+            let v = b.viewport_mut();
+            v.wrap = crate::Wrap::Char;
+            v.text_width = 4;
+        }
+        // Last row alone = 2 segments; with row 3 added = 3 screen
+        // rows; with row 2 = 4. height=4 → max_top = row 2.
+        assert_eq!(b.max_top_for_height(4), 2);
+        // Larger than total rows → 0.
+        assert_eq!(b.max_top_for_height(99), 0);
+    }
+
+    #[test]
+    fn cursor_screen_row_returns_none_when_wrap_off() {
+        let b = Buffer::from_str("a");
+        assert!(b.cursor_screen_row().is_none());
+    }
+
+    #[test]
+    fn cursor_screen_row_under_wrap() {
+        let mut b = Buffer::from_str("aaaaaaaaaa\nb");
+        {
+            let v = b.viewport_mut();
+            v.wrap = crate::Wrap::Char;
+            v.text_width = 4;
+        }
+        b.set_cursor(Position::new(0, 5));
+        // Cursor on row 0 segment 1 → screen row 1.
+        assert_eq!(b.cursor_screen_row(), Some(1));
+        b.set_cursor(Position::new(1, 0));
+        // Row 0 wraps to 3 segments + row 1's first segment = 3.
+        assert_eq!(b.cursor_screen_row(), Some(3));
     }
 
     #[test]

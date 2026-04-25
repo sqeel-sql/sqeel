@@ -715,22 +715,17 @@ impl<'a> Editor<'a> {
             self.buffer.ensure_cursor_visible();
             return;
         }
-        // Under soft-wrap the doc-row scrolloff math below is wrong:
-        // a wrapped doc row spans many screen rows, so adding `margin`
-        // doc rows can still leave the cursor's screen row below the
-        // viewport. Defer to `Buffer::ensure_cursor_visible`, which is
-        // screen-line aware. Drops the scrolloff *margin* under wrap;
-        // the cursor stays visible but can sit on the very edge. Good
-        // enough for first cut — revisit if it bites.
-        if !matches!(self.buffer.viewport().wrap, sqeel_buffer::Wrap::None) {
-            self.buffer.ensure_cursor_visible();
-            return;
-        }
-        let cursor_row = self.buffer.cursor().row;
         // Cap margin at (height - 1) / 2 so the upper + lower bands
         // can't overlap on tiny windows (margin=5 + height=10 would
         // otherwise produce contradictory clamp ranges).
         let margin = Self::SCROLLOFF.min(height.saturating_sub(1) / 2);
+        // Soft-wrap path: scrolloff math runs in *screen rows*, not
+        // doc rows, since a wrapped doc row spans many visual lines.
+        if !matches!(self.buffer.viewport().wrap, sqeel_buffer::Wrap::None) {
+            self.ensure_scrolloff_wrap(height, margin);
+            return;
+        }
+        let cursor_row = self.buffer.cursor().row;
         let last_row = self.buffer.row_count().saturating_sub(1);
         let v = self.buffer.viewport_mut();
         // Top edge: cursor_row should sit at >= top_row + margin.
@@ -751,6 +746,61 @@ impl<'a> Editor<'a> {
         // horizontal scrolling — vim default `sidescrolloff = 0`).
         let cursor = self.buffer.cursor();
         self.buffer.viewport_mut().ensure_visible(cursor);
+    }
+
+    /// Soft-wrap-aware scrolloff. Walks `top_row` one visible doc row
+    /// at a time so the cursor's *screen* row stays inside
+    /// `[margin, height - 1 - margin]`, then clamps `top_row` so the
+    /// buffer's bottom never leaves blank rows below it.
+    fn ensure_scrolloff_wrap(&mut self, height: usize, margin: usize) {
+        let cursor_row = self.buffer.cursor().row;
+        // Step 1 — cursor above viewport: snap top to cursor row,
+        // then we'll fix up the margin below.
+        if cursor_row < self.buffer.viewport().top_row {
+            self.buffer.viewport_mut().top_row = cursor_row;
+            self.buffer.viewport_mut().top_col = 0;
+        }
+        // Step 2 — push top forward until cursor's screen row is
+        // within the bottom margin (`csr <= height - 1 - margin`).
+        let max_csr = height.saturating_sub(1).saturating_sub(margin);
+        loop {
+            let csr = self.buffer.cursor_screen_row().unwrap_or(0);
+            if csr <= max_csr {
+                break;
+            }
+            let top = self.buffer.viewport().top_row;
+            let Some(next) = self.buffer.next_visible_row(top) else {
+                break;
+            };
+            // Don't walk past the cursor's row.
+            if next > cursor_row {
+                self.buffer.viewport_mut().top_row = cursor_row;
+                break;
+            }
+            self.buffer.viewport_mut().top_row = next;
+        }
+        // Step 3 — pull top backward until cursor's screen row is
+        // past the top margin (`csr >= margin`).
+        loop {
+            let csr = self.buffer.cursor_screen_row().unwrap_or(0);
+            if csr >= margin {
+                break;
+            }
+            let top = self.buffer.viewport().top_row;
+            let Some(prev) = self.buffer.prev_visible_row(top) else {
+                break;
+            };
+            self.buffer.viewport_mut().top_row = prev;
+        }
+        // Step 4 — clamp top so the buffer's bottom doesn't leave
+        // blank rows below it. `max_top_for_height` walks segments
+        // backward from the last row until it accumulates `height`
+        // screen rows.
+        let max_top = self.buffer.max_top_for_height(height);
+        if self.buffer.viewport().top_row > max_top {
+            self.buffer.viewport_mut().top_row = max_top;
+        }
+        self.buffer.viewport_mut().top_col = 0;
     }
 
     fn scroll_viewport(&mut self, delta: i16) {

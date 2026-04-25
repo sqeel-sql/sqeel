@@ -252,9 +252,9 @@ Today: `:q`, `:q!`, `:w`, `:wq`, `:x`, `:noh`, `:s/`, `:%s/`, `:g/`, `:v/`, `:N`
   `viewport.height`. sqeel-tui publishes `text_width = area.width
   - gutter_width`each frame. (3)`Buffer::move_screen_down`/`move_screen_up`walk one segment at a time, falling back to`move_down`/`move_up`when wrap is off. The visual col (cursor col minus segment start) is snapshotted up front so chained`gj`/`gk`presses preserve the same display column. New`Motion::ScreenDown`/`ScreenUp`wired into the motion dispatcher, the`g`-prefix chord registry, and `handle_op_after_g`so`dgj`/`dgk`work as linewise operator motions. (4)`Settings::wrap`ships through`:set
     wrap`/`:set nowrap`/`:set linebreak`/`:set
-    nolinebreak`; sqeel-tui mirrors it onto `viewport.wrap`each frame.`Editor::ensure_cursor_in_scrolloff`short-circuits to`Buffer::ensure_cursor_visible`
-    under wrap (the doc-row scrolloff math doesn't translate to screen lines yet
-    — pragmatic gap).
+    nolinebreak`; sqeel-tui mirrors it onto `viewport.wrap`each frame. (5)`Editor::ensure_cursor_in_scrolloff`is now wrap-aware. New buffer helpers`cursor_screen_row`, `screen_rows_between`, and `max_top_for_height`expose screen-row arithmetic to the host; the editor walks`top_row`one visible doc row at a time so the cursor's screen row stays inside`[margin,
+    height - 1 - margin]`, then clamps`top_row`via`max_top_for_height` so the
+    buffer's bottom never leaves blank rows below it.
 - ~~**Concealed regions (M).**~~ Done. `BufferView` takes a `conceals` slice;
   each entry is `Conceal { row, start_byte, end_byte, replacement }`. The render
   walker checks each row's conceal list, paints the replacement when entering a
