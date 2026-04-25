@@ -111,10 +111,11 @@ We support some `OpTextObj` chords. Audit + fill gaps:
 
 ## Operators (S)
 
-- **`R` — Replace mode (M).** Continuous overstrike. Each typed char overwrites
-  the cell under the cursor instead of inserting. Needs an
-  `InsertReason::Replace` variant + a small branch in `handle_insert_key` that
-  does delete-then-insert per char.
+- ~~**`R` — Replace mode (M).**~~ Done. `InsertReason::Replace` flavour of
+  insert mode; `handle_insert_key` overstrikes the cursor cell when the session
+  is in Replace mode (delete one char then insert the typed char). At
+  end-of-line falls through to plain insert, matching vim. Backspace does not
+  restore prior content (vim has a per-char history for that — pragmatic gap).
 - **`gq{motion}` — text reflow (L).** Vim wraps to `textwidth`. SQL doesn't
   usually want this; hold off unless someone asks.
 - **`>>` / `<<` already exist; add `>{motion}` / `<{motion}` audit (S).**

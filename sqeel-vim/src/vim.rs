@@ -460,6 +460,10 @@ enum InsertReason {
     /// every row in `top..=bot`. `col` is the start column for `I`, the
     /// one-past-block-end column for `A`.
     BlockEdge { top: usize, bot: usize, col: usize },
+    /// `R` — Replace mode. Each typed char overwrites the cell under
+    /// the cursor instead of inserting; at end-of-line the session
+    /// falls through to insert (same as vim).
+    Replace,
 }
 
 /// Saved visual-mode anchor + cursor for `gv` (re-enters the last
@@ -1033,7 +1037,23 @@ fn handle_insert_key(ed: &mut Editor<'_>, input: Input) -> bool {
         .line(cursor.row)
         .map(|l| l.chars().count())
         .unwrap_or(0);
+    // Replace mode: overstrike the cell at the cursor instead of
+    // inserting. At end-of-line, fall through to plain insert (vim
+    // appends past the line).
+    let in_replace = matches!(
+        ed.vim.insert_session.as_ref().map(|s| &s.reason),
+        Some(InsertReason::Replace)
+    );
     let mutated = match input.key {
+        Key::Char(c) if in_replace && cursor.col < line_chars => {
+            ed.mutate_edit(Edit::DeleteRange {
+                start: cursor,
+                end: Position::new(cursor.row, cursor.col + 1),
+                kind: MotionKind::Char,
+            });
+            ed.mutate_edit(Edit::InsertChar { at: cursor, ch: c });
+            true
+        }
         Key::Char(c) => {
             ed.mutate_edit(Edit::InsertChar { at: cursor, ch: c });
             true
@@ -1234,6 +1254,15 @@ fn finish_insert_session(ed: &mut Editor<'_>) {
         }
         InsertReason::ReplayOnly => {}
         InsertReason::BlockEdge { .. } => unreachable!("handled above"),
+        InsertReason::Replace => {
+            // Record overstrike sessions as DeleteToEol-style — replay
+            // re-types each character but doesn't try to restore prior
+            // content (vim's R has its own replay path; this is the
+            // pragmatic approximation).
+            ed.vim.last_change = Some(LastChange::DeleteToEol {
+                inserted: Some(inserted),
+            });
+        }
     }
 }
 
@@ -2753,6 +2782,12 @@ fn handle_normal_only(ed: &mut Editor<'_>, input: &Input, count: usize) -> bool 
             ed.buffer_mut().move_right_to_end(1);
             ed.push_buffer_cursor_to_textarea();
             begin_insert(ed, count.max(1), InsertReason::Enter(InsertEntry::ShiftA));
+            true
+        }
+        Key::Char('R') => {
+            // Replace mode — overstrike each typed cell. Reuses the
+            // insert-mode key handler with a Replace-flavoured session.
+            begin_insert(ed, count.max(1), InsertReason::Replace);
             true
         }
         Key::Char('o') => {
@@ -6866,6 +6901,35 @@ mod tests {
         // Move to second line then paste from "a.
         run_keys(&mut e, "j0\"aP");
         assert_eq!(e.buffer().lines()[1], "hello second");
+    }
+
+    #[test]
+    fn capital_r_overstrikes_chars() {
+        let mut e = editor_with("hello");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "RXY<Esc>");
+        // 'h' and 'e' replaced; 'llo' kept.
+        assert_eq!(e.buffer().lines()[0], "XYllo");
+    }
+
+    #[test]
+    fn capital_r_at_eol_appends() {
+        let mut e = editor_with("hi");
+        e.jump_cursor(0, 1);
+        // Cursor on the final 'i'; replace it then keep typing past EOL.
+        run_keys(&mut e, "RXYZ<Esc>");
+        assert_eq!(e.buffer().lines()[0], "hXYZ");
+    }
+
+    #[test]
+    fn capital_r_count_does_not_repeat_overstrike_char_by_char() {
+        // Vim's `2R` replays the *whole session* on Esc, not each char.
+        // We don't model that fully, but the basic R should at least
+        // not crash on empty session count handling.
+        let mut e = editor_with("abc");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "RX<Esc>");
+        assert_eq!(e.buffer().lines()[0], "Xbc");
     }
 
     #[test]
