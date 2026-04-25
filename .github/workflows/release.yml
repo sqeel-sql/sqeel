@@ -123,5 +123,6 @@ jobs:
             sqeel-*.${{ matrix.archive }}
             sqeel-*.${{ matrix.archive }}.sha256
           fail_on_unmatched_files: true
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
