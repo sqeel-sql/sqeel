@@ -5169,6 +5169,58 @@ mod tests {
     }
 
     #[test]
+    fn cit_changes_inner_tag_content() {
+        let mut e = editor_with("<b>hello</b>");
+        e.jump_cursor(0, 4);
+        run_keys(&mut e, "citNEW<Esc>");
+        assert_eq!(e.buffer().lines()[0], "<b>NEW</b>");
+    }
+
+    #[test]
+    fn cat_changes_around_tag() {
+        let mut e = editor_with("hi <b>foo</b> bye");
+        e.jump_cursor(0, 6);
+        run_keys(&mut e, "catBAR<Esc>");
+        assert_eq!(e.buffer().lines()[0], "hi BAR bye");
+    }
+
+    #[test]
+    fn yit_yanks_inner_tag_content() {
+        let mut e = editor_with("<b>hello</b>");
+        e.jump_cursor(0, 4);
+        run_keys(&mut e, "yit");
+        assert_eq!(e.registers().read('"').unwrap().text, "hello");
+    }
+
+    #[test]
+    fn yat_yanks_full_tag_pair() {
+        let mut e = editor_with("hi <b>foo</b> bye");
+        e.jump_cursor(0, 6);
+        run_keys(&mut e, "yat");
+        assert_eq!(e.registers().read('"').unwrap().text, "<b>foo</b>");
+    }
+
+    #[test]
+    fn vit_visually_selects_inner_tag() {
+        let mut e = editor_with("<b>hello</b>");
+        e.jump_cursor(0, 4);
+        run_keys(&mut e, "vit");
+        assert_eq!(e.vim_mode(), VimMode::Visual);
+        run_keys(&mut e, "y");
+        assert_eq!(e.registers().read('"').unwrap().text, "hello");
+    }
+
+    #[test]
+    fn vat_visually_selects_around_tag() {
+        let mut e = editor_with("x<b>foo</b>y");
+        e.jump_cursor(0, 5);
+        run_keys(&mut e, "vat");
+        assert_eq!(e.vim_mode(), VimMode::Visual);
+        run_keys(&mut e, "y");
+        assert_eq!(e.registers().read('"').unwrap().text, "<b>foo</b>");
+    }
+
+    #[test]
     fn star_finds_next_occurrence() {
         let mut e = editor_with("foo bar foo baz");
         run_keys(&mut e, "*");
