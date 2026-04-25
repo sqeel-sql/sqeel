@@ -99,6 +99,58 @@ file:line targets; each item carries them so the work is mechanical.
 
 ---
 
+## Theming (L)
+
+Today's `theme.toml` uses sqeel-internal slot names (`schema_pane_bg`,
+`results_col_active_bg`, …) and a flat `fg`-only palette per slot. Vim
+colorschemes ship with a different shape: highlight groups by name (`Normal`,
+`Comment`, `Search`, `CursorLine`, …) each carrying `guifg`, `guibg`, and `gui`
+attributes (`bold`, `italic`, `underline`, `reverse`, `undercurl`, `none`).
+Re-shape sqeel's theme system so a port of an existing vim colorscheme is a 1:1
+copy of its `:hi` lines instead of a custom mapping exercise.
+
+- **Phase 1 — TOML schema redesign (M).** Replace `ui.<slot> = "<color>"` with
+  `[hl.<group>]` tables that take `fg`, `bg`, `attrs`. Standard vim group names
+  (`Normal`, `NonText`, `Cursor`, `CursorLine`, `CursorLineNr`, `LineNr`,
+  `Comment`, `Constant`, `String`, `Number`, `Boolean`, `Identifier`,
+  `Function`, `Statement`, `Keyword`, `Type`, `Special`, `Operator`, `PreProc`,
+  `Underlined`, `Error`, `Todo`, `Visual`, `Search`, `IncSearch`, `MatchParen`,
+  `Pmenu`, `PmenuSel`, `TabLine`, `TabLineFill`, `TabLineSel`, `StatusLine`,
+  `StatusLineNC`, `Folded`, `FoldColumn`, `SignColumn`,
+  `DiffAdd`/`Change`/`Delete`/`Text`, `ErrorMsg`, `WarningMsg`, `ModeMsg`,
+  `Title`, `Directory`, `DiagnosticError`/`Warn`/`Info`/`Hint`). `attrs` is a
+  comma list matching vim's `gui=` syntax. Missing groups inherit from `Normal`.
+  Plus a `[palette]` table for symbolic refs (already supported).
+- **Phase 2 — UiColors → HighlightGroups (M).** Drop the macro-generated flat
+  `UiColors` struct; replace with
+  `HighlightGroups { groups: HashMap<&'static str, Style> }` keyed by lowercase
+  vim group name. Render call sites switch from `ui().schema_pane_bg` to
+  `hl("Normal").bg`/`hl("StatusLine")` etc. Hand-write the slot ↔ group mapping
+  table once; downstream consumers go through the new accessor.
+- **Phase 3 — Bundled themes (S).** Port `tokyonight.toml` to the new schema.
+  Add at least one more bundled theme (gruvbox or catppuccin) so the system is
+  exercised by more than one source. Bundled themes ship inline via
+  `include_str!` — no extra crate dep.
+- **Phase 4 — `:colorscheme` ex command (S).** `:colorscheme name` loads
+  `~/.config/sqeel/colors/<name>.toml`, falling back to bundled names.
+  `:colorscheme` bare lists the choices via `ExEffect::Info`. Re-renders without
+  a restart.
+- **Phase 5 — Vim `.vim` colorscheme importer (L, optional).** A shell-side
+  `sqeel-theme-import path/to/scheme.vim` helper that scrapes `:hi` lines via a
+  tiny regex parser, emits the equivalent `colors/<name>.toml`. Punts on
+  `:hi link` chains (resolve transitively) and on `cterm`-only colorschemes
+  (`guifg` required). Probably a separate binary in the workspace so the main
+  `sqeel` binary doesn't pull in the extra parsing surface. Optional because
+  once Phase 1–4 ship, hand-writing one toml is small enough that auto-import is
+  nice-to-have rather than necessary.
+
+Total span: M + M + S + S + L. Phases 1–4 are the full feature; Phase 5 is the
+convenience layer. Migration risk: every render call site that reads `ui()`
+needs a touch (~120 sites in `sqeel-tui/src/lib.rs`); a shim that maps old slot
+names to new groups during the transition keeps each commit reviewable.
+
+---
+
 ## Out of scope
 
 - Bracket auto-pairing — leave for an opt-in plugin layer if one ever exists.
