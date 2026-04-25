@@ -1986,12 +1986,10 @@ fn handle_normal_only(ed: &mut Editor<'_>, input: &Input, count: usize) -> bool 
         }
         Key::Char('D') => {
             ed.push_undo();
-            ed.mutate(|t| t.delete_line_by_end());
-            let y = ed.textarea.yank_text();
-            if !y.is_empty() {
-                ed.last_yank = Some(y);
-                ed.vim.yank_linewise = false;
-            }
+            delete_to_eol(ed);
+            // Vim parks the cursor on the new last char.
+            ed.buffer_mut().move_left(1);
+            ed.push_buffer_cursor_to_textarea();
             if !ed.vim.replaying {
                 ed.vim.last_change = Some(LastChange::DeleteToEol { inserted: None });
             }
@@ -2004,20 +2002,31 @@ fn handle_normal_only(ed: &mut Editor<'_>, input: &Input, count: usize) -> bool 
         }
         Key::Char('C') => {
             ed.push_undo();
-            ed.mutate(|t| t.delete_line_by_end());
-            let y = ed.textarea.yank_text();
-            if !y.is_empty() {
-                ed.last_yank = Some(y);
-                ed.vim.yank_linewise = false;
-            }
+            delete_to_eol(ed);
             begin_insert_noundo(ed, 1, InsertReason::DeleteToEol);
             true
         }
         Key::Char('s') => {
+            use sqeel_buffer::{Edit, MotionKind, Position};
             ed.push_undo();
+            ed.sync_buffer_content_from_textarea();
             for _ in 0..count.max(1) {
-                ed.mutate(|t| t.delete_next_char());
+                let cursor = ed.buffer().cursor();
+                let line_chars = ed
+                    .buffer()
+                    .line(cursor.row)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
+                if cursor.col >= line_chars {
+                    break;
+                }
+                ed.mutate_edit(Edit::DeleteRange {
+                    start: cursor,
+                    end: Position::new(cursor.row, cursor.col + 1),
+                    kind: MotionKind::Char,
+                });
             }
+            ed.push_buffer_cursor_to_textarea();
             begin_insert_noundo(ed, 1, InsertReason::AfterChange);
             // `s` == `cl` — record as such.
             if !ed.vim.replaying {
@@ -3114,6 +3123,39 @@ fn paragraph_text_object(ed: &Editor<'_>, inner: bool) -> Option<((usize, usize)
 }
 
 // ─── Individual commands ───────────────────────────────────────────────────
+
+/// `D` / `C` — delete from cursor to end of line through the edit
+/// funnel. Mirrors the deleted text into both `ed.last_yank` and the
+/// textarea's yank buffer (still observed by `p`/`P` until the paste
+/// path is ported). Cursor lands at the deletion start so the caller
+/// can decide whether to step it left (`D`) or open insert mode (`C`).
+fn delete_to_eol(ed: &mut Editor<'_>) {
+    use sqeel_buffer::{Edit, MotionKind, Position};
+    ed.sync_buffer_content_from_textarea();
+    let cursor = ed.buffer().cursor();
+    let line_chars = ed
+        .buffer()
+        .line(cursor.row)
+        .map(|l| l.chars().count())
+        .unwrap_or(0);
+    if cursor.col >= line_chars {
+        return;
+    }
+    let inverse = ed.mutate_edit(Edit::DeleteRange {
+        start: cursor,
+        end: Position::new(cursor.row, line_chars),
+        kind: MotionKind::Char,
+    });
+    if let Edit::InsertStr { text, .. } = inverse
+        && !text.is_empty()
+    {
+        ed.last_yank = Some(text.clone());
+        ed.vim.yank_linewise = false;
+        ed.textarea.set_yank_text(text);
+    }
+    ed.buffer_mut().set_cursor(cursor);
+    ed.push_buffer_cursor_to_textarea();
+}
 
 fn do_char_delete(ed: &mut Editor<'_>, forward: bool, count: usize) {
     use sqeel_buffer::{Edit, MotionKind, Position};
