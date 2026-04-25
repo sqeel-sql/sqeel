@@ -5053,9 +5053,31 @@ fn apply_window_spans(
     // Per-row comment bodies derived from tree-sitter's Comment spans,
     // so we only treat `--` / `/*` as a comment when the parser agrees
     // (no false positives inside string literals, and block comments
-    // end at `*/` not at EOL).
-    let mut comment_ranges_by_row: Vec<Vec<CommentBody>> = vec![Vec::new(); buffer_rows];
-    let buffer_lines: Vec<String> = editor.buffer().lines().to_vec();
+    // end at `*/` not at EOL). Sparse keyed by absolute row so a 500k
+    // -line buffer doesn't pay an O(N) Vec allocation every refresh.
+    let mut comment_ranges_by_row: std::collections::HashMap<usize, Vec<CommentBody>> =
+        std::collections::HashMap::new();
+    // Materialize only the rows the window walk + the seed scan touch.
+    // Avoids cloning every line in a giant buffer per highlight refresh.
+    const SEED_SCAN_CAP: usize = 500;
+    let seed_start = window_start.saturating_sub(SEED_SCAN_CAP);
+    let buffer_lines: Vec<String> = editor
+        .buffer()
+        .lines()
+        .iter()
+        .skip(seed_start)
+        .take(window_end.saturating_sub(seed_start))
+        .cloned()
+        .collect();
+    // Lookup helper: absolute row → slice index, or `None` for rows
+    // outside the materialized window.
+    let line_at = |row: usize| -> Option<&str> {
+        if row < seed_start {
+            return None;
+        }
+        buffer_lines.get(row - seed_start).map(String::as_str)
+    };
+    let line_len_at = |row: usize| -> usize { line_at(row).map(str::len).unwrap_or(0) };
     for s in &result.spans {
         let Some(style) = token_kind_style(s.kind) else {
             continue;
@@ -5068,12 +5090,13 @@ fn apply_window_spans(
         if sr == er {
             if s.end_col > s.start_col {
                 by_row[sr].push((s.start_col, s.end_col, style));
-                if s.kind == TokenKind::Comment {
-                    comment_ranges_by_row[sr].push(comment_body_from_span(
-                        &buffer_lines[sr],
-                        s.start_col,
-                        s.end_col,
-                    ));
+                if s.kind == TokenKind::Comment
+                    && let Some(line) = line_at(sr)
+                {
+                    comment_ranges_by_row
+                        .entry(sr)
+                        .or_default()
+                        .push(comment_body_from_span(line, s.start_col, s.end_col));
                 }
             }
         } else {
@@ -5085,23 +5108,30 @@ fn apply_window_spans(
                 by_row[er].push((0, s.end_col, style));
             }
             if s.kind == TokenKind::Comment {
-                let first_end = buffer_lines[sr].len();
-                comment_ranges_by_row[sr].push(comment_body_from_span(
-                    &buffer_lines[sr],
-                    s.start_col,
-                    first_end,
-                ));
+                if let Some(line) = line_at(sr) {
+                    let first_end = line.len();
+                    comment_ranges_by_row
+                        .entry(sr)
+                        .or_default()
+                        .push(comment_body_from_span(line, s.start_col, first_end));
+                }
                 for row in (sr + 1)..er.min(buffer_rows) {
-                    comment_ranges_by_row[row].push(CommentBody {
-                        start: 0,
-                        end: buffer_lines[row].len(),
-                    });
+                    comment_ranges_by_row
+                        .entry(row)
+                        .or_default()
+                        .push(CommentBody {
+                            start: 0,
+                            end: line_len_at(row),
+                        });
                 }
                 if er < buffer_rows && s.end_col > 0 {
-                    comment_ranges_by_row[er].push(CommentBody {
-                        start: 0,
-                        end: s.end_col.min(buffer_lines[er].len()),
-                    });
+                    comment_ranges_by_row
+                        .entry(er)
+                        .or_default()
+                        .push(CommentBody {
+                            start: 0,
+                            end: s.end_col.min(line_len_at(er)),
+                        });
                 }
             }
         }
@@ -5117,16 +5147,20 @@ fn apply_window_spans(
     // block above it. A non-comment line resets the inheritance. Seed the
     // state by scanning backwards from `window_start` until we hit either
     // a marker or a non-comment line (capped so huge files don't pay).
-    let mut active_color = seed_active_color(&buffer_lines, window_start);
+    // We materialised only the seed-prefix + window slice into
+    // `buffer_lines`; remap window_start to its offset before calling.
+    let seed_window_start = window_start - seed_start;
+    let mut active_color = seed_active_color(&buffer_lines, seed_window_start);
+    let empty_comments: Vec<CommentBody> = Vec::new();
     for (row, row_spans) in by_row
         .iter_mut()
         .enumerate()
         .take(window_end)
         .skip(window_start)
     {
-        let line = &buffer_lines[row];
+        let Some(line) = line_at(row) else { continue };
         let on_cursor_line = row == cursor_row;
-        let comments = &comment_ranges_by_row[row];
+        let comments = comment_ranges_by_row.get(&row).unwrap_or(&empty_comments);
         active_color =
             apply_marker_overlay(row_spans, line, comments, active_color, on_cursor_line);
     }
@@ -5134,7 +5168,7 @@ fn apply_window_spans(
     // on top of the keyword / marker overlays; we preserve the existing
     // span's fg and just layer on an error-coloured underline.
     for d in diagnostics {
-        apply_diagnostic_underline(&mut by_row, d, &buffer_lines, buffer_rows);
+        apply_diagnostic_underline(&mut by_row, d, &line_len_at, buffer_rows);
     }
     // Sort each touched row so `line_spans` sees them in start-byte order.
     for row_spans in by_row.iter_mut().take(window_end).skip(window_start) {
@@ -5377,7 +5411,7 @@ fn find_comment_markers(line: &str) -> Vec<(usize, usize, Style)> {
 fn apply_diagnostic_underline(
     by_row: &mut [Vec<(usize, usize, Style)>],
     d: &sqeel_core::lsp::Diagnostic,
-    lines: &[String],
+    line_len: &impl Fn(usize) -> usize,
     buffer_rows: usize,
 ) {
     let u = ui();
@@ -5393,7 +5427,7 @@ fn apply_diagnostic_underline(
     }
     let stop = end_row.min(buffer_rows.saturating_sub(1));
     for (row, row_spans) in by_row.iter_mut().enumerate().take(stop + 1).skip(start_row) {
-        let line_len = lines.get(row).map(|l| l.len()).unwrap_or(0);
+        let line_len = line_len(row);
         let start_col = if row == start_row { d.col as usize } else { 0 };
         let mut end_col = if row == end_row {
             d.end_col as usize
@@ -6841,8 +6875,13 @@ mod tests {
             message: "nope".into(),
             severity: lsp_types::DiagnosticSeverity::ERROR,
         };
-        let lines = vec!["SELECT * x;".to_string()];
-        super::apply_diagnostic_underline(by_row, &diag, &lines, 1);
+        let lines = ["SELECT * x;".to_string()];
+        super::apply_diagnostic_underline(
+            by_row,
+            &diag,
+            &|row| lines.get(row).map(String::len).unwrap_or(0),
+            1,
+        );
 
         let u = super::theme::ui();
         let overlap = row
@@ -6885,8 +6924,13 @@ mod tests {
             message: "nope".into(),
             severity: lsp_types::DiagnosticSeverity::ERROR,
         };
-        let lines = vec!["some random text".to_string()];
-        super::apply_diagnostic_underline(by_row, &diag, &lines, 1);
+        let lines = ["some random text".to_string()];
+        super::apply_diagnostic_underline(
+            by_row,
+            &diag,
+            &|row| lines.get(row).map(String::len).unwrap_or(0),
+            1,
+        );
 
         let u = super::theme::ui();
         let span = row
@@ -6913,8 +6957,13 @@ mod tests {
             message: "nope".into(),
             severity: lsp_types::DiagnosticSeverity::ERROR,
         };
-        let lines = vec!["hello world".to_string()];
-        super::apply_diagnostic_underline(by_row, &diag, &lines, 1);
+        let lines = ["hello world".to_string()];
+        super::apply_diagnostic_underline(
+            by_row,
+            &diag,
+            &|row| lines.get(row).map(String::len).unwrap_or(0),
+            1,
+        );
         assert!(!row.is_empty(), "zero-width diag produced no spans");
     }
 
