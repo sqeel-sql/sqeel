@@ -6456,75 +6456,96 @@ fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) -> u16 {
 }
 
 fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect) -> (u16, u16) {
-    let width = 64.min(area.width.saturating_sub(4));
-    let height = 7;
+    // Match the connection switcher / file picker style: no border,
+    // bg-filled block, padded inner content. Header + footer rows use
+    // DIM; the focused field is REVERSED so it reads at a glance
+    // without competing with the muted hint.
+    let bg = Style::default().fg(ui().dialog_fg).bg(ui().dialog_bg);
+    let width = 64u16.min(area.width.saturating_sub(4));
+    // Top pad + header + blank + name + url + blank + hint + bottom pad
+    let height = 8u16.min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
         width,
         height,
     };
-
     f.render_widget(Clear, popup);
+    f.render_widget(Block::default().style(bg), popup);
 
-    let block = Block::default()
-        .title(if state.edit_connection_original_name.is_some() {
-            " Edit Connection (Tab switch, Enter save, Esc cancel) "
-        } else {
-            " Add Connection (Tab switch, Enter save, Esc cancel) "
-        })
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ui().confirm_border));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let name_style = if state.add_connection_field == AddConnectionField::Name {
-        Style::default()
-            .fg(ui().completion_key)
-            .add_modifier(Modifier::BOLD)
+    let inner_x = popup.x + 2;
+    let inner_w = popup.width.saturating_sub(4);
+    let header_text = if state.edit_connection_original_name.is_some() {
+        "Edit Connection  (Tab switch · Enter save · Esc cancel)"
     } else {
-        Style::default()
+        "Add Connection  (Tab switch · Enter save · Esc cancel)"
     };
-    let url_style = if state.add_connection_field == AddConnectionField::Url {
-        Style::default()
-            .fg(ui().completion_key)
-            .add_modifier(Modifier::BOLD)
+    f.render_widget(
+        Paragraph::new(header_text).style(bg.add_modifier(Modifier::DIM)),
+        Rect {
+            x: inner_x,
+            y: popup.y + 1,
+            width: inner_w,
+            height: 1,
+        },
+    );
+
+    let name_label = "Name  ";
+    let url_label = "URL   ";
+    let label_w = name_label.chars().count() as u16;
+
+    let focused = state.add_connection_field;
+    let name_style = if focused == AddConnectionField::Name {
+        bg.add_modifier(Modifier::REVERSED)
     } else {
-        Style::default()
+        bg
+    };
+    let url_style = if focused == AddConnectionField::Url {
+        bg.add_modifier(Modifier::REVERSED)
+    } else {
+        bg
     };
 
-    let name_label = "Name > ";
-    let url_label = "URL  > ";
+    let name_row = Rect {
+        x: inner_x,
+        y: popup.y + 3,
+        width: inner_w,
+        height: 1,
+    };
+    let url_row = Rect {
+        x: inner_x,
+        y: popup.y + 4,
+        width: inner_w,
+        height: 1,
+    };
     f.render_widget(
         Paragraph::new(format!("{name_label}{}", state.add_connection_name)).style(name_style),
-        rows[0],
+        name_row,
     );
     f.render_widget(
         Paragraph::new(format!("{url_label}{}", state.add_connection_url)).style(url_style),
-        rows[1],
+        url_row,
     );
+
     f.render_widget(
-        Paragraph::new("Only letters, digits, - and _ allowed in name")
-            .style(Style::default().fg(ui().editor_line_num)),
-        rows[2],
+        Paragraph::new("Name accepts letters, digits, `-`, `_`. URL example: sqlite:///path.db")
+            .style(bg.add_modifier(Modifier::DIM)),
+        Rect {
+            x: inner_x,
+            y: popup.y + 6,
+            width: inner_w,
+            height: 1,
+        },
     );
-    match state.add_connection_field {
+
+    match focused {
         AddConnectionField::Name => (
-            rows[0].x + name_label.chars().count() as u16 + state.add_connection_name_cursor as u16,
-            rows[0].y,
+            name_row.x + label_w + state.add_connection_name_cursor as u16,
+            name_row.y,
         ),
         AddConnectionField::Url => (
-            rows[1].x + url_label.chars().count() as u16 + state.add_connection_url_cursor as u16,
-            rows[1].y,
+            url_row.x + label_w + state.add_connection_url_cursor as u16,
+            url_row.y,
         ),
     }
 }
