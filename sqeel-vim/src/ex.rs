@@ -712,6 +712,8 @@ fn format_marks(editor: &Editor<'_>) -> String {
         .iter()
         .map(|(c, (r, col))| (*c, *r, *col))
         .collect();
+    // Uppercase / file marks live separately on Editor.
+    entries.extend(editor.file_marks.iter().map(|(c, (r, col))| (*c, *r, *col)));
     entries.sort_by_key(|(c, _, _)| *c);
     for (c, r, col) in entries {
         lines.push(format!(" {c}    {:>4}  {col:>3}", r + 1));

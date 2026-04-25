@@ -1647,10 +1647,15 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
 }
 
 fn handle_set_mark(ed: &mut Editor<'_>, input: Input) -> bool {
-    if let Key::Char(c) = input.key
-        && c.is_ascii_lowercase()
-    {
-        ed.vim.marks.insert(c, ed.cursor());
+    if let Key::Char(c) = input.key {
+        let pos = ed.cursor();
+        if c.is_ascii_lowercase() {
+            ed.vim.marks.insert(c, pos);
+        } else if c.is_ascii_uppercase() {
+            // Uppercase marks survive set_content so they persist
+            // across tab swaps within the same Editor.
+            ed.file_marks.insert(c, pos);
+        }
     }
     true
 }
@@ -1744,6 +1749,7 @@ fn handle_goto_mark(ed: &mut Editor<'_>, input: Input, linewise: bool) -> bool {
     //   `.`           — the last edit's position.
     let target = match c {
         'a'..='z' => ed.vim.marks.get(&c).copied(),
+        'A'..='Z' => ed.file_marks.get(&c).copied(),
         '\'' | '`' => ed.vim.jump_back.last().copied(),
         '.' => ed.vim.last_edit_pos,
         _ => None,
@@ -7408,6 +7414,60 @@ mod tests {
         run_keys(&mut e, "g,");
         // Cursor stays where the latest edit landed it.
         assert_ne!(e.cursor(), (2, 1));
+    }
+
+    #[test]
+    fn capital_mark_set_and_jump() {
+        let mut e = editor_with("alpha\nbeta\ngamma\ndelta");
+        e.jump_cursor(2, 1);
+        run_keys(&mut e, "mA");
+        // Move away.
+        e.jump_cursor(0, 0);
+        // Jump back via `'A`.
+        run_keys(&mut e, "'A");
+        // Linewise jump → row preserved, col first non-blank (here 0).
+        assert_eq!(e.cursor().0, 2);
+    }
+
+    #[test]
+    fn capital_mark_survives_set_content() {
+        let mut e = editor_with("first buffer line\nsecond");
+        e.jump_cursor(1, 3);
+        run_keys(&mut e, "mA");
+        // Swap buffer content (host loading a different tab).
+        e.set_content("totally different content\non many\nrows of text");
+        // `'A` should still jump to (1, 3) — it survived the swap.
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "'A");
+        assert_eq!(e.cursor().0, 1);
+    }
+
+    #[test]
+    fn capital_mark_shows_in_marks_listing() {
+        let mut e = editor_with("a\nb\nc");
+        e.jump_cursor(2, 0);
+        run_keys(&mut e, "mZ");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "ma");
+        let info = match crate::ex::run(&mut e, "marks") {
+            crate::ex::ExEffect::Info(s) => s,
+            other => panic!("expected Info, got {other:?}"),
+        };
+        assert!(info.contains(" a "));
+        assert!(info.contains(" Z "));
+    }
+
+    #[test]
+    fn capital_mark_shifts_with_edit() {
+        let mut e = editor_with("a\nb\nc\nd");
+        e.jump_cursor(3, 0);
+        run_keys(&mut e, "mA");
+        // Delete the first row — `A` should shift up to row 2.
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "dd");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "'A");
+        assert_eq!(e.cursor().0, 2);
     }
 
     #[test]

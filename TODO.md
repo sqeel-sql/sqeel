@@ -68,10 +68,14 @@ toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
 
 ## Marks (S–M)
 
-- **File-global marks `A-Z` (M).** Vim stores `A-Z` per buffer _file_, not the
-  editor session. Sqeel has tabs (one buffer per tab); store global marks on
-  `AppState` keyed by `(tab_id, char)` and surface via a host accessor.
-  Lowercase / special marks stay buffer-local.
+- ~~**File-global marks `A-Z` (M).**~~ Done. Editor gains a separate
+  `file_marks: HashMap<char, (usize, usize)>` map for uppercase selectors.
+  `mA`–`mZ` write to it; `'A`–`'Z` / `` `A ``–`` `Z `` jump back. The marks
+  survive `set_content`, so they persist across tab swaps within the same Editor
+  — the closest sqeel can get to vim's per-file marks without a host-side
+  persistence layer. They also migrate through `shift_marks_after_edit`, just
+  like lowercase marks. Cross-tab "open the file this mark lives in" parity is
+  deferred (would need host-visible storage).
 - ~~**`:marks` ex command (S).**~~ Done. Prints every user mark plus the special
   `'` (last jump) and `.` (last edit), one per row; lines are 1-based to match
   vim.

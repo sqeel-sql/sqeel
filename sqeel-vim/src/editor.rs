@@ -78,6 +78,12 @@ pub struct Editor<'a> {
     /// so handlers (indent, search) read the live value rather than a
     /// snapshot taken at startup.
     pub(super) settings: Settings,
+    /// Vim's uppercase / "file" marks. Survive `set_content` calls so
+    /// they persist across tab swaps within the same Editor — the
+    /// closest sqeel can get to vim's per-file marks without
+    /// host-side persistence. Lowercase marks stay buffer-local on
+    /// `vim.marks`.
+    pub(super) file_marks: std::collections::HashMap<char, (usize, usize)>,
 }
 
 /// Vim-style options surfaced by `:set`. New fields land here as
@@ -131,6 +137,7 @@ impl<'a> Editor<'a> {
             registers: crate::registers::Registers::default(),
             styled_spans: Vec::new(),
             settings: Settings::default(),
+            file_marks: std::collections::HashMap::new(),
         }
     }
 
@@ -430,6 +437,19 @@ impl<'a> Editor<'a> {
         }
         for c in to_drop {
             self.vim.marks.remove(&c);
+        }
+
+        // File marks migrate the same way — only the storage differs.
+        let mut to_drop: Vec<char> = Vec::new();
+        for (c, (row, _col)) in self.file_marks.iter_mut() {
+            if (edit_start..drop_end).contains(row) {
+                to_drop.push(*c);
+            } else if *row >= shift_threshold {
+                *row = ((*row as isize) + delta).max(0) as usize;
+            }
+        }
+        for c in to_drop {
+            self.file_marks.remove(&c);
         }
 
         let shift_jumps = |entries: &mut Vec<(usize, usize)>| {
