@@ -490,37 +490,54 @@ impl<'a> Editor<'a> {
         if delta == 0 {
             return;
         }
-        self.textarea.scroll(Scrolling::Delta {
-            rows: delta,
-            cols: 0,
-        });
-        let (cur_row, cur_col) = self.textarea.cursor();
-        let top = self.textarea.viewport_top_row();
+        // Bump the buffer's viewport top within bounds.
+        let total_rows = self.buffer.row_count() as isize;
         let height = self.viewport_height.load(Ordering::Relaxed) as usize;
+        let cur_top = self.buffer.viewport().top_row as isize;
+        let new_top = (cur_top + delta as isize)
+            .max(0)
+            .min((total_rows - 1).max(0)) as usize;
+        self.buffer.viewport_mut().top_row = new_top;
+        // Mirror to textarea so its viewport reads (still consumed by
+        // a couple of helpers) stay accurate.
+        let real_delta = new_top as isize - cur_top;
+        if real_delta != 0 {
+            self.textarea.scroll(Scrolling::Delta {
+                rows: real_delta.clamp(i16::MIN as isize, i16::MAX as isize) as i16,
+                cols: 0,
+            });
+        }
         if height == 0 {
             return;
         }
+        // Apply scrolloff: keep the cursor at least SCROLLOFF rows
+        // from the visible viewport edges.
+        let cursor = self.buffer.cursor();
         let margin = Self::SCROLLOFF.min(height / 2);
-        let min_row = top + margin;
-        let max_row = top + height.saturating_sub(1).saturating_sub(margin);
-        let new_row = cur_row.clamp(min_row, max_row.max(min_row));
-        if new_row != cur_row {
+        let min_row = new_top + margin;
+        let max_row = new_top + height.saturating_sub(1).saturating_sub(margin);
+        let target_row = cursor.row.clamp(min_row, max_row.max(min_row));
+        if target_row != cursor.row {
             let line_len = self
-                .textarea
-                .lines()
-                .get(new_row)
+                .buffer
+                .line(target_row)
                 .map(|l| l.chars().count())
                 .unwrap_or(0);
-            let line_len = line_len.saturating_sub(1);
-            let new_col = cur_col.min(line_len);
+            let target_col = cursor.col.min(line_len.saturating_sub(1));
+            self.buffer
+                .set_cursor(sqeel_buffer::Position::new(target_row, target_col));
             self.textarea
-                .move_cursor(CursorMove::Jump(new_row, new_col));
+                .move_cursor(CursorMove::Jump(target_row, target_col));
         }
     }
 
     pub fn goto_line(&mut self, line: usize) {
-        self.textarea
-            .move_cursor(CursorMove::Jump(line.saturating_sub(1), 0));
+        let row = line.saturating_sub(1);
+        let max = self.buffer.row_count().saturating_sub(1);
+        let target = row.min(max);
+        self.buffer
+            .set_cursor(sqeel_buffer::Position::new(target, 0));
+        self.textarea.move_cursor(CursorMove::Jump(target, 0));
     }
 
     /// Scroll so the cursor row lands at the given viewport position:
