@@ -5,6 +5,7 @@ edition = "2024"
 description = "Vim-mode engine + ex commands used by sqeel. Designed for eventual extraction into a standalone crate."
 
 [dependencies]
+sqeel-buffer = { path = "../sqeel-buffer" }
 ratatui = "0.29.0"
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 tui-textarea = { version = "0.7.0", features = ["search"] }

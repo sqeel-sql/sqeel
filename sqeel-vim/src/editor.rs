@@ -49,6 +49,11 @@ pub struct Editor<'a> {
     /// goto-definition). The host app drains this each step and fires
     /// the matching request against its own LSP client.
     pub(super) pending_lsp: Option<LspIntent>,
+    /// Mirror buffer for the in-flight migration off tui-textarea.
+    /// Phase 7a: content syncs on every `set_content` so the rest of
+    /// the engine can start reading from / writing to it in
+    /// follow-up commits without behaviour changing today.
+    pub(super) buffer: sqeel_buffer::Buffer,
 }
 
 /// Host-observable LSP requests triggered by editor bindings. The
@@ -75,6 +80,7 @@ impl<'a> Editor<'a> {
             cached_content: None,
             viewport_height: AtomicU16::new(0),
             pending_lsp: None,
+            buffer: sqeel_buffer::Buffer::new(),
         }
     }
 
@@ -258,6 +264,10 @@ impl<'a> Editor<'a> {
         if !carried_yank.is_empty() {
             self.textarea.set_yank_text(carried_yank);
         }
+        // Mirror the load into the migration buffer. Phase 7a only
+        // syncs on `set_content`; phases 7b-7c plumb the per-edit
+        // mutations through.
+        self.buffer = sqeel_buffer::Buffer::from_str(text);
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.mark_content_dirty();
