@@ -2232,9 +2232,12 @@ async fn run_loop(
                             state.lock().unwrap().add_connection_tab();
                         }
                         (KeyModifiers::NONE, KeyCode::Enter) => {
-                            let result = state.lock().unwrap().save_new_connection();
-                            if let Err(e) = result {
-                                state.lock().unwrap().set_error(format!("Save failed: {e}"));
+                            let mut s = state.lock().unwrap();
+                            if let Err(e) = s.save_new_connection() {
+                                // Surface validation / save failure inside the
+                                // popup itself — the results pane is for query
+                                // output, not connection-form feedback.
+                                s.add_connection_error = Some(format!("{e}"));
                             }
                         }
                         (KeyModifiers::NONE, KeyCode::Backspace) => {
@@ -6745,8 +6748,13 @@ fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect)
     // without competing with the muted hint.
     let bg = Style::default().fg(ui().dialog_fg).bg(ui().dialog_bg);
     let width = 64u16.min(area.width.saturating_sub(4));
-    // Top pad + header + blank + name + url + blank + hint + bottom pad
-    let height = 8u16.min(area.height.saturating_sub(2));
+    let has_error = state.add_connection_error.is_some();
+    // Layout: pad + header + blank + name + url + blank + [error +
+    // blank when present] + hint + pad. Error rows grow the popup
+    // by 2 (the row itself + a leading blank) so the hint stays put
+    // when the error is absent.
+    let extra = if has_error { 2 } else { 0 };
+    let height = (8u16 + extra).min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -6810,12 +6818,39 @@ fn draw_add_connection(f: &mut ratatui::Frame<'_>, state: &AppState, area: Rect)
         url_row,
     );
 
+    if let Some(err) = state.add_connection_error.as_deref() {
+        let err_style = Style::default()
+            .fg(ui().dialog_error_fg)
+            .bg(ui().dialog_error_bg);
+        // Truncate the message to one row — the popup already has
+        // a fixed height. Long sqlx errors stay readable in the
+        // status bar / popup details flow elsewhere.
+        let max = inner_w as usize;
+        let mut shown = err.replace('\n', " ");
+        if shown.chars().count() > max {
+            shown = shown
+                .chars()
+                .take(max.saturating_sub(1))
+                .collect::<String>()
+                + "…";
+        }
+        f.render_widget(
+            Paragraph::new(shown).style(err_style),
+            Rect {
+                x: inner_x,
+                y: popup.y + 6,
+                width: inner_w,
+                height: 1,
+            },
+        );
+    }
+    let hint_y = popup.y + 6 + extra;
     f.render_widget(
         Paragraph::new("Name accepts letters, digits, `-`, `_`. URL example: sqlite:///path.db")
             .style(bg.add_modifier(Modifier::DIM)),
         Rect {
             x: inner_x,
-            y: popup.y + 6,
+            y: hint_y,
             width: inner_w,
             height: 1,
         },

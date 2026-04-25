@@ -496,6 +496,11 @@ pub struct AppState {
     /// Caret position (char index) within the active add-connection field.
     pub add_connection_name_cursor: usize,
     pub add_connection_url_cursor: usize,
+    /// Validation / save error to render inside the add/edit
+    /// connection popup. Cleared when the popup is opened, when the
+    /// user edits any field (so the message doesn't outlive the
+    /// state that produced it), and on a successful save.
+    pub add_connection_error: Option<String>,
     /// Original name when editing an existing connection (None when adding new).
     pub edit_connection_original_name: Option<String>,
     // Help overlay
@@ -2807,6 +2812,7 @@ impl AppState {
         self.add_connection_name_cursor = 0;
         self.add_connection_url_cursor = 0;
         self.add_connection_field = AddConnectionField::Name;
+        self.add_connection_error = None;
         self.edit_connection_original_name = None;
         self.disarm_connection_delete();
     }
@@ -2825,12 +2831,14 @@ impl AppState {
         self.add_connection_name_cursor = self.add_connection_name.chars().count();
         self.add_connection_url_cursor = self.add_connection_url.chars().count();
         self.add_connection_field = AddConnectionField::Name;
+        self.add_connection_error = None;
         self.edit_connection_original_name = Some(conn.name);
         self.disarm_connection_delete();
     }
 
     pub fn close_add_connection(&mut self) {
         self.show_add_connection = false;
+        self.add_connection_error = None;
         self.edit_connection_original_name = None;
     }
 
@@ -2872,6 +2880,7 @@ impl AppState {
     }
 
     pub fn add_connection_type_char(&mut self, ch: char) {
+        self.add_connection_error = None;
         let (text, cur) = self.add_connection_active();
         let byte = text
             .char_indices()
@@ -2883,6 +2892,7 @@ impl AppState {
     }
 
     pub fn add_connection_backspace(&mut self) {
+        self.add_connection_error = None;
         let (text, cur) = self.add_connection_active();
         if *cur == 0 {
             return;
@@ -2902,6 +2912,7 @@ impl AppState {
     }
 
     pub fn add_connection_delete(&mut self) {
+        self.add_connection_error = None;
         let (text, cur) = self.add_connection_active();
         let count = text.chars().count();
         if *cur >= count {
