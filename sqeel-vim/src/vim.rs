@@ -1635,11 +1635,11 @@ fn handle_set_mark(ed: &mut Editor<'_>, input: Input) -> bool {
 }
 
 /// `"reg` — store the register selector for the next y / d / c / p.
-/// Accepts `a`–`z`, `A`–`Z`, `0`–`9`, and `"`. Anything else cancels
-/// silently (matches vim — the `"` chord is dropped).
+/// Accepts `a`–`z`, `A`–`Z`, `0`–`9`, `"`, and the system-clipboard
+/// selectors `+` / `*`. Anything else cancels silently.
 fn handle_select_register(ed: &mut Editor<'_>, input: Input) -> bool {
     if let Key::Char(c) = input.key
-        && (c.is_ascii_alphanumeric() || c == '"')
+        && (c.is_ascii_alphanumeric() || matches!(c, '"' | '+' | '*'))
     {
         ed.vim.pending_register = Some(c);
     }

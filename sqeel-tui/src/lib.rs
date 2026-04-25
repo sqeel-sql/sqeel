@@ -3027,6 +3027,15 @@ async fn run_loop(
                         {
                             editor.seed_yank(text);
                         }
+                        // `"+` / `"*` paste path — pull the OS clipboard
+                        // into the `+` / `*` register slot so vim's
+                        // paste handler reads the live contents instead
+                        // of a stale snapshot.
+                        if editor.pending_register_is_clipboard()
+                            && let Some(text) = clipboard.get_text()
+                        {
+                            editor.sync_clipboard_register(text, false);
+                        }
                         editor.handle_key(key);
                         // Drain any LSP intent raised by the vim
                         // engine (e.g. `gd` → GotoDefinition) and

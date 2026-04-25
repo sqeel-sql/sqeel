@@ -32,6 +32,12 @@ pub struct Registers {
     pub delete_ring: [Slot; 9],
     /// `"a`–`"z` — named user registers.
     pub named: [Slot; 26],
+    /// `"+` / `"*` — system clipboard register. Both selectors alias
+    /// the same slot (matches the typical Linux/macOS/Windows setup
+    /// where there's no separate primary selection in our pipeline).
+    /// The host (sqeel-tui) syncs this slot from the OS clipboard
+    /// before paste and from the slot back out on yank.
+    pub clip: Slot,
 }
 
 impl Registers {
@@ -74,8 +80,15 @@ impl Registers {
             '1'..='9' => Some(&self.delete_ring[(reg as u8 - b'1') as usize]),
             'a'..='z' => Some(&self.named[(reg as u8 - b'a') as usize]),
             'A'..='Z' => Some(&self.named[(reg.to_ascii_lowercase() as u8 - b'a') as usize]),
+            '+' | '*' => Some(&self.clip),
             _ => None,
         }
+    }
+
+    /// Replace the clipboard slot's contents — host hook for syncing
+    /// from the OS clipboard before a paste from `"+` / `"*`.
+    pub fn set_clipboard(&mut self, text: String, linewise: bool) {
+        self.clip = Slot::new(text, linewise);
     }
 
     fn write_named(&mut self, c: char, slot: Slot) {
@@ -86,6 +99,8 @@ impl Registers {
             let cur = &mut self.named[idx];
             cur.text.push_str(&slot.text);
             cur.linewise = slot.linewise || cur.linewise;
+        } else if c == '+' || c == '*' {
+            self.clip = slot;
         }
     }
 }
@@ -140,6 +155,23 @@ mod tests {
     fn unknown_selector_returns_none() {
         let r = Registers::default();
         assert!(r.read('?').is_none());
-        assert!(r.read('+').is_none());
+        assert!(r.read('!').is_none());
+    }
+
+    #[test]
+    fn plus_and_star_alias_clipboard_slot() {
+        let mut r = Registers::default();
+        r.set_clipboard("payload".into(), false);
+        assert_eq!(r.read('+').unwrap().text, "payload");
+        assert_eq!(r.read('*').unwrap().text, "payload");
+    }
+
+    #[test]
+    fn yank_to_plus_writes_clipboard_slot() {
+        let mut r = Registers::default();
+        r.record_yank("hi".into(), false, Some('+'));
+        assert_eq!(r.read('+').unwrap().text, "hi");
+        // Unnamed always mirrors the latest write.
+        assert_eq!(r.read('"').unwrap().text, "hi");
     }
 }

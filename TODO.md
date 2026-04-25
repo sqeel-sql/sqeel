@@ -51,9 +51,13 @@ toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
 - ~~**`:reg` / `:registers` ex command (S).**~~ Done. Returns
   `ExEffect::Info(table)` with every non-empty slot; toast renderer now expands
   vertically for multi-line `Info` payloads.
-- **System clipboard registers `"+` / `"*` (M).** Map the two selectors to the
-  host's clipboard via the existing `last_yank` pipe (sqeel-tui drains it
-  through `arboard`). Needs a paste hook too.
+- ~~**System clipboard registers `"+` / `"*` (M).**~~ Done. `Registers` gains a
+  shared `clip` slot aliased between `+` and `*`. The selector parser accepts
+  both; `record_yank`/`record_delete` write to the slot, and the existing
+  `last_yank` pipe lets sqeel-tui push the same text to the OS clipboard.
+  Inbound paste path: sqeel-tui peeks `editor.pending_register_is_clipboard()`
+  and calls `sync_clipboard_register` before handling the key, so `"+p` / `"*p`
+  read the live OS clipboard.
 
 ---
 

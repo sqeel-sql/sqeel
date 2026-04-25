@@ -180,6 +180,21 @@ impl<'a> Editor<'a> {
         &self.registers
     }
 
+    /// Host hook: load the OS clipboard's contents into the `"+` / `"*`
+    /// register slot. sqeel-tui calls this before letting vim consume a
+    /// paste so `"*p` / `"+p` reflect the live clipboard rather than a
+    /// stale snapshot from the last yank.
+    pub fn sync_clipboard_register(&mut self, text: String, linewise: bool) {
+        self.registers.set_clipboard(text, linewise);
+    }
+
+    /// True when the user's pending register selector is `+` or `*`.
+    /// sqeel-tui peeks this so it can refresh `sync_clipboard_register`
+    /// only when a clipboard read is actually about to happen.
+    pub fn pending_register_is_clipboard(&self) -> bool {
+        matches!(self.vim.pending_register, Some('+') | Some('*'))
+    }
+
     /// Replace the unnamed register without touching any other slot.
     /// For host-driven imports (e.g. system clipboard); operator
     /// code uses [`record_yank`] / [`record_delete`].
