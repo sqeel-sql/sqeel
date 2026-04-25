@@ -3259,7 +3259,7 @@ fn cut_vim_range(
             // Advance one cell past `bot` so the buffer's exclusive
             // `cut_chars` actually drops the inclusive endpoint. Wrap
             // to the next row when bot already sits on the last char.
-            let next = if bot.1 + 1 <= line_chars {
+            let next = if bot.1 < line_chars {
                 Position::new(bot.0, bot.1 + 1)
             } else if bot.0 + 1 < ed.buffer().row_count() {
                 Position::new(bot.0 + 1, 0)
