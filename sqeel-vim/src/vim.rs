@@ -3116,14 +3116,40 @@ fn paragraph_text_object(ed: &Editor<'_>, inner: bool) -> Option<((usize, usize)
 // ─── Individual commands ───────────────────────────────────────────────────
 
 fn do_char_delete(ed: &mut Editor<'_>, forward: bool, count: usize) {
+    use sqeel_buffer::{Edit, MotionKind, Position};
     ed.push_undo();
+    ed.sync_buffer_content_from_textarea();
     for _ in 0..count {
+        let cursor = ed.buffer().cursor();
+        let line_chars = ed
+            .buffer()
+            .line(cursor.row)
+            .map(|l| l.chars().count())
+            .unwrap_or(0);
         if forward {
-            ed.mutate(|t| t.delete_next_char());
+            // `x` — delete the char under the cursor. Vim no-ops on
+            // an empty line; the buffer would drop a row otherwise.
+            if cursor.col >= line_chars {
+                continue;
+            }
+            ed.mutate_edit(Edit::DeleteRange {
+                start: cursor,
+                end: Position::new(cursor.row, cursor.col + 1),
+                kind: MotionKind::Char,
+            });
         } else {
-            ed.mutate(|t| t.delete_char());
+            // `X` — delete the char before the cursor.
+            if cursor.col == 0 {
+                continue;
+            }
+            ed.mutate_edit(Edit::DeleteRange {
+                start: Position::new(cursor.row, cursor.col - 1),
+                end: cursor,
+                kind: MotionKind::Char,
+            });
         }
     }
+    ed.push_buffer_cursor_to_textarea();
 }
 
 /// Vim `Ctrl-a` / `Ctrl-x` — find the next decimal number at or after the
