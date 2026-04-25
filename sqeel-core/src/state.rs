@@ -2846,6 +2846,9 @@ impl AppState {
         if name.is_empty() || url.is_empty() {
             anyhow::bail!("Name and URL are required");
         }
+        if let Err(reason) = validate_connection_url(&url) {
+            anyhow::bail!("Bad URL: {reason}");
+        }
         if let Some(ref original) = self.edit_connection_original_name.clone() {
             // Editing: rename file if name changed, then overwrite
             if *original != name {
@@ -3360,6 +3363,34 @@ impl AppState {
         self.history_cursor = Some(idx);
         self.query_history.get(idx).map(|s| s.as_str())
     }
+}
+
+/// Shape-check the user's connection URL before persisting. Catches
+/// typos like `mysql:/host` or empty bodies (`mysql://`) at form-save
+/// time so the failure surfaces inline instead of seconds later when
+/// the async sqlx handshake errors. Stays intentionally shallow —
+/// authoritative validation is sqlx's own connect call.
+fn validate_connection_url(url: &str) -> Result<(), String> {
+    const SCHEMES: &[&str] = &["mysql", "mariadb", "postgres", "postgresql", "sqlite"];
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return Err("missing scheme (try `mysql://user@host/db`)".into());
+    };
+    if !SCHEMES.contains(&scheme) {
+        return Err(format!(
+            "unsupported scheme `{scheme}` — supported: {}",
+            SCHEMES.join(", ")
+        ));
+    }
+    // Network drivers want `scheme://...`; sqlite also accepts the
+    // `sqlite::memory:` form so it skips the `//` requirement.
+    if scheme != "sqlite" && !rest.starts_with("//") {
+        return Err(format!("expected `{scheme}://...`"));
+    }
+    let body = rest.trim_start_matches("//");
+    if body.is_empty() || body == "/" {
+        return Err("URL has no host or path".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4500,5 +4531,39 @@ trailing prose ignored";
         // doesn't get clobbered with whatever `editor_content` held
         // before the TUI sync happened (startup race).
         assert_eq!(s.tabs[0].content.as_deref(), Some("cached content"));
+    }
+
+    #[test]
+    fn validate_connection_url_accepts_supported_schemes() {
+        assert!(validate_connection_url("mysql://user:pass@localhost/db").is_ok());
+        assert!(validate_connection_url("mariadb://localhost/db").is_ok());
+        assert!(validate_connection_url("postgres://localhost/db").is_ok());
+        assert!(validate_connection_url("postgresql://localhost/db").is_ok());
+        assert!(validate_connection_url("sqlite:///path/to/file.db").is_ok());
+        assert!(validate_connection_url("sqlite::memory:").is_ok());
+    }
+
+    #[test]
+    fn validate_connection_url_rejects_missing_scheme() {
+        let err = validate_connection_url("localhost/db").unwrap_err();
+        assert!(err.contains("scheme"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_connection_url_rejects_unknown_scheme() {
+        let err = validate_connection_url("oracle://h/db").unwrap_err();
+        assert!(err.contains("oracle"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_connection_url_rejects_missing_authority() {
+        let err = validate_connection_url("mysql://").unwrap_err();
+        assert!(err.contains("host"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_connection_url_rejects_single_colon_form_for_network_schemes() {
+        let err = validate_connection_url("mysql:localhost/db").unwrap_err();
+        assert!(err.contains("mysql://"), "got: {err}");
     }
 }

@@ -29,13 +29,12 @@ file:line targets; each item carries them so the work is mechanical.
   and if `password` is non-empty show a toast: "Password stored in plaintext at
   `~/.config/sqeel/conns/{name}.toml`. Set file mode 0600 or use
   `mysql://user@host` to be prompted." Don't block the save — just inform.
-- **URL sanity check at save time (S).** `apply_connection_form` only checks
-  that name + url are non-empty (`sqeel-core/src/state.rs:2843-2847`); a
-  malformed URL slips through and fails seconds later on connect. Run a
-  `url::Url::parse` on the input pre-save and reject with
-  `ExEffect::Error("bad URL: {parse_err}")` if it fails or its scheme isn't one
-  of `mysql`, `mariadb`, `postgres`, `postgresql`, `sqlite`. Keeps the form open
-  with the typed values intact for fix-up.
+- ~~**URL sanity check at save time (S).**~~ Done. New `validate_connection_url`
+  runs in `save_new_connection` before the toml write: rejects unknown schemes
+  (allowed: `mysql`, `mariadb`, `postgres`, `postgresql`, `sqlite`),
+  `mysql:host` (single-colon), and bodyless URLs like `mysql://`.
+  `sqlite::memory:` is the one form that's allowed without `://`. Form keeps the
+  typed values on rejection so the user can fix in place.
 - **Retry on connection failure (S).** When the async handshake errors
   (`sqeel/src/bin/sqeel.rs:358-367`), the only recovery is re-opening the
   switcher and pressing Enter again. Add a `r` keybinding (or `Ctrl-r`) on the
