@@ -1374,21 +1374,24 @@ fn apply_motion_cursor_ctx(ed: &mut Editor<'_>, motion: &Motion, count: usize, a
             ed.push_buffer_cursor_to_textarea();
         }
         Motion::FileTop => {
-            // `count G` / `count gg` jumps to line `count`.
+            // `count gg` jumps to line `count` (first non-blank);
+            // bare `gg` lands at the top.
             if count > 1 {
-                ed.textarea
-                    .move_cursor(CursorMove::Jump(count.saturating_sub(1), 0));
+                ed.buffer_mut().move_bottom(count);
             } else {
-                ed.textarea.move_cursor(CursorMove::Top);
+                ed.buffer_mut().move_top();
             }
+            ed.push_buffer_cursor_to_textarea();
         }
         Motion::FileBottom => {
+            // `count G` jumps to line `count`; bare `G` lands at
+            // the buffer bottom (`Buffer::move_bottom(0)`).
             if count > 1 {
-                ed.textarea
-                    .move_cursor(CursorMove::Jump(count.saturating_sub(1), 0));
+                ed.buffer_mut().move_bottom(count);
             } else {
-                ed.textarea.move_cursor(CursorMove::Bottom);
+                ed.buffer_mut().move_bottom(0);
             }
+            ed.push_buffer_cursor_to_textarea();
         }
         Motion::Find { ch, forward, till } => {
             for _ in 0..count {
