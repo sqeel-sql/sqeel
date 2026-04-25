@@ -5,11 +5,9 @@ edition = "2024"
 
 [dependencies]
 sqeel-core = { path = "../sqeel-core" }
-hjkl-engine = { path = "../../hjkl/crates/hjkl-engine" }
-hjkl-editor = { path = "../../hjkl/crates/hjkl-editor" }
-hjkl-buffer = { path = "../../hjkl/crates/hjkl-buffer", features = [
-  "ratatui",
-] }
+hjkl-engine = "=0.0.15"
+hjkl-editor = "=0.0.15"
+hjkl-buffer = { version = "=0.0.15", features = ["ratatui"] }
 anyhow = "1"
 ratatui = "0.29.0"
 crossterm = { version = "0.28.1", features = ["event-stream"] }
