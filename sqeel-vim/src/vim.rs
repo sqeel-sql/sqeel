@@ -2369,49 +2369,8 @@ fn toggle_case_str(s: &str) -> String {
         .collect()
 }
 
-fn non_empty_yank(ed: &Editor<'_>) -> Option<String> {
-    let y = ed.textarea.yank_text();
-    if y.is_empty() {
-        return None;
-    }
-    // Line-wise yanks — even on the final line of the buffer — must end
-    // with `\n` so pasting into another app lands the text as a full line
-    // (matches vim's convention).
-    if ed.vim.yank_linewise {
-        let trimmed = y.trim_start_matches('\n');
-        if trimmed.ends_with('\n') {
-            Some(trimmed.to_string())
-        } else {
-            Some(format!("{trimmed}\n"))
-        }
-    } else {
-        Some(y)
-    }
-}
-
 fn order(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize)) {
     if a <= b { (a, b) } else { (b, a) }
-}
-
-/// Select the contents of rows `[top_row..=bot_row]` but stop at the end of
-/// `bot_row` without crossing its trailing newline. Used by `cc` / `Vc` so
-/// the cut removes line *contents* and leaves a blank line in place.
-fn select_line_contents_only(ed: &mut Editor<'_>, top_row: usize, bot_row: usize) {
-    ed.textarea.cancel_selection();
-    ed.textarea.move_cursor(CursorMove::Jump(top_row, 0));
-    ed.textarea.start_selection();
-    ed.textarea.move_cursor(CursorMove::Jump(bot_row, 0));
-    ed.textarea.move_cursor(CursorMove::End);
-}
-
-/// VisualLine finalize variant for the Change operator — preserves the
-/// trailing newline so an empty line remains after the cut.
-fn finalize_visual_line_selection_for_change(ed: &mut Editor<'_>) {
-    let (cursor_row, _) = ed.textarea.cursor();
-    let anchor_row = ed.vim.visual_line_anchor;
-    let top = cursor_row.min(anchor_row);
-    let bot = cursor_row.max(anchor_row);
-    select_line_contents_only(ed, top, bot);
 }
 
 // ─── dd/cc/yy ──────────────────────────────────────────────────────────────
@@ -2518,39 +2477,62 @@ fn execute_line_op(ed: &mut Editor<'_>, op: Operator, count: usize) {
 fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
     match ed.vim.mode {
         Mode::VisualLine => {
-            let (cursor_row, _) = ed.textarea.cursor();
+            let cursor_row = ed.buffer().cursor().row;
             let top = cursor_row.min(ed.vim.visual_line_anchor);
+            let bot = cursor_row.max(ed.vim.visual_line_anchor);
             ed.vim.yank_linewise = true;
             match op {
                 Operator::Yank => {
-                    finalize_visual_line_selection(ed);
-                    ed.textarea.copy();
-                    if let Some(y) = non_empty_yank(ed) {
-                        ed.last_yank = Some(y);
+                    let text = read_vim_range(ed, (top, 0), (bot, 0), MotionKind::Linewise);
+                    if !text.is_empty() {
+                        ed.last_yank = Some(text.clone());
+                        ed.textarea.set_yank_text(text);
+                        ed.vim.yank_linewise = true;
                     }
+                    ed.buffer_mut()
+                        .set_cursor(sqeel_buffer::Position::new(top, 0));
+                    ed.push_buffer_cursor_to_textarea();
                     ed.textarea.cancel_selection();
-                    ed.textarea.move_cursor(CursorMove::Jump(top, 0));
                     ed.vim.mode = Mode::Normal;
                 }
                 Operator::Delete => {
                     ed.push_undo();
-                    finalize_visual_line_selection(ed);
-                    ed.mutate(|t| t.cut());
-                    if let Some(y) = non_empty_yank(ed) {
-                        ed.last_yank = Some(y);
-                    }
+                    cut_vim_range(ed, (top, 0), (bot, 0), MotionKind::Linewise);
                     ed.vim.mode = Mode::Normal;
                 }
                 Operator::Change => {
                     // Vim `Vc`: wipe the line contents but leave a blank
                     // line in place so insert-mode starts on an empty row.
+                    use sqeel_buffer::{Edit, MotionKind as BufKind, Position};
                     ed.push_undo();
-                    finalize_visual_line_selection_for_change(ed);
-                    ed.mutate(|t| t.cut());
-                    if let Some(y) = non_empty_yank(ed) {
-                        ed.last_yank = Some(y);
+                    ed.sync_buffer_content_from_textarea();
+                    let payload = read_vim_range(ed, (top, 0), (bot, 0), MotionKind::Linewise);
+                    if bot > top {
+                        ed.mutate_edit(Edit::DeleteRange {
+                            start: Position::new(top + 1, 0),
+                            end: Position::new(bot, 0),
+                            kind: BufKind::Line,
+                        });
                     }
-                    ed.textarea.move_cursor(CursorMove::Jump(top, 0));
+                    let line_chars = ed
+                        .buffer()
+                        .line(top)
+                        .map(|l| l.chars().count())
+                        .unwrap_or(0);
+                    if line_chars > 0 {
+                        ed.mutate_edit(Edit::DeleteRange {
+                            start: Position::new(top, 0),
+                            end: Position::new(top, line_chars),
+                            kind: BufKind::Char,
+                        });
+                    }
+                    if !payload.is_empty() {
+                        ed.last_yank = Some(payload.clone());
+                        ed.textarea.set_yank_text(payload);
+                        ed.vim.yank_linewise = true;
+                    }
+                    ed.buffer_mut().set_cursor(Position::new(top, 0));
+                    ed.push_buffer_cursor_to_textarea();
                     begin_insert_noundo(ed, 1, InsertReason::AfterChange);
                 }
                 Operator::Uppercase | Operator::Lowercase | Operator::ToggleCase => {
@@ -2573,33 +2555,31 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
             }
         }
         Mode::Visual => {
-            finalize_visual_char_selection(ed);
-            // Reset linewise flag before copy/cut so non_empty_yank doesn't
-            // mistakenly add a trailing newline from a prior linewise op.
             ed.vim.yank_linewise = false;
+            let anchor = ed.vim.visual_anchor;
+            let cursor = ed.cursor();
+            let (top, bot) = order(anchor, cursor);
             match op {
                 Operator::Yank => {
-                    ed.textarea.copy();
-                    if let Some(y) = non_empty_yank(ed) {
-                        ed.last_yank = Some(y);
+                    let text = read_vim_range(ed, top, bot, MotionKind::Inclusive);
+                    if !text.is_empty() {
+                        ed.last_yank = Some(text.clone());
+                        ed.textarea.set_yank_text(text);
                     }
+                    ed.buffer_mut()
+                        .set_cursor(sqeel_buffer::Position::new(top.0, top.1));
+                    ed.push_buffer_cursor_to_textarea();
                     ed.textarea.cancel_selection();
                     ed.vim.mode = Mode::Normal;
                 }
                 Operator::Delete => {
                     ed.push_undo();
-                    ed.mutate(|t| t.cut());
-                    if let Some(y) = non_empty_yank(ed) {
-                        ed.last_yank = Some(y);
-                    }
+                    cut_vim_range(ed, top, bot, MotionKind::Inclusive);
                     ed.vim.mode = Mode::Normal;
                 }
                 Operator::Change => {
                     ed.push_undo();
-                    ed.mutate(|t| t.cut());
-                    if let Some(y) = non_empty_yank(ed) {
-                        ed.last_yank = Some(y);
-                    }
+                    cut_vim_range(ed, top, bot, MotionKind::Inclusive);
                     begin_insert_noundo(ed, 1, InsertReason::AfterChange);
                 }
                 Operator::Uppercase | Operator::Lowercase | Operator::ToggleCase => {
@@ -2848,51 +2828,11 @@ fn reset_textarea_lines(ed: &mut Editor<'_>, lines: Vec<String>) {
 
 // ─── Visual-line helpers ───────────────────────────────────────────────────
 
-/// Build a tui-textarea selection from the stored visual anchor to the
-/// live cursor, inclusive of the cell under the cursor. Called just
-/// before copy / cut for the char-wise Visual operator — between
-/// operators we keep the cursor free and paint the highlight through
-/// the render overlay.
-fn finalize_visual_char_selection(ed: &mut Editor<'_>) {
-    let (ar, ac) = ed.vim.visual_anchor;
-    let (cr, cc) = ed.textarea.cursor();
-    let (start, end) = if (ar, ac) <= (cr, cc) {
-        ((ar, ac), (cr, cc))
-    } else {
-        ((cr, cc), (ar, ac))
-    };
-    ed.textarea.cancel_selection();
-    ed.textarea.move_cursor(CursorMove::Jump(start.0, start.1));
-    ed.textarea.start_selection();
-    ed.textarea.move_cursor(CursorMove::Jump(end.0, end.1));
-    // Char-wise visual is inclusive of the cursor cell; tui-textarea
-    // selection is exclusive-end, so step one forward.
-    ed.textarea.move_cursor(CursorMove::Forward);
-}
-
 /// VisualLine keeps no live tui-textarea selection — the cursor is free
 /// to sit wherever the user moved it, and the full-line highlight is
-/// painted as a post-render overlay by the draw path. Operators build
-/// a selection on demand via [`finalize_visual_line_selection`].
+/// painted by the buffer render path.
 fn refresh_visual_line_selection(ed: &mut Editor<'_>) {
     ed.textarea.cancel_selection();
-}
-
-fn finalize_visual_line_selection(ed: &mut Editor<'_>) {
-    let (cursor_row, _) = ed.textarea.cursor();
-    let anchor_row = ed.vim.visual_line_anchor;
-    let top = cursor_row.min(anchor_row);
-    let bot = cursor_row.max(anchor_row);
-    let total = ed.textarea.lines().len();
-    ed.textarea.cancel_selection();
-    ed.textarea.move_cursor(CursorMove::Jump(top, 0));
-    ed.textarea.start_selection();
-    if bot + 1 < total {
-        ed.textarea.move_cursor(CursorMove::Jump(bot + 1, 0));
-    } else {
-        ed.textarea.move_cursor(CursorMove::Jump(bot, 0));
-        ed.textarea.move_cursor(CursorMove::End);
-    }
 }
 
 // ─── Text-object range computation ─────────────────────────────────────────
