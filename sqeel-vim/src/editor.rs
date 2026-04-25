@@ -256,6 +256,43 @@ impl<'a> Editor<'a> {
         Some((top, bot, left, right))
     }
 
+    /// Active selection in `sqeel_buffer::Selection` shape. `None` when
+    /// not in a Visual mode. Phase 7d-i wiring — the host hands this
+    /// straight to `BufferView` once render flips off textarea
+    /// (Phase 7d-ii drops the `paint_*_overlay` calls on the same
+    /// switch).
+    pub fn buffer_selection(&self) -> Option<sqeel_buffer::Selection> {
+        use sqeel_buffer::{Position, Selection};
+        match self.vim_mode() {
+            VimMode::Visual => {
+                let (ar, ac) = self.vim.visual_anchor;
+                let (cr, cc) = self.textarea.cursor();
+                Some(Selection::Char {
+                    anchor: Position::new(ar, ac),
+                    head: Position::new(cr, cc),
+                })
+            }
+            VimMode::VisualLine => {
+                let anchor_row = self.vim.visual_line_anchor;
+                let head_row = self.textarea.cursor().0;
+                Some(Selection::Line {
+                    anchor_row,
+                    head_row,
+                })
+            }
+            VimMode::VisualBlock => {
+                let (ar, ac) = self.vim.block_anchor;
+                let cr = self.textarea.cursor().0;
+                let cc = self.vim.block_vcol;
+                Some(Selection::Block {
+                    anchor: Position::new(ar, ac),
+                    head: Position::new(cr, cc),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Force back to normal mode (used when dismissing completions etc.)
     pub fn force_normal(&mut self) {
         self.textarea.cancel_selection();

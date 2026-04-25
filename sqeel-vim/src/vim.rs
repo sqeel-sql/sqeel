@@ -5705,4 +5705,52 @@ mod tests {
         let text = e.textarea.lines().join("\n");
         assert_eq!(e.buffer.as_string(), text);
     }
+
+    #[test]
+    fn buffer_selection_none_in_normal_mode() {
+        let e = editor_with("foo bar");
+        assert!(e.buffer_selection().is_none());
+    }
+
+    #[test]
+    fn buffer_selection_char_in_visual_mode() {
+        use sqeel_buffer::{Position, Selection};
+        let mut e = editor_with("hello world");
+        run_keys(&mut e, "vlll");
+        assert_eq!(
+            e.buffer_selection(),
+            Some(Selection::Char {
+                anchor: Position::new(0, 0),
+                head: Position::new(0, 3),
+            })
+        );
+    }
+
+    #[test]
+    fn buffer_selection_line_in_visual_line_mode() {
+        use sqeel_buffer::Selection;
+        let mut e = editor_with("a\nb\nc\nd");
+        run_keys(&mut e, "Vj");
+        assert_eq!(
+            e.buffer_selection(),
+            Some(Selection::Line {
+                anchor_row: 0,
+                head_row: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn buffer_selection_block_in_visual_block_mode() {
+        use sqeel_buffer::{Position, Selection};
+        let mut e = editor_with("aaaa\nbbbb\ncccc");
+        run_keys(&mut e, "<C-v>jl");
+        assert_eq!(
+            e.buffer_selection(),
+            Some(Selection::Block {
+                anchor: Position::new(0, 0),
+                head: Position::new(1, 1),
+            })
+        );
+    }
 }
