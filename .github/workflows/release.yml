@@ -38,22 +38,34 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Verify tag matches Cargo.toml version
+        shell: bash
+        run: |
+          CARGO_VER=$(grep -m1 '^version' sqeel/Cargo.toml | cut -d'"' -f2)
+          if [ "v$CARGO_VER" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match sqeel/Cargo.toml version v$CARGO_VER"
+            exit 1
+          fi
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: clippy, rustfmt
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.target }}
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
 
       - name: Build binaries
-        run: cargo build --release --target ${{ matrix.target }} --bin sqeel --bin sqeel-gui
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin sqeel --bin sqeel-gui
 
       - name: Package (Linux / macOS)
         if: matrix.archive == 'tar.gz'
@@ -78,5 +90,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: sqeel-*.${{ matrix.archive }}
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
