@@ -5741,6 +5741,60 @@ mod tests {
     }
 
     #[test]
+    fn intern_style_dedups_repeated_styles() {
+        use ratatui::style::{Color, Style};
+        let mut e = editor_with("");
+        let red = Style::default().fg(Color::Red);
+        let blue = Style::default().fg(Color::Blue);
+        let id_r1 = e.intern_style(red);
+        let id_r2 = e.intern_style(red);
+        let id_b = e.intern_style(blue);
+        assert_eq!(id_r1, id_r2);
+        assert_ne!(id_r1, id_b);
+        assert_eq!(e.style_table().len(), 2);
+    }
+
+    #[test]
+    fn sync_buffer_spans_translates_textarea_spans() {
+        use ratatui::style::{Color, Style};
+        let mut e = editor_with("SELECT foo");
+        e.textarea
+            .set_syntax_spans(vec![vec![(0, 6, Style::default().fg(Color::Red))]]);
+        e.sync_buffer_spans_from_textarea();
+        let by_row = e.buffer.spans();
+        assert_eq!(by_row.len(), 1);
+        assert_eq!(by_row[0].len(), 1);
+        assert_eq!(by_row[0][0].start_byte, 0);
+        assert_eq!(by_row[0][0].end_byte, 6);
+        let id = by_row[0][0].style;
+        assert_eq!(e.style_table()[id as usize].fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn sync_buffer_spans_clamps_sentinel_end() {
+        use ratatui::style::{Color, Style};
+        let mut e = editor_with("hello");
+        e.textarea.set_syntax_spans(vec![vec![(
+            0,
+            usize::MAX,
+            Style::default().fg(Color::Blue),
+        )]]);
+        e.sync_buffer_spans_from_textarea();
+        let by_row = e.buffer.spans();
+        assert_eq!(by_row[0][0].end_byte, 5);
+    }
+
+    #[test]
+    fn sync_buffer_spans_drops_zero_width() {
+        use ratatui::style::{Color, Style};
+        let mut e = editor_with("abc");
+        e.textarea
+            .set_syntax_spans(vec![vec![(2, 2, Style::default().fg(Color::Red))]]);
+        e.sync_buffer_spans_from_textarea();
+        assert!(e.buffer.spans()[0].is_empty());
+    }
+
+    #[test]
     fn buffer_selection_block_in_visual_block_mode() {
         use sqeel_buffer::{Position, Selection};
         let mut e = editor_with("aaaa\nbbbb\ncccc");

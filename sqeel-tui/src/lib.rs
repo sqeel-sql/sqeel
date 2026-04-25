@@ -734,6 +734,7 @@ async fn run_loop(
                     cursor_row,
                     &diagnostics,
                 );
+                editor.sync_buffer_spans_from_textarea();
                 s.set_highlights(result.spans.clone());
                 last_marker_cursor_row = cursor_row;
                 last_marker_diag_len = diagnostics.len();
@@ -769,6 +770,7 @@ async fn run_loop(
                             cursor_row,
                             &diagnostics,
                         );
+                        editor.sync_buffer_spans_from_textarea();
                         last_marker_cursor_row = cursor_row;
                         last_marker_diag_len = diagnostics.len();
                         needs_redraw = true;

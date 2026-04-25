@@ -297,6 +297,13 @@ impl<'a> TextArea<'a> {
         std::mem::take(&mut self.syntax_spans)
     }
 
+    /// Borrow the current syntax spans without consuming them. Used by
+    /// the sqeel-buffer migration to mirror styling into the new buffer
+    /// without disturbing the textarea's render cache.
+    pub fn syntax_spans(&self) -> &[Vec<(usize, usize, Style)>] {
+        &self.syntax_spans
+    }
+
     /// Handle a key input with default key mappings. For default key mappings, see the table in
     /// [the module document](./index.html).
     /// `crossterm`, `termion`, and `termwiz` features enable conversion from their own key event types into

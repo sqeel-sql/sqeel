@@ -54,6 +54,13 @@ pub struct Editor<'a> {
     /// the engine can start reading from / writing to it in
     /// follow-up commits without behaviour changing today.
     pub(super) buffer: sqeel_buffer::Buffer,
+    /// Style intern table for the migration buffer's opaque
+    /// `Span::style` ids. Phase 7d-ii-a wiring — `apply_window_spans`
+    /// produces `(start, end, Style)` tuples for the textarea; we
+    /// translate those to `sqeel_buffer::Span` by interning the
+    /// `Style` here and storing the table index. The render path's
+    /// `StyleResolver` looks the style back up by id.
+    pub(super) style_table: Vec<ratatui::style::Style>,
 }
 
 /// Host-observable LSP requests triggered by editor bindings. The
@@ -81,7 +88,53 @@ impl<'a> Editor<'a> {
             viewport_height: AtomicU16::new(0),
             pending_lsp: None,
             buffer: sqeel_buffer::Buffer::new(),
+            style_table: Vec::new(),
         }
+    }
+
+    /// Intern a `ratatui::style::Style` and return the opaque id used
+    /// in `sqeel_buffer::Span::style`. The render-side `StyleResolver`
+    /// closure (built by [`Editor::style_resolver`]) uses the id to
+    /// look up the style back. Linear-scan dedup — the table grows
+    /// only as new tree-sitter token kinds appear, so it stays tiny.
+    pub fn intern_style(&mut self, style: ratatui::style::Style) -> u32 {
+        if let Some(idx) = self.style_table.iter().position(|s| *s == style) {
+            return idx as u32;
+        }
+        self.style_table.push(style);
+        (self.style_table.len() - 1) as u32
+    }
+
+    /// Read-only view of the style table — id `i` → `style_table[i]`.
+    /// The render path passes a closure backed by this slice as the
+    /// `StyleResolver` for `BufferView`.
+    pub fn style_table(&self) -> &[ratatui::style::Style] {
+        &self.style_table
+    }
+
+    /// Mirror the textarea's `(start, end, Style)` syntax span tuples
+    /// into the migration buffer's `Vec<Vec<Span>>`. Drops zero-width
+    /// runs and clamps `end` to `usize::MAX` sentinels (used by
+    /// `apply_window_spans` for whole-line spans) to the line's byte
+    /// length so the buffer cache doesn't see runaway ranges.
+    pub fn sync_buffer_spans_from_textarea(&mut self) {
+        let textarea_spans = self.textarea.syntax_spans().to_vec();
+        let line_byte_lens: Vec<usize> = self.textarea.lines().iter().map(|l| l.len()).collect();
+        let mut by_row: Vec<Vec<sqeel_buffer::Span>> = Vec::with_capacity(textarea_spans.len());
+        for (row, row_spans) in textarea_spans.into_iter().enumerate() {
+            let line_len = line_byte_lens.get(row).copied().unwrap_or(0);
+            let mut translated = Vec::with_capacity(row_spans.len());
+            for (start, end, style) in row_spans {
+                let end_clamped = end.min(line_len);
+                if end_clamped <= start {
+                    continue;
+                }
+                let id = self.intern_style(style);
+                translated.push(sqeel_buffer::Span::new(start, end_clamped, id));
+            }
+            by_row.push(translated);
+        }
+        self.buffer.set_spans(by_row);
     }
 
     /// Drain any pending LSP intent raised by the last key. Returns
