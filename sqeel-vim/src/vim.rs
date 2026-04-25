@@ -3253,14 +3253,10 @@ fn join_line(ed: &mut Editor<'_>) {
         end: Position::new(row + 1, next_chars),
         with: joined,
     });
-    // Vim parks the cursor on the inserted space (or at the join point
-    // when no space went in).
-    let cursor_col = if separator.is_empty() {
-        cur_chars
-    } else {
-        cur_chars
-    };
-    ed.buffer_mut().set_cursor(Position::new(row, cursor_col));
+    // Vim parks the cursor on the inserted space — or at the join
+    // point when no space went in (which is the same column either
+    // way, since the space sits exactly at `cur_chars`).
+    ed.buffer_mut().set_cursor(Position::new(row, cur_chars));
     ed.push_buffer_cursor_to_textarea();
 }
 
