@@ -25,7 +25,7 @@ mod viewport;
 pub use buffer::Buffer;
 pub use edit::{Edit, MotionKind};
 pub use position::Position;
-pub use render::{BufferView, StyleResolver};
+pub use render::{BufferView, Gutter, StyleResolver};
 pub use selection::{RowSpan, Selection};
 pub use span::Span;
 pub use viewport::Viewport;

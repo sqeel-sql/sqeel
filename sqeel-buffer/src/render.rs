@@ -48,6 +48,24 @@ pub struct BufferView<'a, R: StyleResolver> {
     /// Style for the cursor cell. `REVERSED` is the conventional
     /// choice; works against any theme.
     pub cursor_style: Style,
+    /// Optional left-side line-number gutter. `width` includes the
+    /// trailing space separating the number from text. Pass `None`
+    /// to disable. Numbers are 1-based, right-aligned.
+    pub gutter: Option<Gutter>,
+    /// Bg painted under cells covered by an active `/` search match
+    /// (read from [`Buffer::search_pattern`]). `Style::default()` to
+    /// disable.
+    pub search_bg: Style,
+}
+
+/// Configuration for the line-number gutter rendered to the left of
+/// the text area. `width` is the total cell count reserved
+/// (including any trailing spacer); the renderer right-aligns the
+/// 1-based row number into the leftmost `width - 1` cells.
+#[derive(Debug, Clone, Copy)]
+pub struct Gutter {
+    pub width: u16,
+    pub style: Style,
 }
 
 impl<R: StyleResolver> Widget for BufferView<'_, R> {
@@ -60,19 +78,32 @@ impl<R: StyleResolver> Widget for BufferView<'_, R> {
         let top_col = viewport.top_col;
         let visible_rows = (area.height as usize).min(lines.len().saturating_sub(top_row));
 
+        let gutter_width = self.gutter.map(|g| g.width).unwrap_or(0);
+        let text_area = Rect {
+            x: area.x.saturating_add(gutter_width),
+            y: area.y,
+            width: area.width.saturating_sub(gutter_width),
+            height: area.height,
+        };
+
         for screen_row in 0..visible_rows {
             let doc_row = top_row + screen_row;
             let line = &lines[doc_row];
             let row_spans = spans.get(doc_row).map(Vec::as_slice).unwrap_or(&[]);
             let sel_range = self.selection.and_then(|s| s.row_span(doc_row));
             let is_cursor_row = doc_row == cursor.row;
+            if let Some(gutter) = self.gutter {
+                self.paint_gutter(term_buf, area, screen_row as u16, doc_row, gutter);
+            }
+            let search_ranges = self.row_search_ranges(line);
             self.paint_row(
                 term_buf,
-                area,
+                text_area,
                 screen_row as u16,
                 line,
                 row_spans,
                 sel_range,
+                &search_ranges,
                 is_cursor_row,
                 cursor.col,
                 top_col,
@@ -82,6 +113,54 @@ impl<R: StyleResolver> Widget for BufferView<'_, R> {
 }
 
 impl<R: StyleResolver> BufferView<'_, R> {
+    /// Run the active search regex against `line` and return the
+    /// charwise `(start_col, end_col_exclusive)` ranges that need
+    /// the search bg painted. Empty when no pattern is set.
+    fn row_search_ranges(&self, line: &str) -> Vec<(usize, usize)> {
+        let Some(re) = self.buffer.search_pattern() else {
+            return Vec::new();
+        };
+        re.find_iter(line)
+            .map(|m| {
+                let start = line[..m.start()].chars().count();
+                let end = line[..m.end()].chars().count();
+                (start, end)
+            })
+            .collect()
+    }
+
+    fn paint_gutter(
+        &self,
+        term_buf: &mut TermBuffer,
+        area: Rect,
+        screen_row: u16,
+        doc_row: usize,
+        gutter: Gutter,
+    ) {
+        let y = area.y + screen_row;
+        // Total gutter cells, leaving one trailing spacer column.
+        let number_width = gutter.width.saturating_sub(1) as usize;
+        let label = format!("{:>width$}", doc_row + 1, width = number_width);
+        let mut x = area.x;
+        for ch in label.chars() {
+            if x >= area.x + gutter.width.saturating_sub(1) {
+                break;
+            }
+            if let Some(cell) = term_buf.cell_mut((x, y)) {
+                cell.set_char(ch);
+                cell.set_style(gutter.style);
+            }
+            x = x.saturating_add(1);
+        }
+        // Spacer cell — same gutter style so the background is
+        // continuous when a bg colour is set.
+        let spacer_x = area.x + gutter.width.saturating_sub(1);
+        if let Some(cell) = term_buf.cell_mut((spacer_x, y)) {
+            cell.set_char(' ');
+            cell.set_style(gutter.style);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn paint_row(
         &self,
@@ -91,6 +170,7 @@ impl<R: StyleResolver> BufferView<'_, R> {
         line: &str,
         row_spans: &[crate::Span],
         sel_range: crate::RowSpan,
+        search_ranges: &[(usize, usize)],
         is_cursor_row: bool,
         cursor_col: usize,
         top_col: usize,
@@ -138,6 +218,13 @@ impl<R: StyleResolver> BufferView<'_, R> {
                 && col_idx <= hi
             {
                 style = style.patch(self.selection_bg);
+            }
+            if self.search_bg != Style::default()
+                && search_ranges
+                    .iter()
+                    .any(|&(s, e)| col_idx >= s && col_idx < e)
+            {
+                style = style.patch(self.search_bg);
             }
             if is_cursor_row && col_idx == cursor_col {
                 style = style.patch(self.cursor_style);
@@ -205,6 +292,8 @@ mod tests {
             cursor_line_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: None,
+            search_bg: Style::default(),
         };
         let term = run_render(view, 20, 5);
         assert_eq!(term.cell((0, 0)).unwrap().symbol(), "h");
@@ -226,6 +315,8 @@ mod tests {
             cursor_line_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: None,
+            search_bg: Style::default(),
         };
         let term = run_render(view, 10, 1);
         let cursor_cell = term.cell((1, 0)).unwrap();
@@ -248,6 +339,8 @@ mod tests {
             cursor_line_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: None,
+            search_bg: Style::default(),
         };
         let term = run_render(view, 10, 1);
         assert!(term.cell((0, 0)).unwrap().bg != Color::Blue);
@@ -278,10 +371,68 @@ mod tests {
             cursor_line_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: None,
+            search_bg: Style::default(),
         };
         let term = run_render(view, 20, 1);
         for x in 0..6 {
             assert_eq!(term.cell((x, 0)).unwrap().fg, Color::Red);
+        }
+    }
+
+    #[test]
+    fn gutter_renders_right_aligned_line_numbers() {
+        let mut b = Buffer::from_str("a\nb\nc");
+        b.viewport_mut().width = 10;
+        b.viewport_mut().height = 3;
+        let view = BufferView {
+            buffer: &b,
+            selection: None,
+            resolver: &(no_styles as fn(u32) -> Style),
+            cursor_line_bg: Style::default(),
+            selection_bg: Style::default().bg(Color::Blue),
+            cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: Some(Gutter {
+                width: 4,
+                style: Style::default().fg(Color::Yellow),
+            }),
+            search_bg: Style::default(),
+        };
+        let term = run_render(view, 10, 3);
+        // Width 4 = 3 number cells + 1 spacer; right-aligned "  1".
+        assert_eq!(term.cell((2, 0)).unwrap().symbol(), "1");
+        assert_eq!(term.cell((2, 0)).unwrap().fg, Color::Yellow);
+        assert_eq!(term.cell((2, 1)).unwrap().symbol(), "2");
+        assert_eq!(term.cell((2, 2)).unwrap().symbol(), "3");
+        // Text shifted right past the gutter.
+        assert_eq!(term.cell((4, 0)).unwrap().symbol(), "a");
+    }
+
+    #[test]
+    fn search_bg_paints_match_cells() {
+        use regex::Regex;
+        let mut b = Buffer::from_str("foo bar foo");
+        b.viewport_mut().width = 20;
+        b.viewport_mut().height = 1;
+        b.set_search_pattern(Some(Regex::new("foo").unwrap()));
+        let view = BufferView {
+            buffer: &b,
+            selection: None,
+            resolver: &(no_styles as fn(u32) -> Style),
+            cursor_line_bg: Style::default(),
+            selection_bg: Style::default().bg(Color::Blue),
+            cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: None,
+            search_bg: Style::default().bg(Color::Magenta),
+        };
+        let term = run_render(view, 20, 1);
+        for x in 0..3 {
+            assert_eq!(term.cell((x, 0)).unwrap().bg, Color::Magenta);
+        }
+        // " bar " between matches stays default bg.
+        assert_ne!(term.cell((3, 0)).unwrap().bg, Color::Magenta);
+        for x in 8..11 {
+            assert_eq!(term.cell((x, 0)).unwrap().bg, Color::Magenta);
         }
     }
 
@@ -298,6 +449,8 @@ mod tests {
             cursor_line_bg: Style::default(),
             selection_bg: Style::default().bg(Color::Blue),
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: None,
+            search_bg: Style::default(),
         };
         let term = run_render(view, 4, 1);
         assert_eq!(term.cell((0, 0)).unwrap().symbol(), "d");
