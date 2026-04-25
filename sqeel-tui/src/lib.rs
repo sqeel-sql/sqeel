@@ -3168,10 +3168,10 @@ fn diag_label(state: &AppState) -> Option<Span<'static>> {
 /// `i` is the 1-based index of the match at-or-after the cursor; 0 means no
 /// match has been navigated to yet (cursor is past the last match).
 fn search_label(editor: &Editor) -> Option<Span<'static>> {
-    let re = editor.textarea.search_pattern()?;
+    let re = editor.buffer().search_pattern()?;
     let pat = re.as_str().to_string();
-    let lines = editor.textarea.lines();
-    let (cur_row, cur_col) = editor.textarea.cursor();
+    let lines = editor.buffer().lines();
+    let (cur_row, cur_col) = editor.cursor();
     let mut total = 0usize;
     let mut current = 0usize;
     for (row, line) in lines.iter().enumerate() {

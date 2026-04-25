@@ -431,7 +431,20 @@ fn enter_search(ed: &mut Editor<'_>, forward: bool) {
         forward,
     });
     ed.vim.last_search = None;
-    let _ = ed.textarea.set_search_pattern("");
+    ed.buffer_mut().set_search_pattern(None);
+}
+
+/// Compile `pattern` into a regex and push it onto the migration
+/// buffer's search state. Invalid patterns clear the highlight (the
+/// user is mid-typing a regex like `[` and we don't want to flash an
+/// error).
+fn push_search_pattern(ed: &mut Editor<'_>, pattern: &str) {
+    let compiled = if pattern.is_empty() {
+        None
+    } else {
+        regex::Regex::new(pattern).ok()
+    };
+    ed.buffer_mut().set_search_pattern(compiled);
 }
 
 fn step_search_prompt(ed: &mut Editor<'_>, input: Input) -> bool {
@@ -453,14 +466,18 @@ fn step_search_prompt(ed: &mut Editor<'_>, input: Input) -> bool {
             let prompt = ed.vim.search_prompt.take();
             if let Some(p) = prompt {
                 if !p.text.is_empty() {
-                    let _ = ed.textarea.set_search_pattern(&p.text);
-                    let pre = ed.textarea.cursor();
+                    push_search_pattern(ed, &p.text);
+                    let pre = ed.cursor();
+                    // Match tui-textarea's `/search<CR>` semantics:
+                    // jump to the *next* match strictly past the
+                    // cursor, even if the cursor already sits on one.
                     if p.forward {
-                        ed.textarea.search_forward(false);
+                        ed.buffer_mut().search_forward(true);
                     } else {
-                        ed.textarea.search_back(false);
+                        ed.buffer_mut().search_backward(true);
                     }
-                    if ed.textarea.cursor() != pre {
+                    ed.push_buffer_cursor_to_textarea();
+                    if ed.cursor() != pre {
                         push_jump(ed, pre);
                     }
                     ed.vim.last_search = Some(p.text);
@@ -470,18 +487,26 @@ fn step_search_prompt(ed: &mut Editor<'_>, input: Input) -> bool {
             }
         }
         Key::Backspace => {
-            if let Some(p) = ed.vim.search_prompt.as_mut()
-                && p.text.pop().is_some()
-            {
-                p.cursor = p.text.chars().count();
-                let _ = ed.textarea.set_search_pattern(&p.text);
+            let new_text = ed.vim.search_prompt.as_mut().and_then(|p| {
+                if p.text.pop().is_some() {
+                    p.cursor = p.text.chars().count();
+                    Some(p.text.clone())
+                } else {
+                    None
+                }
+            });
+            if let Some(text) = new_text {
+                push_search_pattern(ed, &text);
             }
         }
         Key::Char(c) => {
-            if let Some(p) = ed.vim.search_prompt.as_mut() {
+            let new_text = ed.vim.search_prompt.as_mut().map(|p| {
                 p.text.push(c);
                 p.cursor = p.text.chars().count();
-                let _ = ed.textarea.set_search_pattern(&p.text);
+                p.text.clone()
+            });
+            if let Some(text) = new_text {
+                push_search_pattern(ed, &text);
             }
         }
         _ => {}
@@ -1585,16 +1610,23 @@ fn apply_motion_cursor_ctx(ed: &mut Editor<'_>, motion: &Motion, count: usize, a
             word_at_cursor_search(ed, *forward, count);
         }
         Motion::SearchNext { reverse } => {
-            if ed.textarea.search_pattern().is_none() {
+            // Re-push the last query so the buffer's search state is
+            // correct even if the host happened to clear it (e.g. while
+            // a Visual mode draw was in progress).
+            if let Some(pattern) = ed.vim.last_search.clone() {
+                push_search_pattern(ed, &pattern);
+            }
+            if ed.buffer().search_pattern().is_none() {
                 return;
             }
             for _ in 0..count.max(1) {
                 if *reverse {
-                    let _ = ed.textarea.search_back(false);
+                    ed.buffer_mut().search_backward(true);
                 } else {
-                    let _ = ed.textarea.search_forward(false);
+                    ed.buffer_mut().search_forward(true);
                 }
             }
+            ed.push_buffer_cursor_to_textarea();
         }
         Motion::ViewportTop => {
             ed.buffer_mut().move_viewport_top(count.saturating_sub(1));
@@ -1640,8 +1672,8 @@ fn matching_bracket(ed: &mut Editor<'_>) -> bool {
 }
 
 fn word_at_cursor_search(ed: &mut Editor<'_>, forward: bool, count: usize) {
-    let (row, col) = ed.textarea.cursor();
-    let line = &ed.textarea.lines()[row];
+    let (row, col) = ed.cursor();
+    let line: String = ed.buffer().line(row).unwrap_or("").to_string();
     let chars: Vec<char> = line.chars().collect();
     if chars.is_empty() {
         return;
@@ -1661,16 +1693,20 @@ fn word_at_cursor_search(ed: &mut Editor<'_>, forward: bool, count: usize) {
     }
     let word: String = chars[start..end].iter().collect();
     let pattern = format!(r"\b{}\b", regex_escape(&word));
-    if ed.textarea.set_search_pattern(&pattern).is_err() {
+    push_search_pattern(ed, &pattern);
+    if ed.buffer().search_pattern().is_none() {
         return;
     }
+    // Remember the query so `n` / `N` keep working after the jump.
+    ed.vim.last_search = Some(pattern);
     for _ in 0..count.max(1) {
         if forward {
-            let _ = ed.textarea.search_forward(false);
+            ed.buffer_mut().search_forward(true);
         } else {
-            let _ = ed.textarea.search_back(false);
+            ed.buffer_mut().search_backward(true);
         }
     }
+    ed.push_buffer_cursor_to_textarea();
 }
 
 fn regex_escape(s: &str) -> String {
@@ -4314,8 +4350,9 @@ mod tests {
     #[test]
     fn n_repeats_last_search_forward() {
         let mut e = editor_with("foo bar foo baz foo");
-        e.textarea.set_search_pattern("foo").unwrap();
-        run_keys(&mut e, "n");
+        // `/foo<CR>` jumps past the cursor's current cell, so from
+        // col 0 the first hit is the second `foo` at col 8.
+        run_keys(&mut e, "/foo<CR>");
         assert_eq!(e.textarea.cursor().1, 8);
         run_keys(&mut e, "n");
         assert_eq!(e.textarea.cursor().1, 16);
@@ -4324,8 +4361,8 @@ mod tests {
     #[test]
     fn shift_n_reverses_search() {
         let mut e = editor_with("foo bar foo baz foo");
-        e.textarea.set_search_pattern("foo").unwrap();
-        run_keys(&mut e, "nn");
+        run_keys(&mut e, "/foo<CR>");
+        run_keys(&mut e, "n");
         assert_eq!(e.textarea.cursor().1, 16);
         run_keys(&mut e, "N");
         assert_eq!(e.textarea.cursor().1, 8);
@@ -5264,8 +5301,8 @@ mod tests {
         let mut e = editor_with("foo bar\nbaz");
         run_keys(&mut e, "/bar");
         assert_eq!(e.search_prompt().unwrap().text, "bar");
-        // Pattern set on textarea for live highlight.
-        assert!(e.textarea.search_pattern().is_some());
+        // Pattern set on the migration buffer for live highlight.
+        assert!(e.buffer().search_pattern().is_some());
     }
 
     #[test]
