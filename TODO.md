@@ -136,8 +136,12 @@ We support some `OpTextObj` chords. Audit + fill gaps:
   is in Replace mode (delete one char then insert the typed char). At
   end-of-line falls through to plain insert, matching vim. Backspace does not
   restore prior content (vim has a per-char history for that — pragmatic gap).
-- **`gq{motion}` — text reflow (L).** Vim wraps to `textwidth`. SQL doesn't
-  usually want this; hold off unless someone asks.
+- ~~**`gq{motion}` — text reflow (L).**~~ Done. Added `Operator::Reflow`
+  - a greedy word-wrap that splits on blank-line boundaries (so paragraph
+    structure survives the reflow). Wires through every operator path: motion
+    (`gq}`), text object (`gqip`), Visual / VL / block, doubled (`gqq` for
+    current line). Wrap column reads from `settings.textwidth` (default 79;
+    tweak via `:set textwidth=N` / `:set tw=N`).
 - ~~**`>>` / `<<` already exist; add `>{motion}` / `<{motion}` audit (S).**~~
   Verified — `>w` / `<w` indent / outdent the line, `>ip` / `<ip` span paragraph
   rows. Tests added.

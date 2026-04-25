@@ -98,6 +98,8 @@ pub struct Settings {
     /// When true, `/` / `?` patterns and `:s/.../.../` ignore case
     /// without an explicit `i` flag.
     pub ignore_case: bool,
+    /// Wrap column for `gq{motion}` text reflow. Vim's default is 79.
+    pub textwidth: usize,
 }
 
 impl Default for Settings {
@@ -106,6 +108,7 @@ impl Default for Settings {
             shiftwidth: 2,
             tabstop: 8,
             ignore_case: false,
+            textwidth: 79,
         }
     }
 }

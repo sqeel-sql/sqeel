@@ -507,9 +507,10 @@ fn apply_set(editor: &mut Editor<'_>, body: &str) -> ExEffect {
     if trimmed.is_empty() {
         let s = editor.settings();
         return ExEffect::Info(format!(
-            "shiftwidth={}  tabstop={}  ignorecase={}",
+            "shiftwidth={}  tabstop={}  textwidth={}  ignorecase={}",
             s.shiftwidth,
             s.tabstop,
+            s.textwidth,
             if s.ignore_case { "on" } else { "off" }
         ));
     }
@@ -540,6 +541,12 @@ fn apply_set_token(editor: &mut Editor<'_>, token: &str) -> Result<(), String> {
                     return Err("tabstop must be > 0".into());
                 }
                 editor.settings_mut().tabstop = parsed;
+            }
+            "textwidth" | "tw" => {
+                if parsed == 0 {
+                    return Err("textwidth must be > 0".into());
+                }
+                editor.settings_mut().textwidth = parsed;
             }
             other => return Err(format!("unknown :set option `{other}`")),
         }

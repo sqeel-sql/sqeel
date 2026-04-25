@@ -174,6 +174,11 @@ pub enum Operator {
     /// fold spanning the row range. Doesn't mutate the buffer text;
     /// cursor restores to the operator's start position.
     Fold,
+    /// `gq{motion}` — reflow the row range to `settings.textwidth`.
+    /// Greedy word-wrap: collapses each paragraph (blank-line-bounded
+    /// run) into space-separated words, then re-emits lines whose
+    /// width stays under `textwidth`. Always linewise, like indent.
+    Reflow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2352,6 +2357,9 @@ fn handle_after_op(ed: &mut Editor<'_>, input: Input, op: Operator, count1: usiz
         Operator::Lowercase => Some('u'),
         Operator::ToggleCase => Some('~'),
         Operator::Fold => None,
+        // `gqq` reflows the current line — vim's doubled form for the
+        // reflow operator is the second `q` after `gq`.
+        Operator::Reflow => Some('q'),
     };
     if let Key::Char(c) = input.key
         && !input.ctrl
@@ -2550,6 +2558,14 @@ fn handle_after_g(ed: &mut Editor<'_>, input: Input) -> bool {
         Key::Char('~') => {
             ed.vim.pending = Pending::Op {
                 op: Operator::ToggleCase,
+                count1: count,
+            };
+        }
+        Key::Char('q') => {
+            // `gq{motion}` — text reflow operator. Subsequent motion
+            // / textobj rides the same operator pipeline.
+            ed.vim.pending = Pending::Op {
+                op: Operator::Reflow,
                 count1: count,
             };
         }
@@ -3153,7 +3169,72 @@ fn run_operator_over_range(
             ed.push_buffer_cursor_to_textarea();
             ed.vim.mode = Mode::Normal;
         }
+        Operator::Reflow => {
+            ed.push_undo();
+            reflow_rows(ed, top.0, bot.0);
+            ed.vim.mode = Mode::Normal;
+        }
     }
+}
+
+/// Greedy word-wrap the rows in `[top, bot]` to `settings.textwidth`.
+/// Splits on blank-line boundaries so paragraph structure is
+/// preserved. Each paragraph's words are joined with single spaces
+/// before re-wrapping.
+fn reflow_rows(ed: &mut Editor<'_>, top: usize, bot: usize) {
+    let width = ed.settings().textwidth.max(1);
+    let mut lines: Vec<String> = ed.buffer().lines().to_vec();
+    let bot = bot.min(lines.len().saturating_sub(1));
+    if top > bot {
+        return;
+    }
+    let original = lines[top..=bot].to_vec();
+    let mut wrapped: Vec<String> = Vec::new();
+    let mut paragraph: Vec<String> = Vec::new();
+    let flush = |para: &mut Vec<String>, out: &mut Vec<String>, width: usize| {
+        if para.is_empty() {
+            return;
+        }
+        let words = para.join(" ");
+        let mut current = String::new();
+        for word in words.split_whitespace() {
+            let extra = if current.is_empty() {
+                word.chars().count()
+            } else {
+                current.chars().count() + 1 + word.chars().count()
+            };
+            if extra > width && !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+                current.push_str(word);
+            } else if current.is_empty() {
+                current.push_str(word);
+            } else {
+                current.push(' ');
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+        para.clear();
+    };
+    for line in &original {
+        if line.trim().is_empty() {
+            flush(&mut paragraph, &mut wrapped, width);
+            wrapped.push(String::new());
+        } else {
+            paragraph.push(line.clone());
+        }
+    }
+    flush(&mut paragraph, &mut wrapped, width);
+
+    // Splice back. push_undo above means `u` reverses.
+    let after: Vec<String> = lines.split_off(bot + 1);
+    lines.truncate(top);
+    lines.extend(wrapped);
+    lines.extend(after);
+    ed.restore(lines, (top, 0));
+    ed.mark_content_dirty();
 }
 
 /// Transform the range `[top, bot]` (vim `MotionKind`) in place with
@@ -3351,6 +3432,12 @@ fn execute_line_op(ed: &mut Editor<'_>, op: Operator, count: usize) {
         }
         // No doubled form — `zfzf` is two consecutive `zf` chords.
         Operator::Fold => unreachable!("Fold has no line-op double"),
+        Operator::Reflow => {
+            // `gqq` / `Ngqq` — reflow `count` rows starting at the cursor.
+            ed.push_undo();
+            reflow_rows(ed, row, end_row);
+            ed.vim.mode = Mode::Normal;
+        }
     }
 }
 
@@ -3430,6 +3517,13 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                     }
                     ed.vim.mode = Mode::Normal;
                 }
+                Operator::Reflow => {
+                    ed.push_undo();
+                    let (cursor_row, _) = ed.cursor();
+                    let bot = cursor_row.max(ed.vim.visual_line_anchor);
+                    reflow_rows(ed, top, bot);
+                    ed.vim.mode = Mode::Normal;
+                }
                 // Visual `zf` is handled inline in `handle_after_z`,
                 // never routed through this dispatcher.
                 Operator::Fold => unreachable!("Visual zf takes its own path"),
@@ -3479,6 +3573,14 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                     } else {
                         outdent_rows(ed, top.0, bot.0, 1);
                     }
+                    ed.vim.mode = Mode::Normal;
+                }
+                Operator::Reflow => {
+                    ed.push_undo();
+                    let anchor = ed.vim.visual_anchor;
+                    let cursor = ed.cursor();
+                    let (top, bot) = order(anchor, cursor);
+                    reflow_rows(ed, top.0, bot.0);
                     ed.vim.mode = Mode::Normal;
                 }
                 Operator::Fold => unreachable!("Visual zf takes its own path"),
@@ -3598,6 +3700,14 @@ fn apply_block_operator(ed: &mut Editor<'_>, op: Operator) {
             ed.vim.mode = Mode::Normal;
         }
         Operator::Fold => unreachable!("Visual zf takes its own path"),
+        Operator::Reflow => {
+            // Reflow over the block falls back to linewise reflow over
+            // the row range — column slicing for `gq` doesn't make
+            // sense.
+            ed.push_undo();
+            reflow_rows(ed, top, bot);
+            ed.vim.mode = Mode::Normal;
+        }
     }
 }
 
@@ -7414,6 +7524,52 @@ mod tests {
         run_keys(&mut e, "g,");
         // Cursor stays where the latest edit landed it.
         assert_ne!(e.cursor(), (2, 1));
+    }
+
+    #[test]
+    fn gqq_reflows_current_line_to_textwidth() {
+        let mut e = editor_with("alpha beta gamma delta epsilon zeta eta theta iota");
+        crate::ex::run(&mut e, "set tw=20");
+        assert_eq!(e.settings().textwidth, 20);
+        run_keys(&mut e, "gqq");
+        // Each output line should fit within 20 chars.
+        for line in e.buffer().lines() {
+            assert!(line.chars().count() <= 20, "line too long: {line:?}");
+        }
+        // Output is split across multiple rows now.
+        assert!(e.buffer().lines().len() > 1);
+    }
+
+    #[test]
+    fn gq_motion_reflows_paragraph() {
+        let mut e = editor_with("one two three\nfour five six\nseven eight\n\ntail");
+        crate::ex::run(&mut e, "set tw=15");
+        e.jump_cursor(0, 0);
+        // gq} reflows up to the next blank line.
+        run_keys(&mut e, "gq}");
+        // Last row past the blank stays untouched.
+        assert_eq!(e.buffer().lines().last().unwrap(), "tail");
+    }
+
+    #[test]
+    fn gq_preserves_paragraph_breaks() {
+        let mut e = editor_with("alpha beta gamma\n\ndelta epsilon zeta");
+        crate::ex::run(&mut e, "set tw=10");
+        run_keys(&mut e, "ggVGgq");
+        // The blank line between the two paragraphs survives the
+        // reflow.
+        let blanks = e.buffer().lines().iter().filter(|l| l.is_empty()).count();
+        assert_eq!(blanks, 1);
+    }
+
+    #[test]
+    fn gqq_undo_restores_original_line() {
+        let mut e = editor_with("a b c d e f g h i j k l m n o p");
+        crate::ex::run(&mut e, "set tw=10");
+        let before: Vec<String> = e.buffer().lines().to_vec();
+        run_keys(&mut e, "gqq");
+        crate::vim::do_undo(&mut e);
+        assert_eq!(e.buffer().lines(), before);
     }
 
     #[test]
