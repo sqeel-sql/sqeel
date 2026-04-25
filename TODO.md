@@ -174,8 +174,11 @@ Today: `:q`, `:q!`, `:w`, `:wq`, `:x`, `:noh`, `:s/`, `:%s/`, `:g/`, `:v/`, `:N`
   the first inserted row. Failures surface as `ExEffect::Error`. Path resolution
   stays the user's responsibility — pass an absolute path or a path relative to
   the process CWD.
-- **`:r !cmd` (L).** Insert shell command output. Powerful but needs a sandbox
-  story; defer.
+- ~~**`:r !cmd` (L).**~~ Done. The `:r` handler peels a leading `!` off the
+  path, runs the rest through `sh -c`, and inserts stdout below the cursor row.
+  Non-zero exit codes surface as `ExEffect::Error` carrying the stderr trim (or
+  "no stderr"). No sandboxing — the user typed the command, same security
+  posture as any other shell action they could run.
 - ~~**`:set` (M).**~~ Done. Added
   `Settings { shiftwidth, tabstop, ignore_case }` on Editor. `:set sw=N`,
   `:set ts=N`, `:set [no]ignorecase` (or `ic`) all work; bare `:set` reports the

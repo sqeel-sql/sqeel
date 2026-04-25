@@ -222,11 +222,44 @@ fn apply_fold_indent(editor: &mut Editor<'_>) -> ExEffect {
 fn apply_read_file(editor: &mut Editor<'_>, path: &str) -> ExEffect {
     use sqeel_buffer::{Edit, Position};
     if path.is_empty() {
-        return ExEffect::Error(":r needs a file path".into());
+        return ExEffect::Error(":r needs a file path or `!cmd`".into());
     }
-    let content = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => return ExEffect::Error(format!("cannot read `{path}`: {e}")),
+    // `:r !cmd` runs `cmd` through `sh -c` and inserts stdout. Same
+    // security posture as running anything from a shell — the user
+    // typed the command themselves.
+    let content = if let Some(cmd) = path.strip_prefix('!') {
+        let cmd = cmd.trim();
+        if cmd.is_empty() {
+            return ExEffect::Error(":r ! needs a shell command".into());
+        }
+        match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
+            Ok(out) if out.status.success() => match String::from_utf8(out.stdout) {
+                Ok(s) => s,
+                Err(_) => return ExEffect::Error("command output was not UTF-8".into()),
+            },
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let trimmed = stderr.trim();
+                let label = if trimmed.is_empty() {
+                    "no stderr".to_string()
+                } else {
+                    trimmed.to_string()
+                };
+                return ExEffect::Error(format!(
+                    "command exited {} ({label})",
+                    out.status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".into())
+                ));
+            }
+            Err(e) => return ExEffect::Error(format!("cannot run `{cmd}`: {e}")),
+        }
+    } else {
+        match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => return ExEffect::Error(format!("cannot read `{path}`: {e}")),
+        }
     };
     // Vim's `:r` inserts after the current row; trailing newline in
     // the file is dropped to avoid a stray blank tail (vim does the
@@ -1431,6 +1464,37 @@ mod tests {
         // Cursor sits on the first inserted row.
         assert_eq!(e.cursor(), (1, 0));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_bang_inserts_command_stdout() {
+        let mut e = new("alpha\nbeta");
+        e.jump_cursor(0, 0);
+        // `echo` is portable — outputs a trailing newline that
+        // apply_read_file strips.
+        assert_eq!(run(&mut e, "r !echo hello"), ExEffect::Ok);
+        assert_eq!(
+            e.buffer().lines(),
+            vec!["alpha".to_string(), "hello".into(), "beta".into()]
+        );
+    }
+
+    #[test]
+    fn read_bang_failing_command_errors() {
+        let mut e = new("hi");
+        match run(&mut e, "r !exit 7") {
+            ExEffect::Error(msg) => assert!(msg.contains("exited 7")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_bang_empty_command_errors() {
+        let mut e = new("hi");
+        match run(&mut e, "r !") {
+            ExEffect::Error(msg) => assert!(msg.contains("shell command")),
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 
     #[test]
