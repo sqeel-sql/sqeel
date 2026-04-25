@@ -559,11 +559,12 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
         // possible. Sticky column then mirrors the *visible* post-Back
         // column so the next vertical motion lands where the user
         // actually sees the cursor — not one cell to the right.
-        let col = ed.textarea.cursor().1;
+        let col = ed.cursor().1;
         if col > 0 {
-            ed.textarea.move_cursor(CursorMove::Back);
+            ed.buffer_mut().move_left(1);
+            ed.push_buffer_cursor_to_textarea();
         }
-        ed.vim.sticky_col = Some(ed.textarea.cursor().1);
+        ed.vim.sticky_col = Some(ed.cursor().1);
         return true;
     }
 
@@ -647,7 +648,7 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
                 // current line's leading whitespace. Cursor shifts
                 // right by the same amount so the user keeps typing
                 // at their logical position.
-                let (row, col) = ed.textarea.cursor();
+                let (row, col) = ed.cursor();
                 indent_rows(ed, row, row, 1);
                 ed.textarea
                     .move_cursor(CursorMove::Jump(row, col + SHIFTWIDTH));
@@ -657,7 +658,7 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
                 // Insert-mode outdent: drop up to one shiftwidth of
                 // leading whitespace. Cursor shifts left by the amount
                 // actually stripped.
-                let (row, col) = ed.textarea.cursor();
+                let (row, col) = ed.cursor();
                 let before_len = ed.textarea.lines()[row].len();
                 outdent_rows(ed, row, row, 1);
                 let after_len = ed.textarea.lines()[row].len();
@@ -897,7 +898,7 @@ fn begin_insert(ed: &mut Editor<'_>, count: usize, reason: InsertReason) {
     } else {
         reason
     };
-    let (row, _) = ed.textarea.cursor();
+    let (row, _) = ed.cursor();
     ed.vim.insert_session = Some(InsertSession {
         count,
         row_min: row,
@@ -963,29 +964,29 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
             return true;
         }
         Key::Char('v') if !input.ctrl && ed.vim.mode == Mode::Normal => {
-            ed.vim.visual_anchor = ed.textarea.cursor();
+            ed.vim.visual_anchor = ed.cursor();
             ed.vim.mode = Mode::Visual;
             return true;
         }
         Key::Char('V') if !input.ctrl && ed.vim.mode == Mode::Normal => {
-            let (row, _) = ed.textarea.cursor();
+            let (row, _) = ed.cursor();
             ed.vim.visual_line_anchor = row;
             ed.vim.mode = Mode::VisualLine;
             return true;
         }
         Key::Char('v') if !input.ctrl && ed.vim.mode == Mode::VisualLine => {
-            ed.vim.visual_anchor = ed.textarea.cursor();
+            ed.vim.visual_anchor = ed.cursor();
             ed.vim.mode = Mode::Visual;
             return true;
         }
         Key::Char('V') if !input.ctrl && ed.vim.mode == Mode::Visual => {
-            let (row, _) = ed.textarea.cursor();
+            let (row, _) = ed.cursor();
             ed.vim.visual_line_anchor = row;
             ed.vim.mode = Mode::VisualLine;
             return true;
         }
         Key::Char('v') if input.ctrl && ed.vim.mode == Mode::Normal => {
-            let cur = ed.textarea.cursor();
+            let cur = ed.cursor();
             ed.vim.block_anchor = cur;
             ed.vim.block_vcol = cur.1;
             ed.vim.mode = Mode::VisualBlock;
@@ -1193,7 +1194,7 @@ fn handle_set_mark(ed: &mut Editor<'_>, input: Input) -> bool {
     if let Key::Char(c) = input.key
         && c.is_ascii_lowercase()
     {
-        ed.vim.marks.insert(c, ed.textarea.cursor());
+        ed.vim.marks.insert(c, ed.cursor());
     }
     true
 }
@@ -1208,18 +1209,22 @@ fn handle_goto_mark(ed: &mut Editor<'_>, input: Input, linewise: bool) -> bool {
     let Some(&(row, col)) = ed.vim.marks.get(&c) else {
         return true;
     };
-    let pre = ed.textarea.cursor();
+    let pre = ed.cursor();
     let (r, c_clamped) = clamp_pos(ed, (row, col));
     if linewise {
-        ed.textarea.move_cursor(CursorMove::Jump(r, 0));
+        ed.buffer_mut()
+            .set_cursor(sqeel_buffer::Position::new(r, 0));
+        ed.push_buffer_cursor_to_textarea();
         move_first_non_whitespace(ed);
     } else {
-        ed.textarea.move_cursor(CursorMove::Jump(r, c_clamped));
+        ed.buffer_mut()
+            .set_cursor(sqeel_buffer::Position::new(r, c_clamped));
+        ed.push_buffer_cursor_to_textarea();
     }
-    if ed.textarea.cursor() != pre {
+    if ed.cursor() != pre {
         push_jump(ed, pre);
     }
-    ed.vim.sticky_col = Some(ed.textarea.cursor().1);
+    ed.vim.sticky_col = Some(ed.cursor().1);
     true
 }
 
@@ -1299,7 +1304,7 @@ fn jump_back(ed: &mut Editor<'_>) {
     let Some(target) = ed.vim.jump_back.pop() else {
         return;
     };
-    let cur = ed.textarea.cursor();
+    let cur = ed.cursor();
     ed.vim.jump_fwd.push(cur);
     let (r, c) = clamp_pos(ed, target);
     ed.textarea.move_cursor(CursorMove::Jump(r, c));
@@ -1312,7 +1317,7 @@ fn jump_forward(ed: &mut Editor<'_>) {
     let Some(target) = ed.vim.jump_fwd.pop() else {
         return;
     };
-    let cur = ed.textarea.cursor();
+    let cur = ed.cursor();
     ed.vim.jump_back.push(cur);
     if ed.vim.jump_back.len() > JUMPLIST_MAX {
         ed.vim.jump_back.remove(0);
@@ -1438,10 +1443,10 @@ fn execute_motion(ed: &mut Editor<'_>, motion: Motion, count: usize) {
         },
         other => other,
     };
-    let pre_pos = ed.textarea.cursor();
+    let pre_pos = ed.cursor();
     let pre_col = pre_pos.1;
     apply_motion_cursor(ed, &motion, count);
-    let post_pos = ed.textarea.cursor();
+    let post_pos = ed.cursor();
     if is_big_jump(&motion) && pre_pos != post_pos {
         push_jump(ed, pre_pos);
     }
@@ -1463,7 +1468,7 @@ fn apply_sticky_col(ed: &mut Editor<'_>, motion: &Motion, pre_col: usize) {
         // Record the desired column so the next vertical motion sees
         // it even if we currently clamped to a shorter row.
         ed.vim.sticky_col = Some(want);
-        let (row, _) = ed.textarea.cursor();
+        let (row, _) = ed.cursor();
         let line_len = ed.textarea.lines()[row].chars().count();
         // Clamp to the last char on non-empty lines (vim normal-mode
         // never parks the cursor one past end of line). Empty lines
@@ -1474,7 +1479,7 @@ fn apply_sticky_col(ed: &mut Editor<'_>, motion: &Motion, pre_col: usize) {
     } else {
         // Horizontal motion or non-motion: sticky column tracks the
         // new cursor column so the *next* vertical motion aims there.
-        ed.vim.sticky_col = Some(ed.textarea.cursor().1);
+        ed.vim.sticky_col = Some(ed.cursor().1);
     }
 }
 
@@ -1877,14 +1882,14 @@ fn handle_after_g(ed: &mut Editor<'_>, input: Input) -> bool {
     match input.key {
         Key::Char('g') => {
             // gg — top / jump to line count.
-            let pre = ed.textarea.cursor();
+            let pre = ed.cursor();
             if count > 1 {
                 ed.textarea.move_cursor(CursorMove::Jump(count - 1, 0));
             } else {
                 ed.textarea.move_cursor(CursorMove::Top);
             }
             move_first_non_whitespace(ed);
-            if ed.textarea.cursor() != pre {
+            if ed.cursor() != pre {
                 push_jump(ed, pre);
             }
         }
@@ -2301,7 +2306,7 @@ fn begin_insert_noundo(ed: &mut Editor<'_>, count: usize, reason: InsertReason) 
     } else {
         reason
     };
-    let (row, _) = ed.textarea.cursor();
+    let (row, _) = ed.cursor();
     ed.vim.insert_session = Some(InsertSession {
         count,
         row_min: row,
@@ -2315,13 +2320,13 @@ fn begin_insert_noundo(ed: &mut Editor<'_>, count: usize, reason: InsertReason) 
 // ─── Operator × Motion application ─────────────────────────────────────────
 
 fn apply_op_with_motion(ed: &mut Editor<'_>, op: Operator, motion: &Motion, count: usize) {
-    let start = ed.textarea.cursor();
+    let start = ed.cursor();
     // Tentatively apply motion to find the endpoint. Operator context
     // so `l` on the last char advances past-last (standard vim
     // exclusive-motion endpoint behaviour), enabling `dl` / `cl` /
     // `yl` to cover the final char.
     apply_motion_cursor_ctx(ed, motion, count, true);
-    let end = ed.textarea.cursor();
+    let end = ed.cursor();
     let kind = motion_kind(motion);
     // Restore cursor before selecting (so Yank leaves cursor at start).
     ed.textarea.move_cursor(CursorMove::Jump(start.0, start.1));
@@ -2512,7 +2517,7 @@ fn order(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize
 // ─── dd/cc/yy ──────────────────────────────────────────────────────────────
 
 fn execute_line_op(ed: &mut Editor<'_>, op: Operator, count: usize) {
-    let (row, col) = ed.textarea.cursor();
+    let (row, col) = ed.cursor();
     let total = ed.textarea.lines().len();
     let end_row = (row + count.saturating_sub(1)).min(total.saturating_sub(1));
 
@@ -2677,7 +2682,7 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                 }
                 Operator::Indent | Operator::Outdent => {
                     ed.push_undo();
-                    let (cursor_row, _) = ed.textarea.cursor();
+                    let (cursor_row, _) = ed.cursor();
                     let bot = cursor_row.max(ed.vim.visual_line_anchor);
                     if op == Operator::Indent {
                         indent_rows(ed, top, bot, 1);
@@ -2725,7 +2730,7 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                 Operator::Indent | Operator::Outdent => {
                     ed.push_undo();
                     let anchor = ed.vim.visual_anchor;
-                    let cursor = ed.textarea.cursor();
+                    let cursor = ed.cursor();
                     let (top, bot) = order(anchor, cursor);
                     if op == Operator::Indent {
                         indent_rows(ed, top.0, bot.0, 1);
@@ -2747,7 +2752,7 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
 /// ragged / empty rows don't collapse the block's width.
 fn block_bounds(ed: &Editor<'_>) -> (usize, usize, usize, usize) {
     let (ar, ac) = ed.vim.block_anchor;
-    let (cr, _) = ed.textarea.cursor();
+    let (cr, _) = ed.cursor();
     let cc = ed.vim.block_vcol;
     let top = ar.min(cr);
     let bot = ar.max(cr);
@@ -2778,7 +2783,7 @@ fn update_block_vcol(ed: &mut Editor<'_>, motion: &Motion) {
         | Motion::Find { .. }
         | Motion::FindRepeat { .. }
         | Motion::MatchBracket => {
-            ed.vim.block_vcol = ed.textarea.cursor().1;
+            ed.vim.block_vcol = ed.cursor().1;
         }
         // Up / Down / FileTop / FileBottom / Search — preserve vcol.
         _ => {}
@@ -3003,7 +3008,7 @@ fn word_text_object(
     inner: bool,
     big: bool,
 ) -> Option<((usize, usize), (usize, usize))> {
-    let (row, col) = ed.textarea.cursor();
+    let (row, col) = ed.cursor();
     let line = ed.textarea.lines().get(row)?;
     let chars: Vec<char> = line.chars().collect();
     if chars.is_empty() {
@@ -3065,7 +3070,7 @@ fn quote_text_object(
     q: char,
     inner: bool,
 ) -> Option<((usize, usize), (usize, usize))> {
-    let (row, col) = ed.textarea.cursor();
+    let (row, col) = ed.cursor();
     let line = ed.textarea.lines().get(row)?;
     let bytes = line.as_bytes();
     let q_byte = q as u8;
@@ -3121,7 +3126,7 @@ fn bracket_text_object(
         '<' => '>',
         _ => return None,
     };
-    let (row, col) = ed.textarea.cursor();
+    let (row, col) = ed.cursor();
     let lines = ed.textarea.lines();
     // Walk backward from cursor to find unbalanced opening.
     let open_pos = find_open_bracket(lines, row, col, open, close)?;
@@ -3219,7 +3224,7 @@ fn advance_pos(lines: &[String], pos: (usize, usize)) -> (usize, usize) {
 }
 
 fn paragraph_text_object(ed: &Editor<'_>, inner: bool) -> Option<((usize, usize), (usize, usize))> {
-    let (row, _) = ed.textarea.cursor();
+    let (row, _) = ed.cursor();
     let lines = ed.textarea.lines();
     if lines.is_empty() {
         return None;
@@ -3690,7 +3695,7 @@ fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
                 ed.mutate(|t| t.insert_str(&text));
                 // Leave insert mode because the original c ended with Esc.
                 if ed.vim.insert_session.take().is_some() {
-                    let (row, col) = ed.textarea.cursor();
+                    let (row, col) = ed.cursor();
                     if col > 0 {
                         let _ = row;
                         ed.textarea.move_cursor(CursorMove::Back);
@@ -3709,7 +3714,7 @@ fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
             if let Some(text) = inserted {
                 ed.mutate(|t| t.insert_str(&text));
                 if ed.vim.insert_session.take().is_some() {
-                    let (row, col) = ed.textarea.cursor();
+                    let (row, col) = ed.cursor();
                     if col > 0 {
                         let _ = row;
                         ed.textarea.move_cursor(CursorMove::Back);
@@ -3728,7 +3733,7 @@ fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
             if let Some(text) = inserted {
                 ed.mutate(|t| t.insert_str(&text));
                 if ed.vim.insert_session.take().is_some() {
-                    let (row, col) = ed.textarea.cursor();
+                    let (row, col) = ed.cursor();
                     if col > 0 {
                         let _ = row;
                         ed.textarea.move_cursor(CursorMove::Back);
