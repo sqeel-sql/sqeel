@@ -217,6 +217,16 @@ pub enum ResultsPane {
     Results(QueryResult),
     Error(String),
     Cancelled,
+    /// Statement that doesn't return a result set — INSERT/UPDATE/
+    /// DELETE/CREATE/DROP/etc. `verb` is the leading SQL keyword
+    /// (uppercase) so the renderer can distinguish DML ("3 rows
+    /// affected") from DDL ("OK"). `rows_affected` comes straight
+    /// from sqlx; DDL typically reports 0 here, which we suppress
+    /// in the render layer.
+    NonQuery {
+        verb: String,
+        rows_affected: u64,
+    },
 }
 
 /// One entry in the results pane's tab bar — the query that produced it and

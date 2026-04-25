@@ -8,6 +8,16 @@ use sqlx::{
 };
 use std::str::FromStr;
 
+/// Outcome of `DbConnection::execute`. Row-returning queries (SELECT,
+/// SHOW, EXPLAIN, …) produce a `Rows` result; statements that don't
+/// produce a result set (INSERT/UPDATE/DELETE, CREATE/DROP/ALTER, …)
+/// produce a `NonQuery` summary the UI can render as a status line
+/// instead of an empty table.
+pub enum ExecOutcome {
+    Rows(QueryResult),
+    NonQuery { verb: String, rows_affected: u64 },
+}
+
 /// Per-engine connection pool. Sqeel dispatches typed queries through the
 /// matching variant so each engine can decode its native column types
 /// (DATETIME, DECIMAL, JSON, BYTEA, UUID, …) without going through `sqlx::Any`.
@@ -73,7 +83,23 @@ impl DbConnection {
             .collect())
     }
 
-    pub async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
+    pub async fn execute(&self, query: &str) -> anyhow::Result<ExecOutcome> {
+        // Non-row statements (INSERT/UPDATE/DELETE/CREATE/DROP/…) go
+        // through sqlx's `execute()` so we can surface rows_affected
+        // in a dedicated results pane instead of pretending the empty
+        // result set means "nothing happened".
+        if let Some(verb) = non_query_verb(query) {
+            let rows_affected = match &self.pool {
+                Pool::MySql(p) => sqlx::query(query).execute(p).await?.rows_affected(),
+                Pool::Pg(p) => sqlx::query(query).execute(p).await?.rows_affected(),
+                Pool::Sqlite(p) => sqlx::query(query).execute(p).await?.rows_affected(),
+            };
+            return Ok(ExecOutcome::NonQuery {
+                verb,
+                rows_affected,
+            });
+        }
+
         let owned;
         let query = match apply_default_limit(query, DEFAULT_ROW_LIMIT) {
             Some(q) => {
@@ -125,11 +151,11 @@ impl DbConnection {
             }
         };
 
-        Ok(QueryResult {
+        Ok(ExecOutcome::Rows(QueryResult {
             columns,
             rows,
             col_widths: vec![],
-        })
+        }))
     }
 
     pub async fn list_databases(&self) -> anyhow::Result<Vec<String>> {
@@ -641,6 +667,34 @@ fn decode_sqlite(row: &sqlx::sqlite::SqliteRow, idx: usize) -> String {
 
 /// Rows added automatically when a SELECT/WITH query has no LIMIT clause.
 pub const DEFAULT_ROW_LIMIT: usize = 100;
+
+/// Returns the leading uppercase keyword if `query` is a non-row
+/// statement (DML / DDL / transaction control / etc), else `None`.
+/// Used by `execute` to dispatch to sqlx's `execute()` and surface
+/// rows_affected instead of an empty result set.
+///
+/// Row-returning verbs we leave for the fetch_all path:
+/// SELECT, WITH, VALUES, SHOW, EXPLAIN, DESC[RIBE], TABLE, PRAGMA.
+/// Anything else with a recognisable verb is treated as non-row.
+/// An unrecognisable / empty query falls through to fetch_all so
+/// sqlx surfaces its own parse error.
+fn non_query_verb(query: &str) -> Option<String> {
+    let stripped = skip_leading_whitespace_and_comments(query.trim_start());
+    let kw = leading_keyword(stripped)?.to_ascii_uppercase();
+    let row_returning = matches!(
+        kw.as_str(),
+        "SELECT"
+            | "WITH"
+            | "VALUES"
+            | "SHOW"
+            | "EXPLAIN"
+            | "DESC"
+            | "DESCRIBE"
+            | "TABLE"
+            | "PRAGMA"
+    );
+    if row_returning { None } else { Some(kw) }
+}
 
 /// If `query` is a top-level SELECT or WITH statement with no LIMIT clause,
 /// return a rewritten query with ` LIMIT <limit>` appended. Returns `None`

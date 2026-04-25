@@ -3773,6 +3773,7 @@ fn extract_results_left_click(
         sqeel_core::state::ResultsPane::Results(_)
             | sqeel_core::state::ResultsPane::Cancelled
             | sqeel_core::state::ResultsPane::Error(_)
+            | sqeel_core::state::ResultsPane::NonQuery { .. }
     ) && has_query;
     if pane_has_query_row
         && y == results_area.y + tab_bar_rows + 3
@@ -3880,7 +3881,50 @@ fn extract_results_left_click(
             }
             None
         }
+        sqeel_core::state::ResultsPane::NonQuery {
+            verb,
+            rows_affected,
+        } => {
+            let content_y = results_area.y + tab_bar_rows;
+            if y < content_y {
+                return None;
+            }
+            let rel_y = (y - content_y) as usize;
+            let query = state
+                .active_result()
+                .map(|t| t.query.clone())
+                .unwrap_or_default();
+            let has_q = !query.trim().is_empty();
+            let body_start = if has_q { 5 } else { 3 };
+            if has_q && rel_y == 3 {
+                return Some((query, "Query", ResultsCursor::Query));
+            }
+            if rel_y >= body_start {
+                return Some((
+                    non_query_summary(verb, *rows_affected),
+                    "Line",
+                    ResultsCursor::MessageLine(0),
+                ));
+            }
+            None
+        }
         _ => None,
+    }
+}
+
+/// One-line summary for the NonQuery results pane. DML verbs report
+/// the affected row count; DDL / transaction control collapse to
+/// "OK · {VERB}" since the row count is meaningless there.
+fn non_query_summary(verb: &str, rows_affected: u64) -> String {
+    let is_dml = matches!(
+        verb,
+        "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "MERGE" | "UPSERT"
+    );
+    if is_dml {
+        let noun = if rows_affected == 1 { "row" } else { "rows" };
+        format!("{verb} OK · {rows_affected} {noun} affected")
+    } else {
+        format!("{verb} OK")
     }
 }
 
@@ -4708,6 +4752,33 @@ fn draw_results(
                 content_area,
                 &title_text,
                 Style::default().fg(ui().results_cancelled),
+                state,
+                body,
+                has_query,
+            );
+        }
+        ResultsPane::NonQuery {
+            verb,
+            rows_affected,
+        } => {
+            let title_text = render_pos_title(state, "Result");
+            let cursor = state.active_result().map(|t| t.cursor);
+            let body_text = non_query_summary(verb, *rows_affected);
+            let title_style = Style::default().fg(ui().results_title_active);
+            let mut st = Style::default().fg(ui().results_loading);
+            if matches!(cursor, Some(ResultsCursor::MessageLine(_))) {
+                st = st.bg(results_cursor_bg(focused));
+            }
+            let body = vec![Line::from(Span::styled(format!(" {body_text}"), st))];
+            let has_query = state
+                .active_result()
+                .map(|t| !t.query.trim().is_empty())
+                .unwrap_or(false);
+            render_framed_pane(
+                f,
+                content_area,
+                &title_text,
+                title_style,
                 state,
                 body,
                 has_query,

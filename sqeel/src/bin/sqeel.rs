@@ -443,7 +443,11 @@ fn saved_ref_from_tab(t: &ResultsTab) -> Option<sqeel_core::config::SavedResultR
             error: None,
             cancelled: true,
         }),
-        P::Loading | P::Empty => None,
+        // NonQuery results aren't worth restoring across launches —
+        // they describe a one-shot statement (CREATE TABLE / INSERT /
+        // …) whose summary loses meaning once the user reopens the
+        // app and the rows_affected count no longer matches reality.
+        P::Loading | P::Empty | P::NonQuery { .. } => None,
     }
 }
 
@@ -596,7 +600,7 @@ fn spawn_executor(
                     let mut s = state.lock().unwrap();
                     s.batch_in_progress = false;
                     match outcome {
-                        Some(Ok(mut r)) => {
+                        Some(Ok(sqeel_core::db::ExecOutcome::Rows(mut r))) => {
                             let filename = s.persist_result(&query, &r);
                             s.push_history(&query);
                             r.compute_col_widths();
@@ -604,6 +608,22 @@ fn spawn_executor(
                             if let Some(tab) = s.result_tabs.get_mut(tab_idx) {
                                 tab.saved_filename = filename;
                             }
+                            if let Some(effect) = parse_ddl(&query) {
+                                s.invalidate_for_ddl(&effect);
+                            }
+                        }
+                        Some(Ok(sqeel_core::db::ExecOutcome::NonQuery {
+                            verb,
+                            rows_affected,
+                        })) => {
+                            s.push_history(&query);
+                            s.finish_result_tab(
+                                tab_idx,
+                                ResultsPane::NonQuery {
+                                    verb,
+                                    rows_affected,
+                                },
+                            );
                             if let Some(effect) = parse_ddl(&query) {
                                 s.invalidate_for_ddl(&effect);
                             }
@@ -642,7 +662,7 @@ fn spawn_executor(
                         let (is_err, stop) = {
                             let mut s = state.lock().unwrap();
                             let (is_err, stop) = match outcome {
-                                Some(Ok(mut r)) => {
+                                Some(Ok(sqeel_core::db::ExecOutcome::Rows(mut r))) => {
                                     let filename = s.persist_result(&query, &r);
                                     s.push_history(&query);
                                     r.compute_col_widths();
@@ -650,6 +670,23 @@ fn spawn_executor(
                                     if let Some(tab) = s.result_tabs.get_mut(tab_idx) {
                                         tab.saved_filename = filename;
                                     }
+                                    if let Some(effect) = parse_ddl(&query) {
+                                        s.invalidate_for_ddl(&effect);
+                                    }
+                                    (false, false)
+                                }
+                                Some(Ok(sqeel_core::db::ExecOutcome::NonQuery {
+                                    verb,
+                                    rows_affected,
+                                })) => {
+                                    s.push_history(&query);
+                                    s.finish_result_tab(
+                                        tab_idx,
+                                        ResultsPane::NonQuery {
+                                            verb,
+                                            rows_affected,
+                                        },
+                                    );
                                     if let Some(effect) = parse_ddl(&query) {
                                         s.invalidate_for_ddl(&effect);
                                     }
