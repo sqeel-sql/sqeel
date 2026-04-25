@@ -385,8 +385,24 @@ impl Buffer {
         // vertical move; subsequent moves read it back so a short
         // row clamping us to col 3 doesn't lose the desired col 12.
         self.set_sticky_col(Some(want));
-        let last_row = self.row_count().saturating_sub(1) as isize;
-        let target_row = (cursor.row as isize + delta).clamp(0, last_row) as usize;
+        // Walk one visible row at a time so closed folds count as one
+        // visual line. Stops at top/bottom of buffer.
+        let mut target_row = cursor.row;
+        if delta < 0 {
+            for _ in 0..(-delta) as usize {
+                match self.prev_visible_row(target_row) {
+                    Some(r) => target_row = r,
+                    None => break,
+                }
+            }
+        } else {
+            for _ in 0..delta as usize {
+                match self.next_visible_row(target_row) {
+                    Some(r) => target_row = r,
+                    None => break,
+                }
+            }
+        }
         let line = self.line(target_row).unwrap_or("");
         let max_col = last_col(line);
         let target_col = want.min(max_col);
@@ -659,6 +675,38 @@ mod tests {
         b.move_down(1);
         // Sticky col 7 restored on the longer row.
         assert_eq!(at(&b), Position::new(2, 7));
+    }
+
+    #[test]
+    fn move_down_skips_closed_fold() {
+        let mut b = Buffer::from_str("a\nb\nc\nd\ne");
+        b.add_fold(1, 3, true);
+        // From row 0, `j` should land on row 4 — the fold collapses
+        // rows 1..=3 into a single visual line at row 1.
+        b.move_down(1);
+        assert_eq!(at(&b).row, 1);
+        b.move_down(1);
+        assert_eq!(at(&b).row, 4);
+    }
+
+    #[test]
+    fn move_up_skips_closed_fold() {
+        let mut b = Buffer::from_str("a\nb\nc\nd\ne");
+        b.add_fold(1, 3, true);
+        b.set_cursor(Position::new(4, 0));
+        b.move_up(1);
+        assert_eq!(at(&b).row, 1);
+        b.move_up(1);
+        assert_eq!(at(&b).row, 0);
+    }
+
+    #[test]
+    fn open_fold_is_walked_normally() {
+        let mut b = Buffer::from_str("a\nb\nc\nd\ne");
+        b.add_fold(1, 3, false);
+        // Open fold: every row is visible, plain row-by-row stepping.
+        b.move_down(2);
+        assert_eq!(at(&b).row, 2);
     }
 
     #[test]

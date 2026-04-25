@@ -162,6 +162,31 @@ impl crate::Buffer {
         self.folds.iter().any(|f| f.hides(row))
     }
 
+    /// First visible row strictly after `row`, skipping any rows hidden
+    /// by closed folds. Returns `None` past the end of the buffer.
+    /// Drives fold-aware `j`: closed folds count as a single visual line.
+    pub fn next_visible_row(&self, row: usize) -> Option<usize> {
+        let last = self.row_count().saturating_sub(1);
+        if last == 0 && row == 0 {
+            return None;
+        }
+        let mut r = row.checked_add(1)?;
+        while r <= last && self.is_row_hidden(r) {
+            r += 1;
+        }
+        (r <= last).then_some(r)
+    }
+
+    /// First visible row strictly before `row`, skipping hidden rows.
+    /// Returns `None` past the top of the buffer.
+    pub fn prev_visible_row(&self, row: usize) -> Option<usize> {
+        let mut r = row.checked_sub(1)?;
+        while self.is_row_hidden(r) {
+            r = r.checked_sub(1)?;
+        }
+        Some(r)
+    }
+
     /// Drop every fold that touches `[start_row, end_row]`. Edit
     /// paths call this to invalidate folds whose contents the user
     /// just mutated — vim's "edits inside a fold open it" behaviour.

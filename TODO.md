@@ -19,11 +19,11 @@ toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
   `zfap` / `zfiw`), `g`-prefix chords (`zfgg`), and inner counts (`zf3j`) all
   work for free. Visual `zf` keeps its inline path; `Operator::Fold` is
   unreachable from `apply_visual_operator`.
-- **Fold-aware `j` / `k` (M).** Closed folds should count as one visual line.
-  Add `Buffer::next_visible_row(row)` and `prev_visible_row(row)` (skip rows
-  where `is_row_hidden`); rewrite `Buffer::move_up` / `move_down` to use them.
-  Mind cursor placement — landing on a hidden row makes the cursor invisible
-  (already a latent bug if the user closes a fold over the cursor).
+- ~~**Fold-aware `j` / `k` (M).**~~ Done. Added `Buffer::next_visible_row` /
+  `prev_visible_row`; `move_vertical` now walks one visible row at a time so
+  closed folds count as a single visual line. Cursor-on-hidden-row latent bug
+  still exists but the new helpers handle it gracefully (next_visible from a
+  hidden row still walks past the fold).
 - **`foldmethod=indent` (M).** Auto-derive folds from leading- whitespace runs.
   Triggered manually via a new ex command (`:foldindent`?) since
   auto-fold-on-edit is expensive. Drop into `Buffer::add_fold` for each run.
@@ -98,8 +98,9 @@ We support some `OpTextObj` chords. Audit + fill gaps:
 
 - **`(` / `)` — sentence motions (M).** Same idea as `{`/`}`, but sentence
   splitter. Defer until `is`/`as` lands.
-- **`gM` (S).** Halfway across the longest line of the screen. Niche — skip
-  until someone asks.
+- ~~**`gM` (S).**~~ Done. Jumps to `floor(chars / 2)` of the current line.
+  (Implemented per current-line midpoint, not the longest-screen-line variant —
+  matches vim's documented `gM` behaviour.)
 - ~~**`*` / `#` already exist; add `g*` / `g#` (S).**~~ Done.
   `Motion::WordAtCursor` now carries a `whole_word` flag; `*` / `#` set it, `g*`
   / `g#` drop it for substring matches.

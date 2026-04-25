@@ -224,6 +224,9 @@ pub enum Motion {
     ViewportBottom,
     /// `g_` — last non-blank char on the line.
     LastNonBlank,
+    /// `gM` — cursor to the middle char column of the current line
+    /// (`floor(chars / 2)`). Vim's variant ignoring screen wrap.
+    LineMiddle,
     /// `{` — previous paragraph (preceding blank line, or top).
     ParagraphPrev,
     /// `}` — next paragraph (following blank line, or bottom).
@@ -1998,6 +2001,18 @@ fn apply_motion_cursor_ctx(ed: &mut Editor<'_>, motion: &Motion, count: usize, a
             ed.buffer_mut().move_last_non_blank();
             ed.push_buffer_cursor_to_textarea();
         }
+        Motion::LineMiddle => {
+            let row = ed.cursor().0;
+            let line_chars = ed
+                .buffer()
+                .line(row)
+                .map(|l| l.chars().count())
+                .unwrap_or(0);
+            // Vim's `gM`: column = floor(chars / 2). Empty / single-char
+            // lines stay at col 0.
+            let target = line_chars / 2;
+            ed.jump_cursor(row, target);
+        }
         Motion::ParagraphPrev => {
             ed.buffer_mut().move_paragraph_prev(count);
             ed.push_buffer_cursor_to_textarea();
@@ -2277,6 +2292,8 @@ fn handle_after_g(ed: &mut Editor<'_>, input: Input) -> bool {
         Key::Char('E') => execute_motion(ed, Motion::BigWordEndBack, count),
         // `g_` — last non-blank on the line.
         Key::Char('_') => execute_motion(ed, Motion::LastNonBlank, count),
+        // `gM` — middle char column of the current line.
+        Key::Char('M') => execute_motion(ed, Motion::LineMiddle, count),
         // `gv` — re-enter the last visual selection.
         Key::Char('v') => {
             if let Some(snap) = ed.vim.last_visual {
@@ -6110,6 +6127,30 @@ mod tests {
         run_keys(&mut e, "M");
         // 10-row viewport: middle is top + 4.
         assert_eq!(e.cursor().0, top + 4);
+    }
+
+    #[test]
+    fn g_capital_m_lands_at_line_midpoint() {
+        let mut e = editor_with("hello world!"); // 12 chars
+        run_keys(&mut e, "gM");
+        // floor(12 / 2) = 6.
+        assert_eq!(e.cursor(), (0, 6));
+    }
+
+    #[test]
+    fn g_capital_m_on_empty_line_stays_at_zero() {
+        let mut e = editor_with("");
+        run_keys(&mut e, "gM");
+        assert_eq!(e.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn g_capital_m_uses_current_line_only() {
+        // Each line's midpoint is independent of others.
+        let mut e = editor_with("a\nlonglongline"); // line 1: 12 chars
+        e.jump_cursor(1, 0);
+        run_keys(&mut e, "gM");
+        assert_eq!(e.cursor(), (1, 6));
     }
 
     #[test]
