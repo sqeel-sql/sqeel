@@ -14,11 +14,11 @@ area, ranked **S/M/L** by effort. Pick a chunk, work it, keep tests green.
 Folding shipped manually — selection-based `zf`, the open/close/
 toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
 
-- ~~**`zf{motion}` in normal mode (S).**~~ Done. Added `Pending::FoldMotion`;
-  `zf` outside visual arms it, the next motion (with optional count, e.g.
-  `zf3j`) executes and the resulting row span becomes a closed fold. Cursor
-  restores to where it started. Compound motions like `gg` are not supported
-  (single-char motion only).
+- ~~**`zf{motion}` in normal mode (S).**~~ Done. Refactored as `Operator::Fold`
+  so it rides the existing operator pipeline: motions, text objects (`zfip` /
+  `zfap` / `zfiw`), `g`-prefix chords (`zfgg`), and inner counts (`zf3j`) all
+  work for free. Visual `zf` keeps its inline path; `Operator::Fold` is
+  unreachable from `apply_visual_operator`.
 - **Fold-aware `j` / `k` (M).** Closed folds should count as one visual line.
   Add `Buffer::next_visible_row(row)` and `prev_visible_row(row)` (skip rows
   where `is_row_hidden`); rewrite `Buffer::move_up` / `move_down` to use them.

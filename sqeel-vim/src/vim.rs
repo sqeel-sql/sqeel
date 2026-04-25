@@ -144,10 +144,6 @@ enum Pending {
     /// `count` is the prefix multiplier (`3@a` plays the macro 3
     /// times); 0 means "no prefix" and is treated as 1.
     PlayMacroTarget { count: usize },
-    /// `zf` in normal mode — waiting for a motion. The next motion's
-    /// row span (`min(start_row, end_row)..=max(...)`) becomes a fold.
-    /// `count1` is any count typed before `zf`.
-    FoldMotion { count1: usize },
 }
 
 // ─── Operator / Motion / TextObject ────────────────────────────────────────
@@ -174,6 +170,10 @@ pub enum Operator {
     /// `<{motion}` — outdent the line range (remove up to
     /// `shiftwidth` leading spaces per line).
     Outdent,
+    /// `zf{motion}` / `zf{textobj}` / Visual `zf` — create a closed
+    /// fold spanning the row range. Doesn't mutate the buffer text;
+    /// cursor restores to the operator's start position.
+    Fold,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1178,7 +1178,6 @@ fn step_normal(ed: &mut Editor<'_>, input: Input) -> bool {
         Pending::SelectRegister => return handle_select_register(ed, input),
         Pending::RecordMacroTarget => return handle_record_macro_target(ed, input),
         Pending::PlayMacroTarget { count } => return handle_play_macro_target(ed, input, count),
-        Pending::FoldMotion { count1 } => return handle_fold_motion(ed, input, count1),
         Pending::None => {}
     }
 
@@ -2113,20 +2112,23 @@ fn handle_after_op(ed: &mut Editor<'_>, input: Input, op: Operator, count1: usiz
         return true;
     }
 
-    // Same-letter: dd / cc / yy / gUU / guu / g~~ / >> / <<.
+    // Same-letter: dd / cc / yy / gUU / guu / g~~ / >> / <<. Fold has
+    // no doubled form in vim — `zfzf` is two `zf` chords, not a line
+    // op — so skip the branch entirely.
     let double_ch = match op {
-        Operator::Delete => 'd',
-        Operator::Change => 'c',
-        Operator::Yank => 'y',
-        Operator::Indent => '>',
-        Operator::Outdent => '<',
-        Operator::Uppercase => 'U',
-        Operator::Lowercase => 'u',
-        Operator::ToggleCase => '~',
+        Operator::Delete => Some('d'),
+        Operator::Change => Some('c'),
+        Operator::Yank => Some('y'),
+        Operator::Indent => Some('>'),
+        Operator::Outdent => Some('<'),
+        Operator::Uppercase => Some('U'),
+        Operator::Lowercase => Some('u'),
+        Operator::ToggleCase => Some('~'),
+        Operator::Fold => None,
     };
     if let Key::Char(c) = input.key
         && !input.ctrl
-        && c == double_ch
+        && Some(c) == double_ch
     {
         let count2 = take_count(&mut ed.vim);
         let total = count1.max(1) * count2.max(1);
@@ -2422,48 +2424,19 @@ fn handle_after_z(ed: &mut Editor<'_>, input: Input) -> bool {
                 ed.buffer_mut().add_fold(top, bot, true);
                 ed.vim.mode = Mode::Normal;
             } else {
-                // `zf{motion}` — wait for the motion. The motion's
-                // resulting row span becomes the fold.
+                // `zf{motion}` / `zf{textobj}` — route through the
+                // operator pipeline. `Operator::Fold` reuses every
+                // motion / text-object / `g`-prefix branch the other
+                // operators get.
                 let count = take_count(&mut ed.vim);
-                ed.vim.pending = Pending::FoldMotion { count1: count };
+                ed.vim.pending = Pending::Op {
+                    op: Operator::Fold,
+                    count1: count,
+                };
             }
         }
         _ => {}
     }
-    true
-}
-
-/// `zf{motion}` body. Parses the motion, executes it to discover the
-/// destination row, restores the cursor, then folds the spanned rows.
-fn handle_fold_motion(ed: &mut Editor<'_>, input: Input, count1: usize) -> bool {
-    // Inner count after `zf` (e.g. `zf3j`): accumulate digits.
-    if let Key::Char(d @ '0'..='9') = input.key
-        && (count1 > 0 || d != '0')
-    {
-        ed.vim.count = ed
-            .vim
-            .count
-            .saturating_mul(10)
-            .saturating_add(d.to_digit(10).unwrap() as usize);
-        ed.vim.pending = Pending::FoldMotion { count1 };
-        return true;
-    }
-    let inner = take_count(&mut ed.vim);
-    let count = count1.max(1).saturating_mul(inner.max(1));
-    let Some(motion) = parse_motion(&input) else {
-        return true;
-    };
-    let start_row = ed.cursor().0;
-    let start_cursor = ed.cursor();
-    execute_motion(ed, motion, count);
-    let end_row = ed.cursor().0;
-    let top = start_row.min(end_row);
-    let bot = start_row.max(end_row);
-    if bot >= top {
-        ed.buffer_mut().add_fold(top, bot, true);
-    }
-    // Vim leaves the cursor at the fold start; matches Visual `zf` too.
-    ed.jump_cursor(start_cursor.0, start_cursor.1);
     true
 }
 
@@ -2925,6 +2898,18 @@ fn run_operator_over_range(
             }
             ed.vim.mode = Mode::Normal;
         }
+        Operator::Fold => {
+            // Always linewise — fold the spanned rows regardless of the
+            // motion's natural kind. Cursor lands on `top.0` to mirror
+            // the visual `zf` path.
+            if bot.0 >= top.0 {
+                ed.buffer_mut().add_fold(top.0, bot.0, true);
+            }
+            ed.buffer_mut()
+                .set_cursor(sqeel_buffer::Position::new(top.0, top.1));
+            ed.push_buffer_cursor_to_textarea();
+            ed.vim.mode = Mode::Normal;
+        }
     }
 }
 
@@ -3126,6 +3111,8 @@ fn execute_line_op(ed: &mut Editor<'_>, op: Operator, count: usize) {
             }
             ed.vim.mode = Mode::Normal;
         }
+        // No doubled form — `zfzf` is two consecutive `zf` chords.
+        Operator::Fold => unreachable!("Fold has no line-op double"),
     }
 }
 
@@ -3205,6 +3192,9 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                     }
                     ed.vim.mode = Mode::Normal;
                 }
+                // Visual `zf` is handled inline in `handle_after_z`,
+                // never routed through this dispatcher.
+                Operator::Fold => unreachable!("Visual zf takes its own path"),
             }
         }
         Mode::Visual => {
@@ -3253,6 +3243,7 @@ fn apply_visual_operator(ed: &mut Editor<'_>, op: Operator) {
                     }
                     ed.vim.mode = Mode::Normal;
                 }
+                Operator::Fold => unreachable!("Visual zf takes its own path"),
             }
         }
         Mode::VisualBlock => apply_block_operator(ed, op),
@@ -3368,6 +3359,7 @@ fn apply_block_operator(ed: &mut Editor<'_>, op: Operator) {
             }
             ed.vim.mode = Mode::Normal;
         }
+        Operator::Fold => unreachable!("Visual zf takes its own path"),
     }
 }
 
@@ -6662,6 +6654,53 @@ mod tests {
         let f = e.buffer().folds()[0];
         assert_eq!(f.start_row, 1);
         assert_eq!(f.end_row, 4);
+    }
+
+    #[test]
+    fn zfgg_folds_to_top_via_operator_pipeline() {
+        let mut e = editor_with("a\nb\nc\nd\ne");
+        e.jump_cursor(3, 0);
+        // `gg` is a 2-key chord (Pending::OpG path) — `zfgg` works
+        // because `zf` arms `Pending::Op { Fold }` which already knows
+        // how to wait for `g` then `g`.
+        run_keys(&mut e, "zfgg");
+        let f = e.buffer().folds()[0];
+        assert_eq!(f.start_row, 0);
+        assert_eq!(f.end_row, 3);
+    }
+
+    #[test]
+    fn zfip_folds_paragraph_via_text_object() {
+        let mut e = editor_with("alpha\nbeta\ngamma\n\ndelta\nepsilon");
+        e.jump_cursor(1, 0);
+        // `ip` is a text object — same operator pipeline routes it.
+        run_keys(&mut e, "zfip");
+        assert_eq!(e.buffer().folds().len(), 1);
+        let f = e.buffer().folds()[0];
+        assert_eq!(f.start_row, 0);
+        assert_eq!(f.end_row, 2);
+    }
+
+    #[test]
+    fn zfap_folds_paragraph_with_trailing_blank() {
+        let mut e = editor_with("alpha\nbeta\ngamma\n\ndelta");
+        e.jump_cursor(0, 0);
+        // `ap` includes the trailing blank line.
+        run_keys(&mut e, "zfap");
+        let f = e.buffer().folds()[0];
+        assert_eq!(f.start_row, 0);
+        assert_eq!(f.end_row, 3);
+    }
+
+    #[test]
+    fn zf_paragraph_motion_folds_to_blank() {
+        let mut e = editor_with("alpha\nbeta\n\ngamma");
+        e.jump_cursor(0, 0);
+        // `}` jumps to the blank-line boundary; fold spans rows 0..=2.
+        run_keys(&mut e, "zf}");
+        let f = e.buffer().folds()[0];
+        assert_eq!(f.start_row, 0);
+        assert_eq!(f.end_row, 2);
     }
 
     #[test]
