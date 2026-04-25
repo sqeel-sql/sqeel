@@ -13,20 +13,14 @@ use sqeel_core::{
 };
 use sqeel_tui::TuiProvider;
 
-const SAMPLE_QUERY: &str = "-- sqeel sandbox sample
--- Run this with Ctrl-Enter (or :w then :run) to bootstrap
--- a `users` table in the sandbox SQLite DB.
-
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+const SAMPLE_QUERY: &str = "CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    email TEXT NOT NULL,
+    display_name TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO users (email, display_name) VALUES
-    ('alice@example.com', 'Alice'),
-    ('bob@example.com', 'Bob');
+INSERT INTO users (email, display_name) VALUES ('alice@example.com', 'Alice');
+INSERT INTO users (email, display_name) VALUES ('bob@example.com', 'Bob');
 
 SELECT * FROM users;
 ";
@@ -36,10 +30,10 @@ SELECT * FROM users;
 /// user lands in a working state without touching their real
 /// `~/.config/sqeel` or `~/.local/share/sqeel`.
 ///
-/// The tempdir uses [`tempfile::Builder::keep`] so it survives
-/// the process — clean it up by hand (`rm -rf /tmp/sqeel-sandbox-*`)
-/// or just let the OS reap `/tmp` on next reboot.
-fn bootstrap_sandbox() -> anyhow::Result<()> {
+/// Returns the sandbox root so `main()` can prompt for cleanup on
+/// exit. The tempdir uses [`tempfile::Builder::keep`] so the dir
+/// survives the process unless the user opts in to deletion.
+fn bootstrap_sandbox() -> anyhow::Result<PathBuf> {
     let tmp = tempfile::Builder::new()
         .prefix("sqeel-sandbox-")
         .tempdir()?;
@@ -80,7 +74,33 @@ fn bootstrap_sandbox() -> anyhow::Result<()> {
     sqeel_core::config::set_config_dir_override(config);
     sqeel_core::persistence::set_data_dir_override(data);
     eprintln!("sqeel sandbox: {}", root.display());
-    Ok(())
+    Ok(root)
+}
+
+/// Print a stderr y/N prompt and read a single line of stdin.
+/// Returns true iff the user typed `y` or `Y` (with optional
+/// whitespace). Default is "no" — Enter or any other key keeps
+/// the dir intact so a misclick can't nuke the user's work.
+fn prompt_yes_no(question: &str) -> bool {
+    use std::io::{BufRead, Write};
+    eprint!("{question} [y/N]: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim(), "y" | "Y")
+}
+
+/// Best-effort cleanup of the sandbox dir. Logged failures don't
+/// surface as a process error — the user's work in the parent shell
+/// shouldn't die because `/tmp` is wedged.
+fn cleanup_sandbox(root: &std::path::Path) {
+    if let Err(e) = std::fs::remove_dir_all(root) {
+        eprintln!("sqeel sandbox: cleanup failed for {}: {e}", root.display());
+    } else {
+        eprintln!("sqeel sandbox: removed {}", root.display());
+    }
 }
 
 #[derive(Parser)]
@@ -109,14 +129,17 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
-    if args.sandbox {
-        bootstrap_sandbox()?;
+    let sandbox_root: Option<PathBuf> = if args.sandbox {
+        let root = bootstrap_sandbox()?;
         // Auto-select the seeded connection so first launch lands on
         // a working pane instead of the empty connection picker.
         if args.connection.is_none() && args.url.is_none() {
             args.connection = Some("sample".into());
         }
-    }
+        Some(root)
+    } else {
+        None
+    };
     let state = AppState::new();
     state.lock().unwrap().debug_mode = args.debug;
 
@@ -358,6 +381,21 @@ fn main() -> anyhow::Result<()> {
     });
 
     TuiProvider::run(state.clone())?;
+
+    // Sandbox-cleanup prompt. The TUI has surrendered the terminal,
+    // so a plain stderr prompt + stdin read is fine — the user is
+    // back at their shell-style cursor.
+    if let Some(root) = sandbox_root {
+        eprintln!("\nsqeel sandbox: {}", root.display());
+        if prompt_yes_no("Delete sandbox dir?") {
+            cleanup_sandbox(&root);
+        } else {
+            eprintln!(
+                "sqeel sandbox: kept at {} — `rm -rf` it when done.",
+                root.display()
+            );
+        }
+    }
     Ok(())
 }
 
