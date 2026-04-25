@@ -47,7 +47,7 @@ use sqeel_core::{
     schema::{self, SchemaItemKind, SchemaTreeItem},
     state::{AddConnectionField, Focus, KeybindingMode, ResultsCursor, ResultsPane, VimMode},
 };
-use sqeel_vim::{Editor, GutterSign, paint_gutter_signs};
+use sqeel_vim::Editor;
 use theme::ui;
 
 /// Bundle of schema-sidebar search state: query string, whether the input box has
@@ -4182,6 +4182,29 @@ fn draw_editor(
         width: digits.saturating_add(2),
         style: Style::default().fg(ui().editor_line_num),
     };
+    // Gutter diagnostic signs: highest severity per row wins
+    // (error > warning). Painted by `BufferView` as part of its
+    // gutter pass — no post-render overlay.
+    let signs: Vec<sqeel_buffer::Sign> = state
+        .lsp_diagnostics
+        .iter()
+        .filter_map(|d| match d.severity {
+            lsp_types::DiagnosticSeverity::ERROR => Some(sqeel_buffer::Sign {
+                row: d.line as usize,
+                ch: '●',
+                style: Style::default().fg(ui().status_diag_error),
+                priority: 2,
+            }),
+            lsp_types::DiagnosticSeverity::WARNING => Some(sqeel_buffer::Sign {
+                row: d.line as usize,
+                ch: '⚠',
+                style: Style::default().fg(ui().status_diag_warning),
+                priority: 1,
+            }),
+            _ => None,
+        })
+        .collect();
+
     let style_table: Vec<Style> = editor.style_table().to_vec();
     let resolver = move |id: u32| style_table.get(id as usize).copied().unwrap_or_default();
     let selection = editor.buffer_selection();
@@ -4190,43 +4213,15 @@ fn draw_editor(
         selection,
         resolver: &resolver,
         cursor_line_bg: Style::default().bg(cursor_line_bg),
-        // Selection paint uses REVERSED to match the previous post-
-        // render overlays (paint_char/line/block_overlay) — same
-        // visual outcome on top of any syntax fg.
         selection_bg: Style::default().add_modifier(Modifier::REVERSED),
-        // Real terminal cursor handles cursor display — keep the
-        // cell cursor invisible by blending it into cursor-line bg.
         cursor_style: Style::default().bg(cursor_line_bg),
         gutter: Some(gutter),
         search_bg: Style::default()
             .bg(ui().editor_search_bg)
             .fg(ui().editor_search_fg),
+        signs: &signs,
     };
     f.render_widget(view, chunks[1]);
-
-    // Gutter diagnostic signs: paint a severity marker in the leftmost
-    // gutter cell for any row with an LSP diagnostic. Highest severity
-    // wins per row (error > warning).
-    let gutter_signs: Vec<GutterSign> = state
-        .lsp_diagnostics
-        .iter()
-        .filter_map(|d| match d.severity {
-            lsp_types::DiagnosticSeverity::ERROR => Some(GutterSign {
-                row: d.line as usize,
-                ch: '●',
-                fg: ui().status_diag_error,
-                priority: 2,
-            }),
-            lsp_types::DiagnosticSeverity::WARNING => Some(GutterSign {
-                row: d.line as usize,
-                ch: '⚠',
-                fg: ui().status_diag_warning,
-                priority: 1,
-            }),
-            _ => None,
-        })
-        .collect();
-    paint_gutter_signs(f, &editor.textarea, chunks[1], &gutter_signs);
 
     if let Some(msg) = diag_line {
         f.render_widget(

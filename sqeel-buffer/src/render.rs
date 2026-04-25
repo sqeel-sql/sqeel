@@ -56,6 +56,11 @@ pub struct BufferView<'a, R: StyleResolver> {
     /// (read from [`Buffer::search_pattern`]). `Style::default()` to
     /// disable.
     pub search_bg: Style,
+    /// Per-row gutter signs (LSP diagnostic dots, git diff markers,
+    /// …). Painted into the leftmost gutter column after the line
+    /// number, so they overwrite the leading space tui-style gutters
+    /// reserve. Highest-priority sign per row wins.
+    pub signs: &'a [Sign],
 }
 
 /// Configuration for the line-number gutter rendered to the left of
@@ -66,6 +71,18 @@ pub struct BufferView<'a, R: StyleResolver> {
 pub struct Gutter {
     pub width: u16,
     pub style: Style,
+}
+
+/// Single-cell marker painted into the leftmost gutter column for a
+/// document row. Used by hosts to surface LSP diagnostics, git diff
+/// signs, etc. Higher `priority` wins when multiple signs land on
+/// the same row.
+#[derive(Debug, Clone, Copy)]
+pub struct Sign {
+    pub row: usize,
+    pub ch: char,
+    pub style: Style,
+    pub priority: u8,
 }
 
 impl<R: StyleResolver> Widget for BufferView<'_, R> {
@@ -94,6 +111,7 @@ impl<R: StyleResolver> Widget for BufferView<'_, R> {
             let is_cursor_row = doc_row == cursor.row;
             if let Some(gutter) = self.gutter {
                 self.paint_gutter(term_buf, area, screen_row as u16, doc_row, gutter);
+                self.paint_signs(term_buf, area, screen_row as u16, doc_row);
             }
             let search_ranges = self.row_search_ranges(line);
             self.paint_row(
@@ -127,6 +145,23 @@ impl<R: StyleResolver> BufferView<'_, R> {
                 (start, end)
             })
             .collect()
+    }
+
+    fn paint_signs(&self, term_buf: &mut TermBuffer, area: Rect, screen_row: u16, doc_row: usize) {
+        let Some(sign) = self
+            .signs
+            .iter()
+            .filter(|s| s.row == doc_row)
+            .max_by_key(|s| s.priority)
+        else {
+            return;
+        };
+        let y = area.y + screen_row;
+        let x = area.x;
+        if let Some(cell) = term_buf.cell_mut((x, y)) {
+            cell.set_char(sign.ch);
+            cell.set_style(sign.style);
+        }
     }
 
     fn paint_gutter(
@@ -294,6 +329,7 @@ mod tests {
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
             search_bg: Style::default(),
+            signs: &[],
         };
         let term = run_render(view, 20, 5);
         assert_eq!(term.cell((0, 0)).unwrap().symbol(), "h");
@@ -317,6 +353,7 @@ mod tests {
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
             search_bg: Style::default(),
+            signs: &[],
         };
         let term = run_render(view, 10, 1);
         let cursor_cell = term.cell((1, 0)).unwrap();
@@ -341,6 +378,7 @@ mod tests {
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
             search_bg: Style::default(),
+            signs: &[],
         };
         let term = run_render(view, 10, 1);
         assert!(term.cell((0, 0)).unwrap().bg != Color::Blue);
@@ -373,6 +411,7 @@ mod tests {
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
             search_bg: Style::default(),
+            signs: &[],
         };
         let term = run_render(view, 20, 1);
         for x in 0..6 {
@@ -397,6 +436,7 @@ mod tests {
                 style: Style::default().fg(Color::Yellow),
             }),
             search_bg: Style::default(),
+            signs: &[],
         };
         let term = run_render(view, 10, 3);
         // Width 4 = 3 number cells + 1 spacer; right-aligned "  1".
@@ -424,6 +464,7 @@ mod tests {
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
             search_bg: Style::default().bg(Color::Magenta),
+            signs: &[],
         };
         let term = run_render(view, 20, 1);
         for x in 0..3 {
@@ -434,6 +475,46 @@ mod tests {
         for x in 8..11 {
             assert_eq!(term.cell((x, 0)).unwrap().bg, Color::Magenta);
         }
+    }
+
+    #[test]
+    fn highest_priority_sign_wins_per_row_and_overwrites_gutter() {
+        let mut b = Buffer::from_str("a\nb\nc");
+        b.viewport_mut().width = 10;
+        b.viewport_mut().height = 3;
+        let signs = [
+            Sign {
+                row: 0,
+                ch: 'W',
+                style: Style::default().fg(Color::Yellow),
+                priority: 1,
+            },
+            Sign {
+                row: 0,
+                ch: 'E',
+                style: Style::default().fg(Color::Red),
+                priority: 2,
+            },
+        ];
+        let view = BufferView {
+            buffer: &b,
+            selection: None,
+            resolver: &(no_styles as fn(u32) -> Style),
+            cursor_line_bg: Style::default(),
+            selection_bg: Style::default().bg(Color::Blue),
+            cursor_style: Style::default().add_modifier(Modifier::REVERSED),
+            gutter: Some(Gutter {
+                width: 3,
+                style: Style::default().fg(Color::DarkGray),
+            }),
+            search_bg: Style::default(),
+            signs: &signs,
+        };
+        let term = run_render(view, 10, 3);
+        assert_eq!(term.cell((0, 0)).unwrap().symbol(), "E");
+        assert_eq!(term.cell((0, 0)).unwrap().fg, Color::Red);
+        // Row 1 has no sign — leftmost cell stays as gutter content.
+        assert_ne!(term.cell((0, 1)).unwrap().symbol(), "E");
     }
 
     #[test]
@@ -451,6 +532,7 @@ mod tests {
             cursor_style: Style::default().add_modifier(Modifier::REVERSED),
             gutter: None,
             search_bg: Style::default(),
+            signs: &[],
         };
         let term = run_render(view, 4, 1);
         assert_eq!(term.cell((0, 0)).unwrap().symbol(), "d");
