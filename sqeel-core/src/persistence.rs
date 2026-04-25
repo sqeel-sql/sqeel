@@ -1,7 +1,21 @@
 use crate::state::QueryResult;
 use std::path::PathBuf;
 
+/// Process-wide override for the data dir, set by `--sandbox` so
+/// dev-mode runs don't touch the user's real
+/// `~/.local/share/sqeel/`. `None` (the default) falls back to
+/// `dirs::data_dir()`.
+static DATA_DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Install a sandbox data dir. Idempotent — first call wins.
+pub fn set_data_dir_override(path: PathBuf) {
+    let _ = DATA_DIR_OVERRIDE.set(path);
+}
+
 pub fn data_dir() -> Option<PathBuf> {
+    if let Some(p) = DATA_DIR_OVERRIDE.get() {
+        return Some(p.clone());
+    }
     dirs::data_dir().map(|d| d.join("sqeel"))
 }
 

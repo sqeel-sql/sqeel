@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -11,6 +12,76 @@ use sqeel_core::{
     state::{QueryRequest, ResultsPane, ResultsTab, SchemaLoadRequest},
 };
 use sqeel_tui::TuiProvider;
+
+const SAMPLE_QUERY: &str = "-- sqeel sandbox sample
+-- Run this with Ctrl-Enter (or :w then :run) to bootstrap
+-- a `users` table in the sandbox SQLite DB.
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO users (email, display_name) VALUES
+    ('alice@example.com', 'Alice'),
+    ('bob@example.com', 'Bob');
+
+SELECT * FROM users;
+";
+
+/// Repoint sqeel's config + data dirs at a fresh tempdir, then seed
+/// a `sample` SQLite connection + a sample `.sql` buffer so the
+/// user lands in a working state without touching their real
+/// `~/.config/sqeel` or `~/.local/share/sqeel`.
+///
+/// The tempdir uses [`tempfile::Builder::keep`] so it survives
+/// the process — clean it up by hand (`rm -rf /tmp/sqeel-sandbox-*`)
+/// or just let the OS reap `/tmp` on next reboot.
+fn bootstrap_sandbox() -> anyhow::Result<()> {
+    let tmp = tempfile::Builder::new()
+        .prefix("sqeel-sandbox-")
+        .tempdir()?;
+    let root: PathBuf = tmp.keep();
+    let config = root.join("config");
+    let data = root.join("data");
+    let queries = data.join("queries");
+    std::fs::create_dir_all(config.join("conns"))?;
+    std::fs::create_dir_all(&queries)?;
+    std::fs::create_dir_all(data.join("results"))?;
+
+    // Seed a sample SQLite connection pointing at a fresh DB file.
+    let db_path = data.join("sample.db");
+    let conn_toml = format!(
+        "name = \"sample\"\nurl = \"sqlite://{}\"\n",
+        db_path.display()
+    );
+    std::fs::write(config.join("conns").join("sample.toml"), conn_toml)?;
+
+    // Seed a sample SQL buffer with a CREATE TABLE for users.
+    std::fs::write(queries.join("sample_users.sql"), SAMPLE_QUERY)?;
+
+    // Seed a session pointing at the sample connection so the TUI
+    // opens it on launch instead of dropping the user into "no
+    // connections selected".
+    std::fs::write(
+        config.join("session.toml"),
+        "connection = \"sample\"\n\
+         schema_cursor = 0\n\
+         schema_expanded_paths = []\n\
+         focus = \"Editor\"\n\
+         tab_cursors = []\n\
+         active_tab = 0\n\
+         result_tabs = []\n\
+         active_result_tab = 0\n",
+    )?;
+
+    sqeel_core::config::set_config_dir_override(config);
+    sqeel_core::persistence::set_data_dir_override(data);
+    eprintln!("sqeel sandbox: {}", root.display());
+    Ok(())
+}
 
 #[derive(Parser)]
 #[command(name = "sqeel", about = "Fast vim-native SQL client")]
@@ -26,10 +97,26 @@ struct Args {
     /// Show debug panel at the bottom
     #[arg(long)]
     debug: bool,
+
+    /// Start in a fresh sandbox: a temp dir replaces `~/.config/sqeel`
+    /// and `~/.local/share/sqeel`, pre-seeded with a `sample` SQLite
+    /// connection backed by a temp DB and a sample SQL buffer that
+    /// creates a `users` table. Useful for trying sqeel without
+    /// touching your real config or for end-to-end tests.
+    #[arg(long)]
+    sandbox: bool,
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if args.sandbox {
+        bootstrap_sandbox()?;
+        // Auto-select the seeded connection so first launch lands on
+        // a working pane instead of the empty connection picker.
+        if args.connection.is_none() && args.url.is_none() {
+            args.connection = Some("sample".into());
+        }
+    }
     let state = AppState::new();
     state.lock().unwrap().debug_mode = args.debug;
 

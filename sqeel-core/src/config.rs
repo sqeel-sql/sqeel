@@ -135,7 +135,22 @@ pub struct SessionData {
     pub active_result_tab: usize,
 }
 
+/// Process-wide override for the config dir, set by `--sandbox` so
+/// dev-mode runs don't touch the user's real `~/.config/sqeel/`.
+/// `None` (the default) falls back to `dirs::config_dir()`.
+static CONFIG_DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Install a sandbox config dir. Idempotent — first call wins.
+/// Subsequent calls are silently ignored so a misconfigured caller
+/// can't surprise the user mid-run by repointing the dir.
+pub fn set_config_dir_override(path: PathBuf) {
+    let _ = CONFIG_DIR_OVERRIDE.set(path);
+}
+
 pub fn config_dir() -> Option<PathBuf> {
+    if let Some(p) = CONFIG_DIR_OVERRIDE.get() {
+        return Some(p.clone());
+    }
     dirs::config_dir().map(|d| d.join("sqeel"))
 }
 

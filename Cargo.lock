@@ -3878,6 +3878,7 @@ dependencies = [
  "sqeel-core",
  "sqeel-gui",
  "sqeel-tui",
+ "tempfile",
  "tokio",
 ]
 

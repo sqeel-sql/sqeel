@@ -63,6 +63,19 @@ cargo build --release
 
 Binaries land in `target/release/sqeel` and `target/release/sqeel-gui`.
 
+### Sandbox mode
+
+Run `sqeel --sandbox` to launch in a fresh tempdir-backed environment that won't
+touch your real `~/.config/sqeel` or `~/.local/share/sqeel`. The sandbox
+auto-seeds:
+
+- a `sample` SQLite connection backed by a fresh DB file,
+- a `sample_users.sql` buffer with a `CREATE TABLE users` + a couple of
+  inserts + a select.
+
+The temp dir path is printed to stderr at startup. It survives the process
+(under `/tmp/sqeel-sandbox-*`) — clean it up with `rm -rf` when you're done.
+
 ## Config
 
 ### Main — `~/.config/sqeel/config.toml`
