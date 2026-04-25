@@ -328,6 +328,7 @@ impl<'a> Editor<'a> {
     /// inverse for the host's undo stack.
     pub(super) fn mutate_edit(&mut self, edit: sqeel_buffer::Edit) -> sqeel_buffer::Edit {
         let pre_row = self.buffer.cursor().row;
+        let pre_rows = self.buffer.row_count();
         let inverse = self.buffer.apply_edit(edit);
         let pos = self.buffer.cursor();
         // Drop any folds the edit's range overlapped — vim opens the
@@ -339,9 +340,58 @@ impl<'a> Editor<'a> {
         let hi = pre_row.max(pos.row);
         self.buffer.invalidate_folds_in_range(lo, hi);
         self.vim.last_edit_pos = Some((pos.row, pos.col));
+        // Shift / drop marks + jump-list entries to track the row
+        // delta the edit produced. Without this, every line-changing
+        // edit silently invalidates `'a`-style positions.
+        let post_rows = self.buffer.row_count();
+        let delta = post_rows as isize - pre_rows as isize;
+        if delta != 0 {
+            self.shift_marks_after_edit(pre_row, delta);
+        }
         self.push_buffer_content_to_textarea();
         self.mark_content_dirty();
         inverse
+    }
+
+    /// Migrate user marks + jumplist entries when an edit at row
+    /// `edit_start` changes the buffer's row count by `delta` (positive
+    /// for inserts, negative for deletes). Marks tied to a deleted row
+    /// are dropped; marks past the affected band shift by `delta`.
+    fn shift_marks_after_edit(&mut self, edit_start: usize, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        // Deleted-row band (only meaningful for delta < 0). Inclusive
+        // start, exclusive end.
+        let drop_end = if delta < 0 {
+            edit_start.saturating_add((-delta) as usize)
+        } else {
+            edit_start
+        };
+        let shift_threshold = drop_end.max(edit_start.saturating_add(1));
+
+        let mut to_drop: Vec<char> = Vec::new();
+        for (c, (row, _col)) in self.vim.marks.iter_mut() {
+            if (edit_start..drop_end).contains(row) {
+                to_drop.push(*c);
+            } else if *row >= shift_threshold {
+                *row = ((*row as isize) + delta).max(0) as usize;
+            }
+        }
+        for c in to_drop {
+            self.vim.marks.remove(&c);
+        }
+
+        let shift_jumps = |entries: &mut Vec<(usize, usize)>| {
+            entries.retain(|(row, _)| !(edit_start..drop_end).contains(row));
+            for (row, _) in entries.iter_mut() {
+                if *row >= shift_threshold {
+                    *row = ((*row as isize) + delta).max(0) as usize;
+                }
+            }
+        };
+        shift_jumps(&mut self.vim.jump_back);
+        shift_jumps(&mut self.vim.jump_fwd);
     }
 
     /// Reverse-sync helper paired with [`Editor::mutate_edit`]: rebuild

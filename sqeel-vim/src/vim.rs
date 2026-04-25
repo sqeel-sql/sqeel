@@ -6503,6 +6503,69 @@ mod tests {
         assert!(r <= 4);
     }
 
+    #[test]
+    fn mark_below_delete_shifts_up() {
+        let mut e = editor_with("a\nb\nc\nd\ne");
+        // Set mark `a` on row 3 (the `d`).
+        e.jump_cursor(3, 0);
+        run_keys(&mut e, "ma");
+        // Go back to row 0 and `dd`.
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "dd");
+        // Mark `a` should now point at row 2 — its content stayed `d`.
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "'a");
+        assert_eq!(e.cursor().0, 2);
+        assert_eq!(e.buffer().line(2).unwrap(), "d");
+    }
+
+    #[test]
+    fn mark_on_deleted_row_is_dropped() {
+        let mut e = editor_with("a\nb\nc\nd");
+        // Mark `a` on row 1 (`b`).
+        e.jump_cursor(1, 0);
+        run_keys(&mut e, "ma");
+        // Delete row 1.
+        run_keys(&mut e, "dd");
+        // The row that held `a` is gone; `'a` should be a no-op now.
+        e.jump_cursor(2, 0);
+        run_keys(&mut e, "'a");
+        // Cursor stays on row 2 — `'a` no-ops on missing marks.
+        assert_eq!(e.cursor().0, 2);
+    }
+
+    #[test]
+    fn mark_above_edit_unchanged() {
+        let mut e = editor_with("a\nb\nc\nd\ne");
+        // Mark `a` on row 0.
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "ma");
+        // Delete row 3.
+        e.jump_cursor(3, 0);
+        run_keys(&mut e, "dd");
+        // Mark `a` should still point at row 0.
+        e.jump_cursor(2, 0);
+        run_keys(&mut e, "'a");
+        assert_eq!(e.cursor().0, 0);
+    }
+
+    #[test]
+    fn mark_shifts_down_after_insert() {
+        let mut e = editor_with("a\nb\nc");
+        // Mark `a` on row 2 (`c`).
+        e.jump_cursor(2, 0);
+        run_keys(&mut e, "ma");
+        // Open a new line above row 0 with `O\nfoo<Esc>`.
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "Onew<Esc>");
+        // Buffer is now ["new", "a", "b", "c"]; mark `a` should track
+        // the original content row → 3.
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "'a");
+        assert_eq!(e.cursor().0, 3);
+        assert_eq!(e.buffer().line(3).unwrap(), "c");
+    }
+
     // ─── Search / jumplist interaction ───────────────────────────────
 
     #[test]

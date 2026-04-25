@@ -66,11 +66,12 @@ toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
 - ~~**`:marks` ex command (S).**~~ Done. Prints every user mark plus the special
   `'` (last jump) and `.` (last edit), one per row; lines are 1-based to match
   vim.
-- **Mark migration on edit (M).** When rows shift up/down via insert/delete,
-  marks above the edit row stay; marks below shift. Add a
-  `Buffer::shift_marks(after_row, delta)` helper, call from `apply_edit`
-  line-changing variants (`InsertStr` containing `\n`, `DeleteRange { Line }`,
-  `JoinLines`, `SplitLines`).
+- ~~**Mark migration on edit (M).**~~ Done. `mutate_edit` measures the row-count
+  delta and calls `shift_marks_after_edit` to migrate user marks + jumplist
+  entries: marks above the edit stay, marks past the affected band shift by
+  `delta`, marks tied to deleted rows are dropped. Restore-based paths (undo,
+  sort, substitute) bypass this — they replace the buffer wholesale, so marks
+  may go stale across those operations. Tracked separately if it bites.
 - **`g;` / `g,` (M).** Walk the change list (each `mutate_edit` pushes onto a
   ring). Already have `last_edit_pos` — promote to a bounded ring; `g;` pops
   back, `g,` pops forward.
