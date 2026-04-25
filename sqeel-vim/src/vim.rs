@@ -2393,30 +2393,6 @@ fn order(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize
     if a <= b { (a, b) } else { (b, a) }
 }
 
-fn select_full_lines(ed: &mut Editor<'_>, top_row: usize, bot_row: usize) {
-    let total = ed.textarea.lines().len();
-    if top_row > 0 {
-        ed.textarea.move_cursor(CursorMove::Jump(top_row - 1, 0));
-        ed.textarea.move_cursor(CursorMove::End);
-        ed.textarea.start_selection();
-        ed.textarea.move_cursor(CursorMove::Jump(bot_row, 0));
-        ed.textarea.move_cursor(CursorMove::End);
-    } else if total > 1 {
-        ed.textarea.move_cursor(CursorMove::Jump(top_row, 0));
-        ed.textarea.start_selection();
-        if bot_row + 1 < total {
-            ed.textarea.move_cursor(CursorMove::Jump(bot_row + 1, 0));
-        } else {
-            ed.textarea.move_cursor(CursorMove::Jump(bot_row, 0));
-            ed.textarea.move_cursor(CursorMove::End);
-        }
-    } else {
-        ed.textarea.move_cursor(CursorMove::Jump(top_row, 0));
-        ed.textarea.start_selection();
-        ed.textarea.move_cursor(CursorMove::End);
-    }
-}
-
 /// Select the contents of rows `[top_row..=bot_row]` but stop at the end of
 /// `bot_row` without crossing its trailing newline. Used by `cc` / `Vc` so
 /// the cut removes line *contents* and leaves a blank line in place.
@@ -2448,51 +2424,71 @@ fn execute_line_op(ed: &mut Editor<'_>, op: Operator, count: usize) {
     match op {
         Operator::Yank => {
             // yy must not move the cursor.
-            select_full_lines(ed, row, end_row);
-            ed.vim.yank_linewise = true;
-            ed.textarea.copy();
-            if let Some(y) = non_empty_yank(ed) {
-                ed.last_yank = Some(y);
+            let text = read_vim_range(ed, (row, col), (end_row, 0), MotionKind::Linewise);
+            if !text.is_empty() {
+                ed.last_yank = Some(text.clone());
+                ed.textarea.set_yank_text(text);
+                ed.vim.yank_linewise = true;
             }
-            ed.textarea.cancel_selection();
-            ed.textarea.move_cursor(CursorMove::Jump(row, col));
+            ed.buffer_mut()
+                .set_cursor(sqeel_buffer::Position::new(row, col));
+            ed.push_buffer_cursor_to_textarea();
             ed.vim.mode = Mode::Normal;
         }
         Operator::Delete => {
             ed.push_undo();
             let deleted_through_last = end_row + 1 >= total;
-            select_full_lines(ed, row, end_row);
-            ed.vim.yank_linewise = true;
-            ed.mutate(|t| t.cut());
-            if let Some(y) = non_empty_yank(ed) {
-                ed.last_yank = Some(y);
-            }
+            cut_vim_range(ed, (row, col), (end_row, 0), MotionKind::Linewise);
             // Vim's `dd` / `Ndd` leaves the cursor on the *first
             // non-blank* of the line that now occupies `row` — or, if
             // the deletion consumed the last line, the line above it.
-            let total_after = ed.textarea.lines().len();
-            let target_row = if total_after == 0 {
-                0
-            } else if deleted_through_last {
+            let total_after = ed.buffer().row_count();
+            let target_row = if deleted_through_last {
                 row.saturating_sub(1).min(total_after.saturating_sub(1))
             } else {
                 row.min(total_after.saturating_sub(1))
             };
-            ed.textarea.move_cursor(CursorMove::Jump(target_row, 0));
+            ed.buffer_mut()
+                .set_cursor(sqeel_buffer::Position::new(target_row, 0));
+            ed.push_buffer_cursor_to_textarea();
             move_first_non_whitespace(ed);
             ed.vim.mode = Mode::Normal;
         }
         Operator::Change => {
             // `cc` / `3cc`: wipe contents of the covered lines but leave
-            // a single blank line so insert-mode opens on it.
+            // a single blank line so insert-mode opens on it. Done as two
+            // edits: drop rows past the first, then clear row `row`.
+            use sqeel_buffer::{Edit, MotionKind as BufKind, Position};
             ed.push_undo();
-            select_line_contents_only(ed, row, end_row);
-            ed.vim.yank_linewise = true;
-            ed.mutate(|t| t.cut());
-            if let Some(y) = non_empty_yank(ed) {
-                ed.last_yank = Some(y);
+            ed.sync_buffer_content_from_textarea();
+            // Read the cut payload first so yank reflects every line.
+            let payload = read_vim_range(ed, (row, col), (end_row, 0), MotionKind::Linewise);
+            if end_row > row {
+                ed.mutate_edit(Edit::DeleteRange {
+                    start: Position::new(row + 1, 0),
+                    end: Position::new(end_row, 0),
+                    kind: BufKind::Line,
+                });
             }
-            ed.textarea.move_cursor(CursorMove::Jump(row, 0));
+            let line_chars = ed
+                .buffer()
+                .line(row)
+                .map(|l| l.chars().count())
+                .unwrap_or(0);
+            if line_chars > 0 {
+                ed.mutate_edit(Edit::DeleteRange {
+                    start: Position::new(row, 0),
+                    end: Position::new(row, line_chars),
+                    kind: BufKind::Char,
+                });
+            }
+            if !payload.is_empty() {
+                ed.last_yank = Some(payload.clone());
+                ed.textarea.set_yank_text(payload);
+                ed.vim.yank_linewise = true;
+            }
+            ed.buffer_mut().set_cursor(Position::new(row, 0));
+            ed.push_buffer_cursor_to_textarea();
             begin_insert_noundo(ed, 1, InsertReason::AfterChange);
         }
         Operator::Uppercase | Operator::Lowercase | Operator::ToggleCase => {
