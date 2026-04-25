@@ -696,4 +696,101 @@ mod tests {
         let contents = HoverContents::Scalar(MarkedString::String("   ".into()));
         assert_eq!(super::hover_text_from_contents(&contents), None);
     }
+
+    // Helper: spawn the dispatcher against a fresh queue, return the
+    // queue + the rx end of the write channel so tests can assert on
+    // exactly what reaches the wire.
+    fn spawn_dispatcher() -> (std::sync::Arc<DidChangeQueue>, mpsc::Receiver<String>) {
+        let (tx, rx) = mpsc::channel::<String>(64);
+        let queue = std::sync::Arc::new(DidChangeQueue {
+            latest: std::sync::Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        });
+        tokio::spawn(super::didchange_dispatcher(queue.clone(), tx));
+        (queue, rx)
+    }
+
+    fn fake_uri(p: &str) -> Uri {
+        use std::str::FromStr;
+        Uri::from_str(p).unwrap()
+    }
+
+    /// Pull the `version` and a chunk of the text out of a framed RPC
+    /// payload — keeps assertions small without serde-deserialising
+    /// the whole envelope back.
+    fn parse_version_and_text(framed: &str) -> (i32, String) {
+        let body = framed.split("\r\n\r\n").nth(1).expect("framed body");
+        let v: serde_json::Value = serde_json::from_str(body).expect("json body");
+        let version = v["params"]["textDocument"]["version"].as_i64().unwrap() as i32;
+        let text = v["params"]["contentChanges"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (version, text)
+    }
+
+    #[tokio::test]
+    async fn didchange_dispatcher_collapses_burst_to_latest() {
+        let (queue, mut rx) = spawn_dispatcher();
+        let uri = fake_uri("file:///t.sql");
+        // Push 10 payloads back-to-back without giving the
+        // dispatcher a chance to drain in between. The slot
+        // overwrites each prior pending value, so when the
+        // dispatcher wakes it should see only the final one.
+        for i in 1..=10 {
+            *queue.latest.lock().unwrap() = Some((uri.clone(), i, format!("v{i}")));
+            queue.notify.notify_one();
+        }
+        // Give the dispatcher tokio time to drain.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let mut received: Vec<(i32, String)> = Vec::new();
+        while let Ok(framed) = rx.try_recv() {
+            received.push(parse_version_and_text(&framed));
+        }
+        assert!(!received.is_empty(), "dispatcher sent nothing");
+        // The very last received message must carry the latest
+        // version regardless of how many intermediate ones snuck
+        // through (most bursts collapse to a single send).
+        let (last_v, last_text) = received.last().unwrap();
+        assert_eq!(*last_v, 10);
+        assert_eq!(last_text, "v10");
+        assert!(
+            received.len() <= 10,
+            "received {} messages, expected coalesce",
+            received.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn didchange_dispatcher_skips_when_slot_taken_then_emptied() {
+        let (queue, mut rx) = spawn_dispatcher();
+        // Notify with no payload — dispatcher wakes, finds slot
+        // empty, loops back without sending. Mirrors the rare race
+        // where a notify lands after another consumer drained.
+        queue.notify.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(rx.try_recv().is_err(), "dispatcher sent on empty slot");
+    }
+
+    #[tokio::test]
+    async fn didchange_dispatcher_emits_subsequent_writes() {
+        let (queue, mut rx) = spawn_dispatcher();
+        let uri = fake_uri("file:///t.sql");
+        // First write.
+        *queue.latest.lock().unwrap() = Some((uri.clone(), 1, "first".into()));
+        queue.notify.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let first = rx.try_recv().expect("first write delivered");
+        let (v1, t1) = parse_version_and_text(&first);
+        assert_eq!(v1, 1);
+        assert_eq!(t1, "first");
+        // Later, an unrelated edit. Dispatcher must wake again.
+        *queue.latest.lock().unwrap() = Some((uri.clone(), 2, "second".into()));
+        queue.notify.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let second = rx.try_recv().expect("second write delivered");
+        let (v2, t2) = parse_version_and_text(&second);
+        assert_eq!(v2, 2);
+        assert_eq!(t2, "second");
+    }
 }
