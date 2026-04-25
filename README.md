@@ -16,14 +16,18 @@ Fast, vim-native SQL client. No Electron. No JVM.
 - tree-sitter SQL syntax highlighting (dialect-aware)
 - LSP integration (`sqls`) — completions + inline diagnostic underlines + gutter
   signs, tree-sitter fallback for parse errors, auto-generated `sqls` config
-  from the active connection
+  from the active connection, `K` hover (markdown + GFM tables), `gd`
+  goto-definition
 - Schema browser — click or keyboard to expand/collapse
 - Editor tabs with lazy loading and 5-min RAM eviction
 - Auto-save SQL buffers, result history, query history
 - tmux-aware pane navigation
 - Vim-style status bar + command mode (`:`)
 - Vim-style results pane — cell cursor, visual-line / visual-block selection
-  with TSV yank, `/` search, count prefix nav
+  with TSV yank, `/` search, count prefix nav, mouse drag select
+- Focus-stealing hover popup — markdown rendered with pulldown-cmark, GFM tables
+  turned into a navigable cell grid (yank, visual selection, `/` search),
+  schema-cache fast path for tables, lazy column fetch on miss
 
 ## Layout
 
@@ -161,6 +165,7 @@ features that go beyond basic vim.
 | `>` / `<`               | Indent / outdent op                       |
 | `Ctrl+a` / `Ctrl+x`     | Increment / decrement number under cursor |
 | `K`                     | LSP hover popup for symbol under cursor   |
+| `gd`                    | LSP goto-definition (pushes jumplist)     |
 | `Ctrl+P` / `Ctrl+N`     | Query history prev / next                 |
 
 ### Explorer Pane
@@ -188,9 +193,28 @@ Vim-native navigation over the cell grid. Arrow keys mirror `hjkl`.
 | `Shift+H` / `Shift+L` | Prev / next result tab                           |
 | `Enter`               | Jump editor cursor to error line:col (error tab) |
 | Left click            | Copy column value                                |
+| Click + drag          | Visual-block select cells across drag region     |
 | Right click           | Copy full row                                    |
 | Left click (error)    | Copy query or error text                         |
 | `q` / `Ctrl+C`        | Dismiss results                                  |
+
+### Hover Popup (`K`)
+
+Opens a focus-stealing popup over the editor; arrow keys + mouse drag mirror
+`hjkl`. Tabular hover responses (sqls returns markdown tables for table schemas)
+render as a navigable grid; plain markdown is styled in-place.
+
+| Key / Mouse           | Action                                        |
+| --------------------- | --------------------------------------------- |
+| `j` / `k` / `h` / `l` | Cell cursor (table) / scroll (text)           |
+| `gg` / `G`            | First / last row                              |
+| `0` / `$`             | First / last column of current row            |
+| `/` + `n` / `N`       | Search cells (case-insensitive) + next / prev |
+| `V` / `v` / `Ctrl+V`  | Visual-line / visual-block selection          |
+| `y`                   | Yank cell or selection (TSV)                  |
+| Click + drag          | Drag-select cells (auto-scrolls past edge)    |
+| Mouse wheel           | Move cursor row                               |
+| `Esc`                 | Clear selection / dismiss popup               |
 
 ### Connection Switcher
 
