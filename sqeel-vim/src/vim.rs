@@ -2279,9 +2279,10 @@ pub(super) const SHIFTWIDTH: usize = 2;
 /// Rows that are empty are skipped (vim leaves blank lines alone when
 /// indenting).
 fn indent_rows(ed: &mut Editor<'_>, top: usize, bot: usize, count: usize) {
+    ed.sync_buffer_content_from_textarea();
     let width = SHIFTWIDTH * count.max(1);
     let pad: String = " ".repeat(width);
-    let mut lines: Vec<String> = ed.textarea.lines().to_vec();
+    let mut lines: Vec<String> = ed.buffer().lines().to_vec();
     let bot = bot.min(lines.len().saturating_sub(1));
     for line in lines.iter_mut().take(bot + 1).skip(top) {
         if !line.is_empty() {
@@ -2298,8 +2299,9 @@ fn indent_rows(ed: &mut Editor<'_>, top: usize, bot: usize, count: usize) {
 /// each row in `[top, bot]`. Rows with less leading whitespace have
 /// all their indent stripped, not clipped to zero length.
 fn outdent_rows(ed: &mut Editor<'_>, top: usize, bot: usize, count: usize) {
+    ed.sync_buffer_content_from_textarea();
     let width = SHIFTWIDTH * count.max(1);
-    let mut lines: Vec<String> = ed.textarea.lines().to_vec();
+    let mut lines: Vec<String> = ed.buffer().lines().to_vec();
     let bot = bot.min(lines.len().saturating_sub(1));
     for line in lines.iter_mut().take(bot + 1).skip(top) {
         let strip: usize = line
