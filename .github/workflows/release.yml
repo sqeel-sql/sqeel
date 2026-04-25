@@ -25,21 +25,25 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             glibc: "2.28"
+            macos_min: ""
             suffix: ""
             archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             glibc: ""
+            macos_min: ""
             suffix: ".exe"
             archive: zip
           - os: macos-latest
             target: aarch64-apple-darwin
             glibc: ""
+            macos_min: "11.0"
             suffix: ""
             archive: tar.gz
           - os: macos-latest
             target: x86_64-apple-darwin
             glibc: ""
+            macos_min: "10.15"
             suffix: ""
             archive: tar.gz
 
@@ -88,6 +92,8 @@ jobs:
 
       - name: Build binaries
         if: matrix.glibc == ''
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
         run: cargo build --release --locked --target ${{ matrix.target }} --bin sqeel --bin sqeel-gui
 
       - name: Package (Linux / macOS)
