@@ -16,6 +16,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     permissions:
       contents: write
     strategy:
@@ -23,23 +24,37 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            container: debian:bookworm-slim
             target: x86_64-unknown-linux-gnu
             suffix: ""
             archive: tar.gz
           - os: windows-latest
+            container: ""
             target: x86_64-pc-windows-msvc
             suffix: ".exe"
             archive: zip
           - os: macos-latest
+            container: ""
             target: aarch64-apple-darwin
             suffix: ""
             archive: tar.gz
           - os: macos-latest
+            container: ""
             target: x86_64-apple-darwin
             suffix: ""
             archive: tar.gz
 
     steps:
+      - name: Install debian build deps
+        if: matrix.container != ''
+        shell: bash
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev libxkbcommon-dev libwayland-dev
+
       - uses: actions/checkout@v6
 
       - name: Verify tag matches Cargo.toml version

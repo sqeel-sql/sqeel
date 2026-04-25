@@ -5542,6 +5542,32 @@ mod tests {
     }
 
     #[test]
+    fn insert_ctrl_w_at_col0_joins_with_prev_word() {
+        // Vim with default `backspace=indent,eol,start`: Ctrl-W at the
+        // start of a row joins to the previous line and deletes the
+        // word now before the cursor.
+        let mut e = editor_with("hello\nworld");
+        e.jump_cursor(1, 0);
+        run_keys(&mut e, "i");
+        e.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        // "hello" was the only word on row 0; it gets deleted, leaving
+        // "world" on a single line.
+        assert_eq!(e.buffer().lines(), vec!["world".to_string()]);
+        assert_eq!(e.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn insert_ctrl_w_at_col0_keeps_prefix_words() {
+        let mut e = editor_with("foo bar\nbaz");
+        e.jump_cursor(1, 0);
+        run_keys(&mut e, "i");
+        e.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        // Joins lines, then deletes the trailing "bar" of the prev line.
+        assert_eq!(e.buffer().lines(), vec!["foo baz".to_string()]);
+        assert_eq!(e.cursor(), (0, 4));
+    }
+
+    #[test]
     fn insert_ctrl_u_deletes_to_line_start() {
         let mut e = editor_with("");
         run_keys(&mut e, "i");

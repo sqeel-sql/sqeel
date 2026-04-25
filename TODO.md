@@ -124,9 +124,10 @@ We support some `OpTextObj` chords. Audit + fill gaps:
 ## Insert mode (S)
 
 - ~~**`Ctrl-R {reg}` (S).**~~ Done — see registers section.
-- **`Ctrl-W` / `Ctrl-U` / `Ctrl-H` (done).** Verify against vim behaviour for
-  edge cases (Ctrl-W at line start should join with prev row's last word —
-  doesn't today).
+- ~~**`Ctrl-W` / `Ctrl-U` / `Ctrl-H` (done).**~~ Verified — `Ctrl-W` at col 0
+  already joins with the previous row and deletes the word now before the cursor
+  (matches vim's `backspace=indent,eol,start` default). Two regression tests
+  added.
 - **`Ctrl-O` already exists.** Double-check the one-shot semantics end up in
   normal mode for exactly one command.
 - **Bracket auto-pairing (out of scope).** Leave for an opt-in plugin layer if
