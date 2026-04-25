@@ -5907,12 +5907,10 @@ mod tests {
     }
 
     #[test]
-    fn sync_buffer_spans_translates_textarea_spans() {
+    fn install_syntax_spans_translates_styled_spans() {
         use ratatui::style::{Color, Style};
         let mut e = editor_with("SELECT foo");
-        e.textarea
-            .set_syntax_spans(vec![vec![(0, 6, Style::default().fg(Color::Red))]]);
-        e.sync_buffer_spans_from_textarea();
+        e.install_syntax_spans(vec![vec![(0, 6, Style::default().fg(Color::Red))]]);
         let by_row = e.buffer.spans();
         assert_eq!(by_row.len(), 1);
         assert_eq!(by_row[0].len(), 1);
@@ -5923,26 +5921,23 @@ mod tests {
     }
 
     #[test]
-    fn sync_buffer_spans_clamps_sentinel_end() {
+    fn install_syntax_spans_clamps_sentinel_end() {
         use ratatui::style::{Color, Style};
         let mut e = editor_with("hello");
-        e.textarea.set_syntax_spans(vec![vec![(
+        e.install_syntax_spans(vec![vec![(
             0,
             usize::MAX,
             Style::default().fg(Color::Blue),
         )]]);
-        e.sync_buffer_spans_from_textarea();
         let by_row = e.buffer.spans();
         assert_eq!(by_row[0][0].end_byte, 5);
     }
 
     #[test]
-    fn sync_buffer_spans_drops_zero_width() {
+    fn install_syntax_spans_drops_zero_width() {
         use ratatui::style::{Color, Style};
         let mut e = editor_with("abc");
-        e.textarea
-            .set_syntax_spans(vec![vec![(2, 2, Style::default().fg(Color::Red))]]);
-        e.sync_buffer_spans_from_textarea();
+        e.install_syntax_spans(vec![vec![(2, 2, Style::default().fg(Color::Red))]]);
         assert!(e.buffer.spans()[0].is_empty());
     }
 

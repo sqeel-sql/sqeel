@@ -722,16 +722,9 @@ async fn run_loop(
             // whole buffer on the main thread.
             if let Some(result) = highlight_thread.try_recv() {
                 let row_count = editor.textarea.lines().len();
-                let cursor_row = editor.textarea.cursor().0;
+                let cursor_row = editor.cursor().0;
                 let diagnostics = merged_diagnostics(&s.lsp_diagnostics, &result.parse_errors);
-                apply_window_spans(
-                    &mut editor.textarea,
-                    &result,
-                    row_count,
-                    cursor_row,
-                    &diagnostics,
-                );
-                editor.sync_buffer_spans_from_textarea();
+                apply_window_spans(&mut editor, &result, row_count, cursor_row, &diagnostics);
                 s.set_highlights(result.spans.clone());
                 last_marker_cursor_row = cursor_row;
                 last_marker_diag_len = diagnostics.len();
@@ -750,7 +743,7 @@ async fn run_loop(
                 // The visual selection still renders via the post-
                 // render overlay; only the cursor-line marker re-
                 // blending is deferred until the drag ends.
-                let cursor_row = editor.textarea.cursor().0;
+                let cursor_row = editor.cursor().0;
                 let dragging_editor = mouse_drag_pane == Some(Focus::Editor);
                 if let Some(result) = last_highlight_result.as_ref()
                     && !dragging_editor
@@ -759,15 +752,14 @@ async fn run_loop(
                     if cursor_row != last_marker_cursor_row
                         || diagnostics.len() != last_marker_diag_len
                     {
-                        let row_count = editor.textarea.lines().len();
+                        let row_count = editor.buffer().row_count();
                         apply_window_spans(
-                            &mut editor.textarea,
+                            &mut editor,
                             result,
                             row_count,
                             cursor_row,
                             &diagnostics,
                         );
-                        editor.sync_buffer_spans_from_textarea();
                         last_marker_cursor_row = cursor_row;
                         last_marker_diag_len = diagnostics.len();
                         needs_redraw = true;
@@ -5023,13 +5015,13 @@ fn token_kind_style(kind: TokenKind) -> Option<Style> {
 /// result arrived: we `take` the existing outer `Vec`, mutate only the
 /// rows inside the window, and put it back.
 fn apply_window_spans(
-    textarea: &mut tui_textarea::TextArea<'_>,
+    editor: &mut Editor,
     result: &HighlightResult,
     buffer_rows: usize,
     cursor_row: usize,
     diagnostics: &[sqeel_core::lsp::Diagnostic],
 ) {
-    let mut by_row = textarea.take_syntax_spans();
+    let mut by_row = std::mem::take(&mut editor.styled_spans);
     if by_row.len() < buffer_rows {
         by_row.resize_with(buffer_rows, Vec::new);
     }
@@ -5043,7 +5035,7 @@ fn apply_window_spans(
     // (no false positives inside string literals, and block comments
     // end at `*/` not at EOL).
     let mut comment_ranges_by_row: Vec<Vec<CommentBody>> = vec![Vec::new(); buffer_rows];
-    let textarea_lines = textarea.lines();
+    let buffer_lines: Vec<String> = editor.buffer().lines().to_vec();
     for s in &result.spans {
         let Some(style) = token_kind_style(s.kind) else {
             continue;
@@ -5058,7 +5050,7 @@ fn apply_window_spans(
                 by_row[sr].push((s.start_col, s.end_col, style));
                 if s.kind == TokenKind::Comment {
                     comment_ranges_by_row[sr].push(comment_body_from_span(
-                        &textarea_lines[sr],
+                        &buffer_lines[sr],
                         s.start_col,
                         s.end_col,
                     ));
@@ -5073,22 +5065,22 @@ fn apply_window_spans(
                 by_row[er].push((0, s.end_col, style));
             }
             if s.kind == TokenKind::Comment {
-                let first_end = textarea_lines[sr].len();
+                let first_end = buffer_lines[sr].len();
                 comment_ranges_by_row[sr].push(comment_body_from_span(
-                    &textarea_lines[sr],
+                    &buffer_lines[sr],
                     s.start_col,
                     first_end,
                 ));
                 for row in (sr + 1)..er.min(buffer_rows) {
                     comment_ranges_by_row[row].push(CommentBody {
                         start: 0,
-                        end: textarea_lines[row].len(),
+                        end: buffer_lines[row].len(),
                     });
                 }
                 if er < buffer_rows && s.end_col > 0 {
                     comment_ranges_by_row[er].push(CommentBody {
                         start: 0,
-                        end: s.end_col.min(textarea_lines[er].len()),
+                        end: s.end_col.min(buffer_lines[er].len()),
                     });
                 }
             }
@@ -5105,14 +5097,14 @@ fn apply_window_spans(
     // block above it. A non-comment line resets the inheritance. Seed the
     // state by scanning backwards from `window_start` until we hit either
     // a marker or a non-comment line (capped so huge files don't pay).
-    let mut active_color = seed_active_color(textarea, window_start);
+    let mut active_color = seed_active_color(&buffer_lines, window_start);
     for (row, row_spans) in by_row
         .iter_mut()
         .enumerate()
         .take(window_end)
         .skip(window_start)
     {
-        let line = &textarea_lines[row];
+        let line = &buffer_lines[row];
         let on_cursor_line = row == cursor_row;
         let comments = &comment_ranges_by_row[row];
         active_color =
@@ -5122,13 +5114,13 @@ fn apply_window_spans(
     // on top of the keyword / marker overlays; we preserve the existing
     // span's fg and just layer on an error-coloured underline.
     for d in diagnostics {
-        apply_diagnostic_underline(&mut by_row, d, textarea_lines, buffer_rows);
+        apply_diagnostic_underline(&mut by_row, d, &buffer_lines, buffer_rows);
     }
     // Sort each touched row so `line_spans` sees them in start-byte order.
     for row_spans in by_row.iter_mut().take(window_end).skip(window_start) {
         row_spans.sort_by_key(|&(s, _, _)| s);
     }
-    textarea.set_syntax_spans(by_row);
+    editor.install_syntax_spans(by_row);
 }
 
 /// A located TODO-family marker: the byte span of the marker word and
@@ -5324,12 +5316,11 @@ fn apply_marker_overlay(
 /// line (reset) or the nearest comment line that carries its own marker
 /// (inherit that colour). Capped so huge buffers pay at most a bounded
 /// cost per highlight refresh.
-fn seed_active_color(textarea: &tui_textarea::TextArea<'_>, window_start: usize) -> Option<Color> {
+fn seed_active_color(lines: &[String], window_start: usize) -> Option<Color> {
     const SEED_SCAN_CAP: usize = 500;
     if window_start == 0 {
         return None;
     }
-    let lines = textarea.lines();
     let start = window_start.saturating_sub(SEED_SCAN_CAP);
     // Walk down from the cap toward `window_start - 1`, updating the
     // active colour the same way the forward pass does. This gives the
@@ -6968,9 +6959,10 @@ mod tests {
             parse_errors: Vec::new(),
         };
 
-        let mut ta = tui_textarea::TextArea::new(lines);
-        super::apply_window_spans(&mut ta, &result, row_count, 0, &[]);
-        let by_row = ta.take_syntax_spans();
+        let mut editor = sqeel_vim::Editor::new(sqeel_vim::KeybindingMode::Vim);
+        editor.set_content(&lines.join("\n"));
+        super::apply_window_spans(&mut editor, &result, row_count, 0, &[]);
+        let by_row = editor.styled_spans.clone();
 
         let keyword_style =
             super::token_kind_style(sqeel_core::highlight::TokenKind::Keyword).unwrap();
@@ -7029,9 +7021,10 @@ mod tests {
             parse_errors: Vec::new(),
         };
 
-        let mut ta = tui_textarea::TextArea::new(lines);
-        super::apply_window_spans(&mut ta, &result, row_count, 0, &[]);
-        let by_row = ta.take_syntax_spans();
+        let mut editor = sqeel_vim::Editor::new(sqeel_vim::KeybindingMode::Vim);
+        editor.set_content(&lines.join("\n"));
+        super::apply_window_spans(&mut editor, &result, row_count, 0, &[]);
+        let by_row = editor.styled_spans.clone();
 
         // Row 21 and row 23 each hold `DESC users;`. Both should have
         // at least one span starting at col 0 with Keyword styling.

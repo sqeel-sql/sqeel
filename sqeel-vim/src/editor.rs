@@ -66,6 +66,12 @@ pub struct Editor<'a> {
     /// linewise yank — `yank_linewise` carries the same bit so paste
     /// sites don't have to re-derive it.
     pub(super) yank: String,
+    /// Per-row syntax styling, kept here so the host can do
+    /// incremental window updates (see `apply_window_spans` in
+    /// sqeel-tui). Same `(start_byte, end_byte, Style)` tuple shape
+    /// the textarea used to host. The Buffer-side opaque-id spans are
+    /// derived from this on every install.
+    pub styled_spans: Vec<Vec<(usize, usize, ratatui::style::Style)>>,
 }
 
 /// Host-observable LSP requests triggered by editor bindings. The
@@ -95,7 +101,34 @@ impl<'a> Editor<'a> {
             buffer: sqeel_buffer::Buffer::new(),
             style_table: Vec::new(),
             yank: String::new(),
+            styled_spans: Vec::new(),
         }
+    }
+
+    /// Install styled syntax spans into both the host-visible cache
+    /// (`styled_spans`) and the buffer's opaque-id span table. Drops
+    /// zero-width runs and clamps `end` to the line's char length so
+    /// the buffer cache doesn't see runaway ranges. Replaces the
+    /// previous `set_syntax_spans` + `sync_buffer_spans_from_textarea`
+    /// round-trip.
+    pub fn install_syntax_spans(&mut self, spans: Vec<Vec<(usize, usize, ratatui::style::Style)>>) {
+        let line_byte_lens: Vec<usize> = self.buffer.lines().iter().map(|l| l.len()).collect();
+        let mut by_row: Vec<Vec<sqeel_buffer::Span>> = Vec::with_capacity(spans.len());
+        for (row, row_spans) in spans.iter().enumerate() {
+            let line_len = line_byte_lens.get(row).copied().unwrap_or(0);
+            let mut translated = Vec::with_capacity(row_spans.len());
+            for (start, end, style) in row_spans {
+                let end_clamped = (*end).min(line_len);
+                if end_clamped <= *start {
+                    continue;
+                }
+                let id = self.intern_style(*style);
+                translated.push(sqeel_buffer::Span::new(*start, end_clamped, id));
+            }
+            by_row.push(translated);
+        }
+        self.buffer.set_spans(by_row);
+        self.styled_spans = spans;
     }
 
     /// Snapshot of the current yank register (the source for `p` / `P`).
@@ -185,31 +218,6 @@ impl<'a> Editor<'a> {
     pub fn cursor(&self) -> (usize, usize) {
         let pos = self.buffer.cursor();
         (pos.row, pos.col)
-    }
-
-    /// Mirror the textarea's `(start, end, Style)` syntax span tuples
-    /// into the migration buffer's `Vec<Vec<Span>>`. Drops zero-width
-    /// runs and clamps `end` to `usize::MAX` sentinels (used by
-    /// `apply_window_spans` for whole-line spans) to the line's byte
-    /// length so the buffer cache doesn't see runaway ranges.
-    pub fn sync_buffer_spans_from_textarea(&mut self) {
-        let textarea_spans = self.textarea.syntax_spans().to_vec();
-        let line_byte_lens: Vec<usize> = self.textarea.lines().iter().map(|l| l.len()).collect();
-        let mut by_row: Vec<Vec<sqeel_buffer::Span>> = Vec::with_capacity(textarea_spans.len());
-        for (row, row_spans) in textarea_spans.into_iter().enumerate() {
-            let line_len = line_byte_lens.get(row).copied().unwrap_or(0);
-            let mut translated = Vec::with_capacity(row_spans.len());
-            for (start, end, style) in row_spans {
-                let end_clamped = end.min(line_len);
-                if end_clamped <= start {
-                    continue;
-                }
-                let id = self.intern_style(style);
-                translated.push(sqeel_buffer::Span::new(start, end_clamped, id));
-            }
-            by_row.push(translated);
-        }
-        self.buffer.set_spans(by_row);
     }
 
     /// Drain any pending LSP intent raised by the last key. Returns
