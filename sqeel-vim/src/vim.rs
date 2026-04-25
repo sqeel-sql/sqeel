@@ -5220,6 +5220,214 @@ mod tests {
         assert_eq!(e.registers().read('"').unwrap().text, "<b>foo</b>");
     }
 
+    // ─── Text-object coverage (d operator, inner + around) ───────────
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn diW_deletes_inner_big_word() {
+        let mut e = editor_with("foo.bar baz");
+        e.jump_cursor(0, 2);
+        run_keys(&mut e, "diW");
+        // Big word treats `foo.bar` as one token.
+        assert_eq!(e.buffer().lines()[0], " baz");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn daW_deletes_around_big_word() {
+        let mut e = editor_with("foo.bar baz");
+        e.jump_cursor(0, 2);
+        run_keys(&mut e, "daW");
+        assert_eq!(e.buffer().lines()[0], "baz");
+    }
+
+    #[test]
+    fn di_double_quote_deletes_inside() {
+        let mut e = editor_with("a \"hello\" b");
+        e.jump_cursor(0, 4);
+        run_keys(&mut e, "di\"");
+        assert_eq!(e.buffer().lines()[0], "a \"\" b");
+    }
+
+    #[test]
+    fn da_double_quote_deletes_around() {
+        let mut e = editor_with("a \"hello\" b");
+        e.jump_cursor(0, 4);
+        run_keys(&mut e, "da\"");
+        assert_eq!(e.buffer().lines()[0], "a  b");
+    }
+
+    #[test]
+    fn di_single_quote_deletes_inside() {
+        let mut e = editor_with("x 'foo' y");
+        e.jump_cursor(0, 4);
+        run_keys(&mut e, "di'");
+        assert_eq!(e.buffer().lines()[0], "x '' y");
+    }
+
+    #[test]
+    fn da_single_quote_deletes_around() {
+        let mut e = editor_with("x 'foo' y");
+        e.jump_cursor(0, 4);
+        run_keys(&mut e, "da'");
+        assert_eq!(e.buffer().lines()[0], "x  y");
+    }
+
+    #[test]
+    fn di_backtick_deletes_inside() {
+        let mut e = editor_with("p `q` r");
+        e.jump_cursor(0, 3);
+        run_keys(&mut e, "di`");
+        assert_eq!(e.buffer().lines()[0], "p `` r");
+    }
+
+    #[test]
+    fn da_backtick_deletes_around() {
+        let mut e = editor_with("p `q` r");
+        e.jump_cursor(0, 3);
+        run_keys(&mut e, "da`");
+        assert_eq!(e.buffer().lines()[0], "p  r");
+    }
+
+    #[test]
+    fn di_paren_deletes_inside() {
+        let mut e = editor_with("f(arg)");
+        e.jump_cursor(0, 3);
+        run_keys(&mut e, "di(");
+        assert_eq!(e.buffer().lines()[0], "f()");
+    }
+
+    #[test]
+    fn di_paren_alias_b_works() {
+        let mut e = editor_with("f(arg)");
+        e.jump_cursor(0, 3);
+        run_keys(&mut e, "dib");
+        assert_eq!(e.buffer().lines()[0], "f()");
+    }
+
+    #[test]
+    fn di_bracket_deletes_inside() {
+        let mut e = editor_with("a[b,c]d");
+        e.jump_cursor(0, 3);
+        run_keys(&mut e, "di[");
+        assert_eq!(e.buffer().lines()[0], "a[]d");
+    }
+
+    #[test]
+    fn da_bracket_deletes_around() {
+        let mut e = editor_with("a[b,c]d");
+        e.jump_cursor(0, 3);
+        run_keys(&mut e, "da[");
+        assert_eq!(e.buffer().lines()[0], "ad");
+    }
+
+    #[test]
+    fn di_brace_deletes_inside() {
+        let mut e = editor_with("x{y}z");
+        e.jump_cursor(0, 2);
+        run_keys(&mut e, "di{");
+        assert_eq!(e.buffer().lines()[0], "x{}z");
+    }
+
+    #[test]
+    fn da_brace_deletes_around() {
+        let mut e = editor_with("x{y}z");
+        e.jump_cursor(0, 2);
+        run_keys(&mut e, "da{");
+        assert_eq!(e.buffer().lines()[0], "xz");
+    }
+
+    #[test]
+    fn di_brace_alias_capital_b_works() {
+        let mut e = editor_with("x{y}z");
+        e.jump_cursor(0, 2);
+        run_keys(&mut e, "diB");
+        assert_eq!(e.buffer().lines()[0], "x{}z");
+    }
+
+    #[test]
+    fn di_angle_deletes_inside() {
+        let mut e = editor_with("p<q>r");
+        e.jump_cursor(0, 2);
+        // `<lt>` so run_keys doesn't treat `<` as the start of a special-key tag.
+        run_keys(&mut e, "di<lt>");
+        assert_eq!(e.buffer().lines()[0], "p<>r");
+    }
+
+    #[test]
+    fn da_angle_deletes_around() {
+        let mut e = editor_with("p<q>r");
+        e.jump_cursor(0, 2);
+        run_keys(&mut e, "da<lt>");
+        assert_eq!(e.buffer().lines()[0], "pr");
+    }
+
+    #[test]
+    fn dip_deletes_inner_paragraph() {
+        let mut e = editor_with("a\nb\nc\n\nd");
+        e.jump_cursor(1, 0);
+        run_keys(&mut e, "dip");
+        // Inner paragraph (rows 0..=2) drops; the trailing blank
+        // separator + remaining paragraph stay.
+        assert_eq!(e.buffer().lines(), vec!["".to_string(), "d".into()]);
+    }
+
+    // ─── Operator pipeline spot checks (non-tag text objects) ───────
+
+    #[test]
+    fn ciw_changes_inner_word() {
+        let mut e = editor_with("hello world");
+        e.jump_cursor(0, 1);
+        run_keys(&mut e, "ciwHEY<Esc>");
+        assert_eq!(e.buffer().lines()[0], "HEY world");
+    }
+
+    #[test]
+    fn yiw_yanks_inner_word() {
+        let mut e = editor_with("hello world");
+        e.jump_cursor(0, 1);
+        run_keys(&mut e, "yiw");
+        assert_eq!(e.registers().read('"').unwrap().text, "hello");
+    }
+
+    #[test]
+    fn viw_selects_inner_word() {
+        let mut e = editor_with("hello world");
+        e.jump_cursor(0, 2);
+        run_keys(&mut e, "viw");
+        assert_eq!(e.vim_mode(), VimMode::Visual);
+        run_keys(&mut e, "y");
+        assert_eq!(e.registers().read('"').unwrap().text, "hello");
+    }
+
+    #[test]
+    fn ci_paren_changes_inside() {
+        let mut e = editor_with("f(old)");
+        e.jump_cursor(0, 3);
+        run_keys(&mut e, "ci(NEW<Esc>");
+        assert_eq!(e.buffer().lines()[0], "f(NEW)");
+    }
+
+    #[test]
+    fn yi_double_quote_yanks_inside() {
+        let mut e = editor_with("say \"hi there\" then");
+        e.jump_cursor(0, 6);
+        run_keys(&mut e, "yi\"");
+        assert_eq!(e.registers().read('"').unwrap().text, "hi there");
+    }
+
+    #[test]
+    fn vap_visual_selects_around_paragraph() {
+        let mut e = editor_with("a\nb\n\nc");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "vap");
+        assert_eq!(e.vim_mode(), VimMode::VisualLine);
+        run_keys(&mut e, "y");
+        // Linewise yank includes the paragraph rows + trailing blank.
+        let text = e.registers().read('"').unwrap().text.clone();
+        assert!(text.starts_with("a\nb"));
+    }
+
     #[test]
     fn star_finds_next_occurrence() {
         let mut e = editor_with("foo bar foo baz");
