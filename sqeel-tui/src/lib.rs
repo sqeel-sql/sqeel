@@ -643,7 +643,7 @@ async fn run_loop(
             .map(|t| t.elapsed() >= CONTENT_PUBLISH_DEBOUNCE)
             .unwrap_or(false);
         let buffer_bytes = if should_publish {
-            let lines = editor.textarea.lines();
+            let lines = editor.buffer().lines();
             lines.iter().map(|l| l.len()).sum::<usize>() + lines.len()
         } else {
             0
@@ -721,7 +721,7 @@ async fn run_loop(
             // never allocate a fresh outer `Vec<Vec<…>>` the size of the
             // whole buffer on the main thread.
             if let Some(result) = highlight_thread.try_recv() {
-                let row_count = editor.textarea.lines().len();
+                let row_count = editor.buffer().lines().len();
                 let cursor_row = editor.cursor().0;
                 let diagnostics = merged_diagnostics(&s.lsp_diagnostics, &result.parse_errors);
                 apply_window_spans(&mut editor, &result, row_count, cursor_row, &diagnostics);
@@ -773,7 +773,7 @@ async fn run_loop(
         // regardless of buffer size, so no heavy-pipeline gate here.
         // The highlight thread coalesces (latest-wins) so bursts are cheap.
         const HIGHLIGHT_WINDOW_MARGIN: usize = 500;
-        let viewport_top = editor.textarea.viewport_top_row();
+        let viewport_top = editor.buffer().viewport().top_row;
         let viewport_height = editor.viewport_height_value() as usize;
         let viewport_scrolled = last_highlight_top == usize::MAX
             || viewport_top.abs_diff(last_highlight_top) >= HIGHLIGHT_WINDOW_MARGIN / 2;
@@ -784,7 +784,7 @@ async fn run_loop(
             last_highlight_dialect,
         );
         if should_submit && viewport_height > 0 {
-            let lines = editor.textarea.lines();
+            let lines = editor.buffer().lines();
             if !lines.is_empty() {
                 let start = viewport_top.saturating_sub(HIGHLIGHT_WINDOW_MARGIN);
                 let end =
@@ -810,20 +810,20 @@ async fn run_loop(
         if let Some(ref content) = content {
             doc_version += 1;
 
-            let (row, col) = editor.textarea.cursor();
+            let (row, col) = editor.cursor();
 
             // Suppress completions after `;` or on empty buffer. Whitespace
             // only suppresses when ctx is `Any` — inside Table/Column/Qualified
             // contexts, an empty prefix should still surface candidates (e.g.
             // right after `where `).
-            let char_left = editor.textarea.lines().get(row).and_then(|line| {
+            let char_left = editor.buffer().lines().get(row).and_then(|line| {
                 let before = &line[..col.min(line.len())];
                 before.chars().next_back()
             });
             let hard_suppress = matches!(char_left, Some(';')) || char_left.is_none();
 
-            let prefix = word_prefix_at(editor.textarea.lines(), row, col);
-            let byte_offset = row_col_to_byte(editor.textarea.lines(), row, col);
+            let prefix = word_prefix_at(editor.buffer().lines(), row, col);
+            let byte_offset = row_col_to_byte(editor.buffer().lines(), row, col);
             let ctx = completion_ctx::parse_context(content, byte_offset);
 
             let whitespace_left = matches!(char_left, Some(c) if c.is_whitespace());
@@ -1034,9 +1034,9 @@ async fn run_loop(
                                 // Push the pre-jump cursor onto the
                                 // jumplist so `Ctrl-o` returns to the
                                 // call site after the goto.
-                                let pre = editor.textarea.cursor();
+                                let pre = editor.cursor();
                                 editor.jump_to(line as usize + 1, col as usize + 1);
-                                if editor.textarea.cursor() != pre {
+                                if editor.cursor() != pre {
                                     editor.record_jump(pre);
                                 }
                             } else {
@@ -1629,14 +1629,7 @@ async fn run_loop(
                 // for the yank-register flow).
                 let focus = state.lock().unwrap().focus;
                 if focus == Focus::Editor && editor.vim_mode() == VimMode::Insert {
-                    let parts: Vec<&str> = text.split('\n').collect();
-                    for (i, line) in parts.iter().enumerate() {
-                        editor.textarea.insert_str(*line);
-                        if i + 1 < parts.len() {
-                            editor.textarea.insert_newline();
-                        }
-                    }
-                    editor.mark_content_dirty();
+                    editor.insert_str(&text);
                 } else if let Some(ref mut cmd) = command_input {
                     cmd.insert_str(&text);
                 } else if let Some(ref mut rp) = rename_input {
@@ -2854,7 +2847,7 @@ async fn run_loop(
                     (KeyModifiers::CONTROL, KeyCode::Enter) => {
                         let content = editor.content();
                         let cursor_byte =
-                            cursor_byte_offset(editor.textarea.lines(), editor.textarea.cursor());
+                            cursor_byte_offset(editor.buffer().lines(), editor.cursor());
                         let stmt = statement_at_byte(&content, cursor_byte)
                             .map(|(s, e)| content[s..e].trim().to_string())
                             .filter(|s| !s.is_empty())
@@ -2988,8 +2981,8 @@ async fn run_loop(
                     | (KeyModifiers::NONE, KeyCode::Char('K'))
                         if focus == Focus::Editor && vim_mode == VimMode::Normal =>
                     {
-                        let (row, col) = editor.textarea.cursor();
-                        let word = word_at_cursor(editor.textarea.lines(), row, col);
+                        let (row, col) = editor.cursor();
+                        let word = word_at_cursor(editor.buffer().lines(), row, col);
                         // Three-tier dispatch for K:
                         //   1. Word matches a table whose columns are
                         //      cached → render from cache instantly.
@@ -3042,7 +3035,7 @@ async fn run_loop(
                         if let Some(sqeel_vim::LspIntent::GotoDefinition) = editor.take_lsp_intent()
                             && let Some(ref client) = lsp
                         {
-                            let (row, col) = editor.textarea.cursor();
+                            let (row, col) = editor.cursor();
                             last_definition_id = Some(client.writer().request_definition(
                                 scratch_uri.clone(),
                                 row as u32,
@@ -3430,9 +3423,9 @@ fn draw(
     // the popup stays inside the editor even when the cursor lives deep
     // in a long file.
     if state.show_completions && !state.completions.is_empty() {
-        let (cur_row, cur_col) = editor.textarea.cursor();
-        let top_row = editor.textarea.viewport_top_row();
-        let top_col = editor.textarea.viewport_top_col();
+        let (cur_row, cur_col) = editor.cursor();
+        let top_row = editor.buffer().viewport().top_row;
+        let top_col = editor.buffer().viewport().top_col;
         let screen_row = cur_row.saturating_sub(top_row);
         let screen_col = cur_col.saturating_sub(top_col);
         draw_completions(f, state, right_chunks[0], screen_row, screen_col);
@@ -3773,7 +3766,7 @@ fn draw_status_bar(f: &mut ratatui::Frame<'_>, state: &AppState, editor: &Editor
         .unwrap_or("");
     let center_text = format!(" {conn} › {tab_name} ");
 
-    let (row, col) = editor.textarea.cursor();
+    let (row, col) = editor.cursor();
     let cursor_str = format!(" {}:{} ", row + 1, col + 1);
     let cursor_width = cursor_str.len() as u16;
 

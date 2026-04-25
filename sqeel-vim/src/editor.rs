@@ -11,7 +11,7 @@ use crate::{KeybindingMode, VimMode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use std::sync::atomic::{AtomicU16, Ordering};
-use tui_textarea::{CursorMove, Input, Key, Scrolling, TextArea};
+use tui_textarea::{Input, Key};
 
 /// Where the cursor should land in the viewport after a `z`-family
 /// scroll (`zz` / `zt` / `zb`).
@@ -23,8 +23,12 @@ pub(super) enum CursorScrollTarget {
 }
 
 pub struct Editor<'a> {
-    pub textarea: TextArea<'a>,
     pub keybinding_mode: KeybindingMode,
+    /// Reserved for the lifetime parameter — Editor used to wrap a
+    /// `TextArea<'a>` whose lifetime came from this slot. Phase 7f
+    /// ripped the field but the lifetime stays so downstream
+    /// `Editor<'a>` consumers don't have to churn.
+    _marker: std::marker::PhantomData<&'a ()>,
     /// Set when the user yanks/cuts; caller drains this to write to OS clipboard.
     pub last_yank: Option<String>,
     /// All vim-specific state (mode, pending operator, count, dot-repeat, ...).
@@ -85,10 +89,8 @@ pub enum LspIntent {
 
 impl<'a> Editor<'a> {
     pub fn new(keybinding_mode: KeybindingMode) -> Self {
-        let mut textarea = TextArea::default();
-        textarea.set_max_histories(0);
         Self {
-            textarea,
+            _marker: std::marker::PhantomData,
             keybinding_mode,
             last_yank: None,
             vim: VimState::default(),
@@ -172,16 +174,10 @@ impl<'a> Editor<'a> {
         &mut self.buffer
     }
 
-    /// Reverse-sync: push the migration buffer's cursor back into the
-    /// textarea via a `Jump`. Used by motion handlers that have been
-    /// ported to call `Buffer::move_*` directly — the textarea is
-    /// still the input/edit authority during the Phase 7f port, so
-    /// its cursor has to follow the buffer's after each motion.
-    pub(crate) fn push_buffer_cursor_to_textarea(&mut self) {
-        let pos = self.buffer.cursor();
-        self.textarea
-            .move_cursor(CursorMove::Jump(pos.row, pos.col));
-    }
+    /// Historical reverse-sync hook from when the textarea mirrored
+    /// the buffer. Now that Buffer is the cursor authority this is a
+    /// no-op; call sites can remain in place during the migration.
+    pub(crate) fn push_buffer_cursor_to_textarea(&mut self) {}
 
     /// Force the buffer viewport's top row without touching the
     /// cursor. Used by tests that simulate a scroll without the
@@ -196,16 +192,13 @@ impl<'a> Editor<'a> {
         self.buffer.viewport_mut().top_row = target;
     }
 
-    /// Set the cursor to `(row, col)` (clamped to the buffer's
-    /// content) and mirror it into the textarea. Replaces the
-    /// scattered `ed.textarea.move_cursor(CursorMove::Jump(r, c))`
-    /// pattern in motion + operator code.
+    /// Set the cursor to `(row, col)`, clamped to the buffer's
+    /// content. Replaces the scattered
+    /// `ed.textarea.move_cursor(CursorMove::Jump(r, c))` pattern that
+    /// existed before Phase 7f.
     pub(crate) fn jump_cursor(&mut self, row: usize, col: usize) {
         self.buffer
             .set_cursor(sqeel_buffer::Position::new(row, col));
-        let pos = self.buffer.cursor();
-        self.textarea
-            .move_cursor(CursorMove::Jump(pos.row, pos.col));
     }
 
     /// `(row, col)` cursor read sourced from the migration buffer.
@@ -226,36 +219,19 @@ impl<'a> Editor<'a> {
         self.pending_lsp.take()
     }
 
-    /// Mirror the textarea's current cursor + sticky col into the
-    /// migration buffer. Called after every motion so the buffer
-    /// stays in sync with the still-authoritative textarea during
-    /// phases 7b-7e of the migration.
-    ///
-    /// Once the per-edit + per-motion call sites are ported in
-    /// later phases, this drops out — the buffer becomes the source
-    /// of truth and the textarea is mirrored from it instead.
+    /// Refresh the buffer's host-side state — sticky col + viewport
+    /// height. Called from the per-step boilerplate; was the textarea
+    /// → buffer mirror before Phase 7f put Buffer in charge.
     pub(crate) fn sync_buffer_from_textarea(&mut self) {
-        let (row, col) = self.textarea.cursor();
-        self.buffer
-            .set_cursor(sqeel_buffer::Position::new(row, col));
         self.buffer.set_sticky_col(self.vim.sticky_col);
         let height = self.viewport_height_value();
-        // Buffer is now authoritative for viewport top — only height
-        // gets refreshed from the host. Pulling viewport top from the
-        // textarea would clobber `set_viewport_top` and any
-        // buffer-side scroll done while the textarea's viewport
-        // height is still 0.
         self.buffer.viewport_mut().height = height;
     }
 
-    /// Full content sync — mirrors lines + cursor + sticky col +
-    /// viewport from the textarea into the buffer. Called after
-    /// every key handler in `step()` so per-edit mutations
-    /// (insert_char, delete_char, …) propagate to the buffer
-    /// without each call site having to call into it explicitly.
+    /// Was the full textarea → buffer content sync. Buffer is the
+    /// content authority now; this remains as a no-op so the per-step
+    /// call sites don't have to be ripped in the same patch.
     pub(crate) fn sync_buffer_content_from_textarea(&mut self) {
-        let text = self.textarea.lines().join("\n");
-        self.buffer.replace_all(&text);
         self.sync_buffer_from_textarea();
     }
 
@@ -299,14 +275,10 @@ impl<'a> Editor<'a> {
     /// the textarea from the buffer's lines + cursor, preserving yank
     /// text. Heavy (allocates a fresh `TextArea`) but correct; the
     /// textarea field disappears at the end of Phase 7f anyway.
-    pub(crate) fn push_buffer_content_to_textarea(&mut self) {
-        let lines: Vec<String> = self.buffer.lines().to_vec();
-        self.textarea = TextArea::new(lines);
-        self.textarea.set_max_histories(0);
-        let pos = self.buffer.cursor();
-        self.textarea
-            .move_cursor(CursorMove::Jump(pos.row, pos.col));
-    }
+    /// No-op since Buffer is the content authority. Retained as a
+    /// shim so call sites in `mutate_edit` and friends don't have to
+    /// be ripped in lockstep with the field removal.
+    pub(crate) fn push_buffer_content_to_textarea(&mut self) {}
 
     /// Single choke-point for "the buffer just changed". Sets the
     /// dirty flag and drops the cached `content_arc` snapshot so
@@ -481,12 +453,7 @@ impl<'a> Editor<'a> {
         if lines.is_empty() {
             lines.push(String::new());
         }
-        self.textarea = TextArea::new(lines);
-        self.textarea.set_max_histories(0);
-        // Mirror the load into the migration buffer. Phase 7a only
-        // syncs on `set_content`; phases 7b-7c plumb the per-edit
-        // mutations through. Yank survives across loads automatically
-        // since it lives on `self` now (not in the textarea).
+        let _ = lines;
         self.buffer = sqeel_buffer::Buffer::from_str(text);
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -535,13 +502,7 @@ impl<'a> Editor<'a> {
         self.buffer.viewport_mut().top_row = new_top;
         // Mirror to textarea so its viewport reads (still consumed by
         // a couple of helpers) stay accurate.
-        let real_delta = new_top as isize - cur_top;
-        if real_delta != 0 {
-            self.textarea.scroll(Scrolling::Delta {
-                rows: real_delta.clamp(i16::MIN as isize, i16::MAX as isize) as i16,
-                cols: 0,
-            });
-        }
+        let _ = cur_top;
         if height == 0 {
             return;
         }
@@ -561,8 +522,6 @@ impl<'a> Editor<'a> {
             let target_col = cursor.col.min(line_len.saturating_sub(1));
             self.buffer
                 .set_cursor(sqeel_buffer::Position::new(target_row, target_col));
-            self.textarea
-                .move_cursor(CursorMove::Jump(target_row, target_col));
         }
     }
 
@@ -572,7 +531,6 @@ impl<'a> Editor<'a> {
         let target = row.min(max);
         self.buffer
             .set_cursor(sqeel_buffer::Position::new(target, 0));
-        self.textarea.move_cursor(CursorMove::Jump(target, 0));
     }
 
     /// Scroll so the cursor row lands at the given viewport position:
@@ -590,14 +548,10 @@ impl<'a> Editor<'a> {
             CursorScrollTarget::Top => cur_row,
             CursorScrollTarget::Bottom => cur_row.saturating_sub(height.saturating_sub(1)),
         };
-        let delta = new_top as isize - cur_top as isize;
-        if delta == 0 {
+        if new_top == cur_top {
             return;
         }
-        self.textarea.scroll(Scrolling::Delta {
-            rows: delta.clamp(i16::MIN as isize, i16::MAX as isize) as i16,
-            cols: 0,
-        });
+        self.buffer.viewport_mut().top_row = new_top;
     }
 
     /// Translate a terminal mouse position into a (row, col) inside the document.
@@ -623,7 +577,7 @@ impl<'a> Editor<'a> {
         let r = r.min(max_row);
         let line_len = self.buffer.line(r).map(|l| l.chars().count()).unwrap_or(0);
         let c = col.saturating_sub(1).min(line_len);
-        self.textarea.move_cursor(CursorMove::Jump(r, c));
+        self.buffer.set_cursor(sqeel_buffer::Position::new(r, c));
     }
 
     /// Jump cursor to the terminal-space mouse position; exits Visual modes if active.
@@ -632,7 +586,7 @@ impl<'a> Editor<'a> {
             self.vim.force_normal();
         }
         let (r, c) = self.mouse_to_doc_pos(area, col, row);
-        self.textarea.move_cursor(CursorMove::Jump(r, c));
+        self.buffer.set_cursor(sqeel_buffer::Position::new(r, c));
     }
 
     /// Begin a mouse-drag selection: anchor at current cursor and enter Visual mode.
@@ -646,7 +600,7 @@ impl<'a> Editor<'a> {
     /// Extend an in-progress mouse drag to the given terminal-space position.
     pub fn mouse_extend_drag(&mut self, area: Rect, col: u16, row: u16) {
         let (r, c) = self.mouse_to_doc_pos(area, col, row);
-        self.textarea.move_cursor(CursorMove::Jump(r, c));
+        self.buffer.set_cursor(sqeel_buffer::Position::new(r, c));
     }
 
     pub fn insert_str(&mut self, text: &str) {
@@ -702,13 +656,6 @@ impl<'a> Editor<'a> {
 
     pub(super) fn restore(&mut self, lines: Vec<String>, cursor: (usize, usize)) {
         let text = lines.join("\n");
-        self.textarea = TextArea::new(lines);
-        self.textarea.set_max_histories(0);
-        self.textarea
-            .move_cursor(CursorMove::Jump(cursor.0, cursor.1));
-        // Mirror into the migration buffer so subsequent step paths
-        // see the new content + cursor without waiting for the
-        // textarea→buffer sync at step start.
         self.buffer.replace_all(&text);
         self.buffer
             .set_cursor(sqeel_buffer::Position::new(cursor.0, cursor.1));
@@ -801,10 +748,10 @@ mod tests {
     fn vim_shift_i_moves_to_first_non_whitespace() {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("   hello");
-        e.textarea.move_cursor(CursorMove::End);
+        e.jump_cursor(0, 8);
         e.handle_key(shift_key(KeyCode::Char('I')));
         assert_eq!(e.vim_mode(), VimMode::Insert);
-        assert_eq!(e.textarea.cursor(), (0, 3));
+        assert_eq!(e.cursor(), (0, 3));
     }
 
     #[test]
@@ -813,7 +760,7 @@ mod tests {
         e.set_content("hello");
         e.handle_key(shift_key(KeyCode::Char('A')));
         assert_eq!(e.vim_mode(), VimMode::Insert);
-        assert_eq!(e.textarea.cursor().1, 5);
+        assert_eq!(e.cursor().1, 5);
     }
 
     #[test]
@@ -830,7 +777,7 @@ mod tests {
             e.handle_key(key(KeyCode::Char(d)));
         }
         e.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(e.textarea.cursor().0, 10);
+        assert_eq!(e.cursor().0, 10);
     }
 
     #[test]
@@ -847,8 +794,8 @@ mod tests {
         }
         e.handle_key(key(KeyCode::Esc));
         assert_eq!(e.vim_mode(), VimMode::Normal);
-        assert_eq!(e.textarea.lines().len(), 4);
-        assert!(e.textarea.lines().iter().skip(1).all(|l| l == "world"));
+        assert_eq!(e.buffer().lines().len(), 4);
+        assert!(e.buffer().lines().iter().skip(1).all(|l| l == "world"));
     }
 
     #[test]
@@ -864,7 +811,7 @@ mod tests {
         }
         e.handle_key(key(KeyCode::Esc));
         assert_eq!(e.vim_mode(), VimMode::Normal);
-        assert_eq!(e.textarea.lines()[0], "ababab");
+        assert_eq!(e.buffer().lines()[0], "ababab");
     }
 
     #[test]
@@ -873,18 +820,18 @@ mod tests {
         e.set_content("hello");
         e.handle_key(shift_key(KeyCode::Char('O')));
         assert_eq!(e.vim_mode(), VimMode::Insert);
-        assert_eq!(e.textarea.cursor(), (0, 0));
-        assert_eq!(e.textarea.lines().len(), 2);
+        assert_eq!(e.cursor(), (0, 0));
+        assert_eq!(e.buffer().lines().len(), 2);
     }
 
     #[test]
     fn vim_gg_goes_to_top() {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("a\nb\nc");
-        e.textarea.move_cursor(CursorMove::Bottom);
+        e.jump_cursor(2, 0);
         e.handle_key(key(KeyCode::Char('g')));
         e.handle_key(key(KeyCode::Char('g')));
-        assert_eq!(e.textarea.cursor().0, 0);
+        assert_eq!(e.cursor().0, 0);
     }
 
     #[test]
@@ -892,7 +839,7 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("a\nb\nc");
         e.handle_key(shift_key(KeyCode::Char('G')));
-        assert_eq!(e.textarea.cursor().0, 2);
+        assert_eq!(e.cursor().0, 2);
     }
 
     #[test]
@@ -901,8 +848,8 @@ mod tests {
         e.set_content("first\nsecond");
         e.handle_key(key(KeyCode::Char('d')));
         e.handle_key(key(KeyCode::Char('d')));
-        assert_eq!(e.textarea.lines().len(), 1);
-        assert_eq!(e.textarea.lines()[0], "second");
+        assert_eq!(e.buffer().lines().len(), 1);
+        assert_eq!(e.buffer().lines()[0], "second");
     }
 
     #[test]
@@ -912,7 +859,7 @@ mod tests {
         e.handle_key(key(KeyCode::Char('d')));
         e.handle_key(key(KeyCode::Char('w')));
         assert_eq!(e.vim_mode(), VimMode::Normal);
-        assert!(!e.textarea.lines()[0].starts_with("hello"));
+        assert!(!e.buffer().lines()[0].starts_with("hello"));
     }
 
     #[test]
@@ -928,11 +875,11 @@ mod tests {
     fn vim_yy_does_not_move_cursor() {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("first\nsecond\nthird");
-        e.textarea.move_cursor(CursorMove::Down);
-        let before = e.textarea.cursor();
+        e.jump_cursor(1, 0);
+        let before = e.cursor();
         e.handle_key(key(KeyCode::Char('y')));
         e.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(e.textarea.cursor(), before);
+        assert_eq!(e.cursor(), before);
         assert_eq!(e.vim_mode(), VimMode::Normal);
     }
 
@@ -963,10 +910,10 @@ mod tests {
         e.handle_key(key(KeyCode::Enter));
         e.handle_key(key(KeyCode::Enter));
         e.handle_key(key(KeyCode::Esc));
-        assert_eq!(e.textarea.lines().len(), 3);
+        assert_eq!(e.buffer().lines().len(), 3);
         e.handle_key(key(KeyCode::Char('u')));
-        assert_eq!(e.textarea.lines().len(), 1);
-        assert_eq!(e.textarea.lines()[0], "hello");
+        assert_eq!(e.buffer().lines().len(), 1);
+        assert_eq!(e.buffer().lines()[0], "hello");
     }
 
     #[test]
@@ -978,11 +925,11 @@ mod tests {
             e.handle_key(key(KeyCode::Char(c)));
         }
         e.handle_key(key(KeyCode::Esc));
-        let after = e.textarea.lines()[0].clone();
+        let after = e.buffer().lines()[0].clone();
         e.handle_key(key(KeyCode::Char('u')));
-        assert_eq!(e.textarea.lines()[0], "hello");
+        assert_eq!(e.buffer().lines()[0], "hello");
         e.handle_key(ctrl_key(KeyCode::Char('r')));
-        assert_eq!(e.textarea.lines()[0], after);
+        assert_eq!(e.buffer().lines()[0], after);
     }
 
     #[test]
@@ -991,10 +938,10 @@ mod tests {
         e.set_content("first\nsecond");
         e.handle_key(key(KeyCode::Char('d')));
         e.handle_key(key(KeyCode::Char('d')));
-        assert_eq!(e.textarea.lines().len(), 1);
+        assert_eq!(e.buffer().lines().len(), 1);
         e.handle_key(key(KeyCode::Char('u')));
-        assert_eq!(e.textarea.lines().len(), 2);
-        assert_eq!(e.textarea.lines()[0], "first");
+        assert_eq!(e.buffer().lines().len(), 2);
+        assert_eq!(e.buffer().lines()[0], "first");
     }
 
     #[test]
@@ -1010,7 +957,7 @@ mod tests {
         e.set_content("hello");
         e.handle_key(key(KeyCode::Char('r')));
         e.handle_key(key(KeyCode::Char('x')));
-        assert_eq!(e.textarea.lines()[0].chars().next(), Some('x'));
+        assert_eq!(e.buffer().lines()[0].chars().next(), Some('x'));
     }
 
     #[test]
@@ -1018,7 +965,7 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("hello");
         e.handle_key(key(KeyCode::Char('~')));
-        assert_eq!(e.textarea.lines()[0].chars().next(), Some('H'));
+        assert_eq!(e.buffer().lines()[0].chars().next(), Some('H'));
     }
 
     #[test]
@@ -1067,16 +1014,7 @@ mod tests {
     }
 
     fn prime_viewport(e: &mut Editor<'_>, height: u16) {
-        use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
         e.set_viewport_height(height);
-        let r = Rect {
-            x: 0,
-            y: 0,
-            width: 40,
-            height,
-        };
-        let mut b = Buffer::empty(r);
-        (&e.textarea).render(r, &mut b);
     }
 
     #[test]
@@ -1084,11 +1022,11 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content(&many_lines(100));
         prime_viewport(&mut e, 20);
-        e.textarea.move_cursor(CursorMove::Jump(50, 0));
+        e.jump_cursor(50, 0);
         e.handle_key(key(KeyCode::Char('z')));
         e.handle_key(key(KeyCode::Char('z')));
-        assert_eq!(e.textarea.viewport_top_row(), 40);
-        assert_eq!(e.textarea.cursor().0, 50);
+        assert_eq!(e.buffer().viewport().top_row, 40);
+        assert_eq!(e.cursor().0, 50);
     }
 
     #[test]
@@ -1096,11 +1034,11 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content(&many_lines(100));
         prime_viewport(&mut e, 20);
-        e.textarea.move_cursor(CursorMove::Jump(50, 0));
+        e.jump_cursor(50, 0);
         e.handle_key(key(KeyCode::Char('z')));
         e.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(e.textarea.viewport_top_row(), 50);
-        assert_eq!(e.textarea.cursor().0, 50);
+        assert_eq!(e.buffer().viewport().top_row, 50);
+        assert_eq!(e.cursor().0, 50);
     }
 
     #[test]
@@ -1108,8 +1046,8 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("x = 41");
         e.handle_key(ctrl_key(KeyCode::Char('a')));
-        assert_eq!(e.textarea.lines()[0], "x = 42");
-        assert_eq!(e.textarea.cursor(), (0, 5));
+        assert_eq!(e.buffer().lines()[0], "x = 42");
+        assert_eq!(e.cursor(), (0, 5));
     }
 
     #[test]
@@ -1117,8 +1055,8 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("foo 99 bar");
         e.handle_key(ctrl_key(KeyCode::Char('a')));
-        assert_eq!(e.textarea.lines()[0], "foo 100 bar");
-        assert_eq!(e.textarea.cursor(), (0, 6));
+        assert_eq!(e.buffer().lines()[0], "foo 100 bar");
+        assert_eq!(e.cursor(), (0, 6));
     }
 
     #[test]
@@ -1129,7 +1067,7 @@ mod tests {
             e.handle_key(key(KeyCode::Char(d)));
         }
         e.handle_key(ctrl_key(KeyCode::Char('a')));
-        assert_eq!(e.textarea.lines()[0], "x = 15");
+        assert_eq!(e.buffer().lines()[0], "x = 15");
     }
 
     #[test]
@@ -1137,7 +1075,7 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("n=5");
         e.handle_key(ctrl_key(KeyCode::Char('x')));
-        assert_eq!(e.textarea.lines()[0], "n=4");
+        assert_eq!(e.buffer().lines()[0], "n=4");
     }
 
     #[test]
@@ -1145,7 +1083,7 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("v=0");
         e.handle_key(ctrl_key(KeyCode::Char('x')));
-        assert_eq!(e.textarea.lines()[0], "v=-1");
+        assert_eq!(e.buffer().lines()[0], "v=-1");
     }
 
     #[test]
@@ -1153,7 +1091,7 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("a = -5");
         e.handle_key(ctrl_key(KeyCode::Char('a')));
-        assert_eq!(e.textarea.lines()[0], "a = -4");
+        assert_eq!(e.buffer().lines()[0], "a = -4");
     }
 
     #[test]
@@ -1161,7 +1099,7 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content("no digits here");
         e.handle_key(ctrl_key(KeyCode::Char('a')));
-        assert_eq!(e.textarea.lines()[0], "no digits here");
+        assert_eq!(e.buffer().lines()[0], "no digits here");
     }
 
     #[test]
@@ -1169,11 +1107,11 @@ mod tests {
         let mut e = Editor::new(KeybindingMode::Vim);
         e.set_content(&many_lines(100));
         prime_viewport(&mut e, 20);
-        e.textarea.move_cursor(CursorMove::Jump(50, 0));
+        e.jump_cursor(50, 0);
         e.handle_key(key(KeyCode::Char('z')));
         e.handle_key(key(KeyCode::Char('b')));
-        assert_eq!(e.textarea.viewport_top_row(), 31);
-        assert_eq!(e.textarea.cursor().0, 50);
+        assert_eq!(e.buffer().viewport().top_row, 31);
+        assert_eq!(e.cursor().0, 50);
     }
 
     /// Contract that the TUI drain relies on: `set_content` flags the

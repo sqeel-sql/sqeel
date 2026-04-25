@@ -72,7 +72,7 @@
 //!   `last_search_pattern` rather than the TUI loop). Safe to defer.
 
 use crate::VimMode;
-use tui_textarea::{CursorMove, Input, Key};
+use tui_textarea::{Input, Key};
 
 use crate::editor::Editor;
 
@@ -650,8 +650,7 @@ fn step_insert(ed: &mut Editor<'_>, input: Input) -> bool {
                 // at their logical position.
                 let (row, col) = ed.cursor();
                 indent_rows(ed, row, row, 1);
-                ed.textarea
-                    .move_cursor(CursorMove::Jump(row, col + SHIFTWIDTH));
+                ed.jump_cursor(row, col + SHIFTWIDTH);
                 return true;
             }
             Key::Char('d') => {
@@ -1353,12 +1352,7 @@ fn jump_forward(ed: &mut Editor<'_>) {
 fn clamp_pos(ed: &Editor<'_>, pos: (usize, usize)) -> (usize, usize) {
     let last_row = ed.buffer().lines().len().saturating_sub(1);
     let r = pos.0.min(last_row);
-    let line_len = ed
-        .textarea
-        .lines()
-        .get(r)
-        .map(|l| l.chars().count())
-        .unwrap_or(0);
+    let line_len = ed.buffer().line(r).map(|l| l.chars().count()).unwrap_or(0);
     let c = pos.1.min(line_len.saturating_sub(1));
     (r, c)
 }
@@ -2976,16 +2970,11 @@ fn block_replace(ed: &mut Editor<'_>, ch: char) {
     ed.jump_cursor(top, left);
 }
 
-/// Replace the textarea's buffer with `lines` while disabling the
-/// textarea's own history (we keep our own). Yank survives across
-/// resets without explicit carrying since it's owned by Editor now.
+/// Replace buffer content with `lines` while preserving the cursor.
+/// Used by indent / outdent / block_replace to wholesale rewrite
+/// rows without going through the per-edit funnel.
 fn reset_textarea_lines(ed: &mut Editor<'_>, lines: Vec<String>) {
     let cursor = ed.cursor();
-    ed.textarea = tui_textarea::TextArea::new(lines.clone());
-    ed.textarea.set_max_histories(0);
-    // Mirror the wholesale reset into the migration buffer so any
-    // subsequent `mutate_edit` sees the same content. Keep the
-    // current cursor position (clamping handled by `set_cursor`).
     ed.buffer_mut().replace_all(&lines.join("\n"));
     ed.buffer_mut()
         .set_cursor(sqeel_buffer::Position::new(cursor.0, cursor.1));

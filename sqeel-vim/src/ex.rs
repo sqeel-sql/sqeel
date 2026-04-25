@@ -7,7 +7,6 @@
 //! to the caller so the TUI loop can run them.
 
 use crate::editor::Editor;
-use tui_textarea::CursorMove;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExEffect {
@@ -66,7 +65,7 @@ pub fn run(editor: &mut Editor<'_>, input: &str) -> ExEffect {
         }
         "noh" | "nohlsearch" => {
             // Clearing the pattern removes the highlight.
-            let _ = editor.textarea.set_search_pattern("");
+            editor.buffer_mut().set_search_pattern(None);
             return ExEffect::Ok;
         }
         _ => {}
@@ -193,13 +192,13 @@ fn apply_substitute(
 
     let (range_start, range_end) = match scope {
         SubScope::CurrentLine => {
-            let r = editor.textarea.cursor().0;
+            let r = editor.cursor().0;
             (r, r)
         }
-        SubScope::Whole => (0, editor.textarea.lines().len().saturating_sub(1)),
+        SubScope::Whole => (0, editor.buffer().lines().len().saturating_sub(1)),
     };
 
-    let mut new_lines: Vec<String> = editor.textarea.lines().to_vec();
+    let mut new_lines: Vec<String> = editor.buffer().lines().to_vec();
     let mut count = 0usize;
     let clamp = range_end.min(new_lines.len().saturating_sub(1));
     for line in new_lines[range_start..=clamp].iter_mut() {
@@ -214,16 +213,12 @@ fn apply_substitute(
         return Ok(0);
     }
 
-    // Apply the new content without clobbering the yank buffer / session state.
-    let carried_yank = editor.textarea.yank_text();
-    editor.textarea = tui_textarea::TextArea::new(new_lines);
-    editor.textarea.set_max_histories(0);
-    if !carried_yank.is_empty() {
-        editor.textarea.set_yank_text(carried_yank);
-    }
+    // Apply the new content. Yank survives across loads since it's
+    // owned by Editor now (was previously held by the textarea).
+    editor.buffer_mut().replace_all(&new_lines.join("\n"));
     editor
-        .textarea
-        .move_cursor(CursorMove::Jump(range_start, 0));
+        .buffer_mut()
+        .set_cursor(sqeel_buffer::Position::new(range_start, 0));
     editor.mark_dirty_after_ex();
     Ok(count)
 }
@@ -301,16 +296,16 @@ mod tests {
         let mut e = new("foo foo\nfoo foo");
         let effect = run(&mut e, "s/foo/bar/");
         assert_eq!(effect, ExEffect::Substituted { count: 1 });
-        assert_eq!(e.textarea.lines()[0], "bar foo");
-        assert_eq!(e.textarea.lines()[1], "foo foo");
+        assert_eq!(e.buffer().lines()[0], "bar foo");
+        assert_eq!(e.buffer().lines()[1], "foo foo");
     }
 
     #[test]
     fn substitute_current_line_global() {
         let mut e = new("foo foo\nfoo");
         run(&mut e, "s/foo/bar/g");
-        assert_eq!(e.textarea.lines()[0], "bar bar");
-        assert_eq!(e.textarea.lines()[1], "foo");
+        assert_eq!(e.buffer().lines()[0], "bar bar");
+        assert_eq!(e.buffer().lines()[1], "foo");
     }
 
     #[test]
@@ -318,9 +313,9 @@ mod tests {
         let mut e = new("foo\nfoo foo\nbar");
         let effect = run(&mut e, "%s/foo/xyz/g");
         assert_eq!(effect, ExEffect::Substituted { count: 3 });
-        assert_eq!(e.textarea.lines()[0], "xyz");
-        assert_eq!(e.textarea.lines()[1], "xyz xyz");
-        assert_eq!(e.textarea.lines()[2], "bar");
+        assert_eq!(e.buffer().lines()[0], "xyz");
+        assert_eq!(e.buffer().lines()[1], "xyz xyz");
+        assert_eq!(e.buffer().lines()[2], "bar");
     }
 
     #[test]
@@ -328,7 +323,7 @@ mod tests {
         let mut e = new("hello");
         let effect = run(&mut e, "s/xyz/abc/");
         assert_eq!(effect, ExEffect::Substituted { count: 0 });
-        assert_eq!(e.textarea.lines()[0], "hello");
+        assert_eq!(e.buffer().lines()[0], "hello");
     }
 
     #[test]
@@ -336,28 +331,28 @@ mod tests {
         let mut e = new("Foo");
         let effect = run(&mut e, "s/foo/bar/i");
         assert_eq!(effect, ExEffect::Substituted { count: 1 });
-        assert_eq!(e.textarea.lines()[0], "bar");
+        assert_eq!(e.buffer().lines()[0], "bar");
     }
 
     #[test]
     fn substitute_accepts_alternate_separator() {
         let mut e = new("/usr/local/bin");
         run(&mut e, "s#/usr#/opt#");
-        assert_eq!(e.textarea.lines()[0], "/opt/local/bin");
+        assert_eq!(e.buffer().lines()[0], "/opt/local/bin");
     }
 
     #[test]
     fn substitute_ampersand_in_replacement() {
         let mut e = new("foo");
         run(&mut e, "s/foo/[&]/");
-        assert_eq!(e.textarea.lines()[0], "[foo]");
+        assert_eq!(e.buffer().lines()[0], "[foo]");
     }
 
     #[test]
     fn goto_line() {
         let mut e = new("a\nb\nc\nd");
         run(&mut e, "3");
-        assert_eq!(e.textarea.cursor().0, 2);
+        assert_eq!(e.cursor().0, 2);
     }
 
     #[test]
@@ -421,6 +416,6 @@ mod tests {
         let mut e = new("a/b/c");
         let effect = run(&mut e, "s/\\//-/g");
         assert_eq!(effect, ExEffect::Substituted { count: 2 });
-        assert_eq!(e.textarea.lines()[0], "a-b-c");
+        assert_eq!(e.buffer().lines()[0], "a-b-c");
     }
 }
