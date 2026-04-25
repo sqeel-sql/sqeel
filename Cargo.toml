@@ -6,9 +6,5 @@ members = [
     "sqeel-gui",
     "sqeel-vim",
     "sqeel",
-    "vendor/tui-textarea",
 ]
 resolver = "2"
-
-[patch.crates-io]
-tui-textarea = { path = "vendor/tui-textarea" }

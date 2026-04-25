@@ -1,10 +1,11 @@
-//! Vim-mode editor widget built on top of `tui-textarea`.
+//! Vim-mode editor widget built on top of `sqeel-buffer`.
 //!
 //! Exposes an [`Editor`] you can drop into a ratatui layout, a command
 //! grammar that covers the bulk of vim's normal / insert / visual /
 //! visual-line / visual-block modes, text-object operators, dot-repeat,
-//! ex-command handling (`:s/foo/bar/g`, `:w`, `:q`, `:noh`, ...) and
-//! render-overlay helpers for painting selection highlights.
+//! and ex-command handling (`:s/foo/bar/g`, `:w`, `:q`, `:noh`, ...).
+//! Rendering goes through `sqeel_buffer::BufferView`; selection / gutter
+//! highlights are painted in the same single-pass as text.
 //!
 //! This crate currently lives inside the sqeel workspace and will likely
 //! be promoted to a standalone crate once the API stabilises. The public
@@ -13,18 +14,14 @@
 //! - [`Editor`] — the editor widget.
 //! - [`KeybindingMode`] / [`VimMode`] — mode enums used by host apps.
 //! - [`ex::run`] / [`ex::ExEffect`] — drive ex-mode commands.
-//! - [`paint_char_overlay`] / [`paint_line_overlay`] /
-//!   [`paint_block_overlay`] — post-render selection highlighting.
 
 mod editor;
 pub mod ex;
-mod render;
+mod input;
 mod vim;
 
 pub use editor::{Editor, LspIntent};
-pub use render::{
-    GutterSign, paint_block_overlay, paint_char_overlay, paint_gutter_signs, paint_line_overlay,
-};
+pub use input::{Input, Key};
 pub use vim::SearchPrompt;
 
 /// Which keyboard discipline the editor uses. Currently vim-only, but

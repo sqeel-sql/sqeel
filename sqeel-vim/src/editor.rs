@@ -1,4 +1,4 @@
-//! Editor wrapper around `tui_textarea::TextArea`.
+//! Editor — the public sqeel-vim type, layered over `sqeel_buffer::Buffer`.
 //!
 //! This file owns the public Editor API — construction, content access,
 //! mouse and goto helpers, the (buffer-level) undo stack, and insert-mode
@@ -6,12 +6,12 @@
 //! [`vim`] and communicates with Editor through a small internal API
 //! exposed via `pub(super)` fields and helper methods.
 
+use crate::input::{Input, Key};
 use crate::vim::{self, VimState};
 use crate::{KeybindingMode, VimMode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use std::sync::atomic::{AtomicU16, Ordering};
-use tui_textarea::{Input, Key};
 
 /// Where the cursor should land in the viewport after a `z`-family
 /// scroll (`zz` / `zt` / `zb`).

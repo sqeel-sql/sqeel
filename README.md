@@ -249,10 +249,9 @@ render as a navigable grid; plain markdown is styled in-place.
 sqeel-core/            # state, DB, query runner, schema, config
 sqeel-tui/             # ratatui terminal provider
 sqeel-gui/             # iced native GUI provider
-sqeel-vim/             # vim-mode editor (on top of sqeel-buffer; tui-textarea mirror is being phased out)
+sqeel-vim/             # vim-mode engine + ex commands (built on sqeel-buffer)
 sqeel-buffer/          # vim-shaped text buffer + cell-write render widget
 sqeel/                 # binaries: sqeel + sqeel-gui
-vendor/tui-textarea/   # vendored + patched text area (render cache, signs) — being removed in the sqeel-buffer migration
 ```
 
 ## License

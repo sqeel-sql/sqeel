@@ -8,7 +8,6 @@ description = "Vim-mode engine + ex commands used by sqeel. Designed for eventua
 sqeel-buffer = { path = "../sqeel-buffer" }
 ratatui = "0.29.0"
 crossterm = { version = "0.28.1", features = ["event-stream"] }
-tui-textarea = { version = "0.7.0", features = ["search"] }
 regex = "1"
 serde = { version = "1", features = ["derive"], optional = true }
 

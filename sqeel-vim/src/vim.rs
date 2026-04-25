@@ -72,7 +72,7 @@
 //!   `last_search_pattern` rather than the TUI loop). Safe to defer.
 
 use crate::VimMode;
-use tui_textarea::{Input, Key};
+use crate::input::{Input, Key};
 
 use crate::editor::Editor;
 
