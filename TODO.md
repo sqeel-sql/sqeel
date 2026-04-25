@@ -72,9 +72,10 @@ toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
   `delta`, marks tied to deleted rows are dropped. Restore-based paths (undo,
   sort, substitute) bypass this — they replace the buffer wholesale, so marks
   may go stale across those operations. Tracked separately if it bites.
-- **`g;` / `g,` (M).** Walk the change list (each `mutate_edit` pushes onto a
-  ring). Already have `last_edit_pos` — promote to a bounded ring; `g;` pops
-  back, `g,` pops forward.
+- ~~**`g;` / `g,` (M).**~~ Done. `mutate_edit` appends to a bounded
+  `change_list` (cap 100, consecutive-cell dedupe). `g;` walks toward older
+  entries, `g,` toward newer; counts compound (`3g;`). A new edit during a walk
+  truncates the forward half (vim's branching rule).
 
 ---
 

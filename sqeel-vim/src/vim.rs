@@ -364,6 +364,13 @@ pub struct VimState {
     /// Position of the most recent buffer mutation. Surfaced via
     /// the `'.` / `` `. `` marks for quick "back to last edit".
     pub(super) last_edit_pos: Option<(usize, usize)>,
+    /// Bounded ring of recent edit positions (newest at the back).
+    /// `g;` walks toward older entries, `g,` toward newer ones. Capped
+    /// at [`CHANGE_LIST_MAX`].
+    pub(super) change_list: Vec<(usize, usize)>,
+    /// Index into `change_list` while walking. `None` outside a walk —
+    /// any new edit clears it (and trims forward entries past it).
+    pub(super) change_list_cursor: Option<usize>,
     /// Snapshot of the last visual selection for `gv` re-entry.
     /// Stored on every Visual / VisualLine / VisualBlock exit.
     pub(super) last_visual: Option<LastVisual>,
@@ -411,6 +418,7 @@ pub struct VimState {
 }
 
 const SEARCH_HISTORY_MAX: usize = 100;
+pub(crate) const CHANGE_LIST_MAX: usize = 100;
 
 /// Active `/` or `?` search prompt. Text mutations drive the textarea's
 /// live search pattern so matches highlight as the user types.
@@ -626,6 +634,37 @@ fn step_search_prompt(ed: &mut Editor<'_>, input: Input) -> bool {
         _ => {}
     }
     true
+}
+
+/// `g;` / `g,` body. `dir = -1` walks toward older entries (g;),
+/// `dir = 1` toward newer (g,). `count` repeats the step. Stops at
+/// the ends of the ring; off-ring positions are silently ignored.
+fn walk_change_list(ed: &mut Editor<'_>, dir: isize, count: usize) {
+    if ed.vim.change_list.is_empty() {
+        return;
+    }
+    let len = ed.vim.change_list.len();
+    let mut idx: isize = match (ed.vim.change_list_cursor, dir) {
+        (None, -1) => len as isize - 1,
+        (None, 1) => return, // already past the newest entry
+        (Some(i), -1) => i as isize - 1,
+        (Some(i), 1) => i as isize + 1,
+        _ => return,
+    };
+    for _ in 1..count {
+        let next = idx + dir;
+        if next < 0 || next >= len as isize {
+            break;
+        }
+        idx = next;
+    }
+    if idx < 0 || idx >= len as isize {
+        return;
+    }
+    let idx = idx as usize;
+    ed.vim.change_list_cursor = Some(idx);
+    let (row, col) = ed.vim.change_list[idx];
+    ed.jump_cursor(row, col);
 }
 
 /// Push `pattern` onto the search history. Skips the push when the
@@ -2444,6 +2483,10 @@ fn handle_after_g(ed: &mut Editor<'_>, input: Input) -> bool {
             // once it has the target location.
             ed.pending_lsp = Some(crate::editor::LspIntent::GotoDefinition);
         }
+        // `g;` / `g,` — walk the change list. `g;` toward older
+        // entries, `g,` toward newer.
+        Key::Char(';') => walk_change_list(ed, -1, count.max(1)),
+        Key::Char(',') => walk_change_list(ed, 1, count.max(1)),
         // `g*` / `g#` — like `*` / `#` but match substrings (no `\b`
         // boundary anchors), so the cursor on `foo` finds it inside
         // `foobar` too.
@@ -6501,6 +6544,59 @@ mod tests {
         // Mark clamped to last row, col 0 (short line).
         let (r, _) = e.cursor();
         assert!(r <= 4);
+    }
+
+    #[test]
+    fn g_semicolon_walks_back_through_edits() {
+        let mut e = editor_with("alpha\nbeta\ngamma");
+        // Two distinct edits — cells (0, 0) → InsertChar lands cursor
+        // at (0, 1), (2, 0) → (2, 1).
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "iX<Esc>");
+        e.jump_cursor(2, 0);
+        run_keys(&mut e, "iY<Esc>");
+        // First g; lands on the most recent entry's exact cell.
+        run_keys(&mut e, "g;");
+        assert_eq!(e.cursor(), (2, 1));
+        // Second g; walks to the older entry.
+        run_keys(&mut e, "g;");
+        assert_eq!(e.cursor(), (0, 1));
+        // Past the oldest — no-op.
+        run_keys(&mut e, "g;");
+        assert_eq!(e.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn g_comma_walks_forward_after_g_semicolon() {
+        let mut e = editor_with("a\nb\nc");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "iX<Esc>");
+        e.jump_cursor(2, 0);
+        run_keys(&mut e, "iY<Esc>");
+        run_keys(&mut e, "g;");
+        run_keys(&mut e, "g;");
+        assert_eq!(e.cursor(), (0, 1));
+        run_keys(&mut e, "g,");
+        assert_eq!(e.cursor(), (2, 1));
+    }
+
+    #[test]
+    fn new_edit_during_walk_trims_forward_entries() {
+        let mut e = editor_with("a\nb\nc\nd");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "iX<Esc>"); // entry 0 → (0, 1)
+        e.jump_cursor(2, 0);
+        run_keys(&mut e, "iY<Esc>"); // entry 1 → (2, 1)
+        // Walk back twice to land on entry 0.
+        run_keys(&mut e, "g;");
+        run_keys(&mut e, "g;");
+        assert_eq!(e.cursor(), (0, 1));
+        // New edit while walking discards entries forward of the cursor.
+        run_keys(&mut e, "iZ<Esc>");
+        // No newer entry left to walk to.
+        run_keys(&mut e, "g,");
+        // Cursor stays where the latest edit landed it.
+        assert_ne!(e.cursor(), (2, 1));
     }
 
     #[test]

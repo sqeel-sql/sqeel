@@ -340,6 +340,24 @@ impl<'a> Editor<'a> {
         let hi = pre_row.max(pos.row);
         self.buffer.invalidate_folds_in_range(lo, hi);
         self.vim.last_edit_pos = Some((pos.row, pos.col));
+        // Append to the change-list ring (skip when the cursor sits on
+        // the same cell as the last entry — back-to-back keystrokes on
+        // one column shouldn't pollute the ring). A new edit while
+        // walking the ring trims the forward half, vim style.
+        let entry = (pos.row, pos.col);
+        if self.vim.change_list.last() != Some(&entry) {
+            if let Some(idx) = self.vim.change_list_cursor.take() {
+                self.vim.change_list.truncate(idx + 1);
+            }
+            self.vim.change_list.push(entry);
+            let len = self.vim.change_list.len();
+            if len > crate::vim::CHANGE_LIST_MAX {
+                self.vim
+                    .change_list
+                    .drain(0..len - crate::vim::CHANGE_LIST_MAX);
+            }
+        }
+        self.vim.change_list_cursor = None;
         // Shift / drop marks + jump-list entries to track the row
         // delta the edit produced. Without this, every line-changing
         // edit silently invalidates `'a`-style positions.
