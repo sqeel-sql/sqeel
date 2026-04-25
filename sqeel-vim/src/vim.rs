@@ -1184,17 +1184,21 @@ fn viewport_full_rows(ed: &Editor<'_>, count: usize) -> usize {
 
 /// Move the cursor by `delta` rows (positive = down, negative = up),
 /// clamp to the document, then land at the first non-blank on the new
-/// row. The textarea viewport auto-scrolls to keep the cursor visible.
+/// row. The textarea viewport auto-scrolls to keep the cursor visible
+/// when the cursor pushes off-screen.
 fn scroll_cursor_rows(ed: &mut Editor<'_>, delta: isize) {
     if delta == 0 {
         return;
     }
-    let (row, _) = ed.textarea.cursor();
-    let last_row = ed.textarea.lines().len().saturating_sub(1);
+    ed.sync_buffer_content_from_textarea();
+    let (row, _) = ed.cursor();
+    let last_row = ed.buffer().row_count().saturating_sub(1);
     let target = (row as isize + delta).max(0).min(last_row as isize) as usize;
-    ed.textarea.move_cursor(CursorMove::Jump(target, 0));
-    move_first_non_whitespace(ed);
-    ed.vim.sticky_col = Some(ed.textarea.cursor().1);
+    ed.buffer_mut()
+        .set_cursor(sqeel_buffer::Position::new(target, 0));
+    ed.buffer_mut().move_first_non_blank();
+    ed.push_buffer_cursor_to_textarea();
+    ed.vim.sticky_col = Some(ed.buffer().cursor().col);
 }
 
 // ─── Motion parsing ────────────────────────────────────────────────────────
