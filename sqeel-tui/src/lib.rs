@@ -4020,16 +4020,16 @@ fn draw_schema(
     let item_count = items.len();
 
     if items.is_empty() {
-        f.render_widget(
-            Paragraph::new(if has_filter {
-                "No matches"
-            } else if state.active_connection.is_some() {
-                "Loading..."
-            } else {
-                "No connection"
-            }),
-            list_area,
-        );
+        let placeholder: String = if has_filter {
+            "No matches".into()
+        } else if let Some(err) = state.schema_connect_error.as_deref() {
+            err.to_string()
+        } else if state.active_connection.is_some() {
+            "Loading...".into()
+        } else {
+            "No connection".into()
+        };
+        f.render_widget(Paragraph::new(placeholder), list_area);
         return (list_area, 0, 0, has_filter, search_cursor_pos);
     }
 
@@ -5148,8 +5148,9 @@ fn apply_window_spans(
     // state by scanning backwards from `window_start` until we hit either
     // a marker or a non-comment line (capped so huge files don't pay).
     // We materialised only the seed-prefix + window slice into
-    // `buffer_lines`; remap window_start to its offset before calling.
-    let seed_window_start = window_start - seed_start;
+    // `buffer_lines`; clamp the window start to the slice length so a
+    // truncated buffer (e.g. window past EOF) doesn't OOB-slice.
+    let seed_window_start = (window_start - seed_start).min(buffer_lines.len());
     let mut active_color = seed_active_color(&buffer_lines, seed_window_start);
     let empty_comments: Vec<CommentBody> = Vec::new();
     for (row, row_spans) in by_row

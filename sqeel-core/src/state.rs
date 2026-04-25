@@ -430,6 +430,11 @@ pub struct AppState {
     pub schema_nodes: Vec<SchemaNode>,
     pub schema_cursor: usize,
     pub schema_loading: bool,
+    /// Last connection error message — set when `connect_and_spawn`
+    /// fails so the sidebar can show "Connection failed: …" instead
+    /// of a stuck "Loading…" placeholder. Cleared on a successful
+    /// connect or when the user switches connections.
+    pub schema_connect_error: Option<String>,
     /// Set by the executor when a query finishes; cleared by the run loop after redraw.
     pub results_dirty: bool,
     schema_items_cache: Vec<SchemaTreeItem>,

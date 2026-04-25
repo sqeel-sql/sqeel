@@ -318,6 +318,8 @@ async fn connect_and_spawn(
                     .find(|c| c.url == url)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| conn.url.clone());
+                // Wipe any previous failure now that we're back online.
+                s.schema_connect_error = None;
                 s.set_status(format!("Connected: {conn_name}"));
                 let slug = sanitize_conn_slug(&conn_name);
                 // Skip the disk load if main() already populated tabs
@@ -354,10 +356,14 @@ async fn connect_and_spawn(
             );
         }
         Err(e) => {
-            state
-                .lock()
-                .unwrap()
-                .set_error(format!("Connection failed: {e}"));
+            let msg = format!("Connection failed: {e}");
+            let mut s = state.lock().unwrap();
+            // Cancel any pending "loading" state and surface the
+            // failure in the sidebar so the user isn't stuck staring
+            // at a perpetual "Loading…" placeholder.
+            s.schema_loading = false;
+            s.schema_connect_error = Some(msg.clone());
+            s.set_error(msg);
         }
     }
 }
