@@ -1924,20 +1924,39 @@ fn handle_normal_only(ed: &mut Editor<'_>, input: &Input, count: usize) -> bool 
             true
         }
         Key::Char('o') => {
+            use sqeel_buffer::{Edit, Position};
             ed.push_undo();
             // Snapshot BEFORE the newline so replay sees "\n<text>" as the
             // delta and produces one fresh line per iteration.
             begin_insert_noundo(ed, count.max(1), InsertReason::Open { above: false });
-            ed.textarea.move_cursor(CursorMove::End);
-            ed.mutate(|t| t.insert_newline());
+            ed.sync_buffer_content_from_textarea();
+            let row = ed.buffer().cursor().row;
+            let line_chars = ed
+                .buffer()
+                .line(row)
+                .map(|l| l.chars().count())
+                .unwrap_or(0);
+            ed.mutate_edit(Edit::InsertStr {
+                at: Position::new(row, line_chars),
+                text: "\n".to_string(),
+            });
+            ed.push_buffer_cursor_to_textarea();
             true
         }
         Key::Char('O') => {
+            use sqeel_buffer::{Edit, Position};
             ed.push_undo();
             begin_insert_noundo(ed, count.max(1), InsertReason::Open { above: true });
-            ed.textarea.move_cursor(CursorMove::Head);
-            ed.mutate(|t| t.insert_newline());
-            ed.textarea.move_cursor(CursorMove::Up);
+            ed.sync_buffer_content_from_textarea();
+            let row = ed.buffer().cursor().row;
+            ed.mutate_edit(Edit::InsertStr {
+                at: Position::new(row, 0),
+                text: "\n".to_string(),
+            });
+            // After insert, cursor sits on the surviving content one row
+            // down — step back up onto the freshly-empty line.
+            ed.buffer_mut().move_up(1);
+            ed.push_buffer_cursor_to_textarea();
             true
         }
         Key::Char('x') => {
@@ -3500,15 +3519,28 @@ fn replay_last_change(ed: &mut Editor<'_>, outer_count: usize) {
             }
         }
         LastChange::OpenLine { above, inserted } => {
+            use sqeel_buffer::{Edit, Position};
             ed.push_undo();
+            ed.sync_buffer_content_from_textarea();
+            let row = ed.buffer().cursor().row;
             if above {
-                ed.textarea.move_cursor(CursorMove::Head);
-                ed.mutate(|t| t.insert_newline());
-                ed.textarea.move_cursor(CursorMove::Up);
+                ed.mutate_edit(Edit::InsertStr {
+                    at: Position::new(row, 0),
+                    text: "\n".to_string(),
+                });
+                ed.buffer_mut().move_up(1);
             } else {
-                ed.textarea.move_cursor(CursorMove::End);
-                ed.mutate(|t| t.insert_newline());
+                let line_chars = ed
+                    .buffer()
+                    .line(row)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
+                ed.mutate_edit(Edit::InsertStr {
+                    at: Position::new(row, line_chars),
+                    text: "\n".to_string(),
+                });
             }
+            ed.push_buffer_cursor_to_textarea();
             ed.mutate(|t| t.insert_str(&inserted));
         }
         LastChange::InsertAt {
