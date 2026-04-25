@@ -499,8 +499,8 @@ impl<'a> Editor<'a> {
         if height == 0 {
             return;
         }
-        let cur_row = self.textarea.cursor().0;
-        let cur_top = self.textarea.viewport_top_row();
+        let cur_row = self.buffer.cursor().row;
+        let cur_top = self.buffer.viewport().top_row;
         let new_top = match pos {
             CursorScrollTarget::Center => cur_row.saturating_sub(height / 2),
             CursorScrollTarget::Top => cur_row,
