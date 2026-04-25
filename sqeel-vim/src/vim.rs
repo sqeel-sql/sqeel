@@ -490,6 +490,11 @@ fn step_search_prompt(ed: &mut Editor<'_>, input: Input) -> bool {
 }
 
 pub fn step(ed: &mut Editor<'_>, input: Input) -> bool {
+    // Phase 7f port: any cursor / content the host changed between
+    // steps (mouse jumps, paste, programmatic set_content, …) needs
+    // to land in the migration buffer before motion handlers that
+    // call into `Buffer::move_*` see a stale state.
+    ed.sync_buffer_content_from_textarea();
     // Search prompt eats all keys until Enter / Esc.
     if ed.vim.search_prompt.is_some() {
         return step_search_prompt(ed, input);
@@ -1297,34 +1302,20 @@ fn apply_motion_cursor(ed: &mut Editor<'_>, motion: &Motion, count: usize) {
 fn apply_motion_cursor_ctx(ed: &mut Editor<'_>, motion: &Motion, count: usize, as_operator: bool) {
     match motion {
         Motion::Left => {
-            // Vim default: `h` stops at col 0 (no wrap to previous
-            // line). tui-textarea's `Back` wraps, so we clamp.
-            for _ in 0..count {
-                let (_, col) = ed.textarea.cursor();
-                if col == 0 {
-                    break;
-                }
-                ed.textarea.move_cursor(CursorMove::Back);
-            }
+            // `h` — Buffer clamps at col 0 (no wrap), matching vim.
+            ed.buffer_mut().move_left(count);
+            ed.push_buffer_cursor_to_textarea();
         }
         Motion::Right => {
-            // Vim default: `l` stops at the last char on the line for
-            // cursor motions. For operator-motion context (`dl`, `cl`,
-            // `yl`) the endpoint is allowed one past the last char so
-            // the operator range actually includes the final char.
-            for _ in 0..count {
-                let (row, col) = ed.textarea.cursor();
-                let line_len = ed.textarea.lines()[row].chars().count();
-                let max_col = if as_operator {
-                    line_len
-                } else {
-                    line_len.saturating_sub(1)
-                };
-                if col >= max_col {
-                    break;
-                }
-                ed.textarea.move_cursor(CursorMove::Forward);
+            // `l` — operator-motion context (`dl`/`cl`/`yl`) is allowed
+            // one past the last char so the range includes it; cursor
+            // context clamps at the last char.
+            if as_operator {
+                ed.buffer_mut().move_right_to_end(count);
+            } else {
+                ed.buffer_mut().move_right_in_line(count);
             }
+            ed.push_buffer_cursor_to_textarea();
         }
         Motion::Up => {
             for _ in 0..count {

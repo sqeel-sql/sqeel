@@ -122,6 +122,17 @@ impl<'a> Editor<'a> {
         &mut self.buffer
     }
 
+    /// Reverse-sync: push the migration buffer's cursor back into the
+    /// textarea via a `Jump`. Used by motion handlers that have been
+    /// ported to call `Buffer::move_*` directly — the textarea is
+    /// still the input/edit authority during the Phase 7f port, so
+    /// its cursor has to follow the buffer's after each motion.
+    pub(crate) fn push_buffer_cursor_to_textarea(&mut self) {
+        let pos = self.buffer.cursor();
+        self.textarea
+            .move_cursor(CursorMove::Jump(pos.row, pos.col));
+    }
+
     /// Mirror the textarea's `(start, end, Style)` syntax span tuples
     /// into the migration buffer's `Vec<Vec<Span>>`. Drops zero-width
     /// runs and clamps `end` to `usize::MAX` sentinels (used by
