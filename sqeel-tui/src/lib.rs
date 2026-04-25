@@ -2269,7 +2269,13 @@ async fn run_loop(
                         (KeyModifiers::NONE, KeyCode::Enter) => {
                             state.lock().unwrap().confirm_connection_switch();
                         }
-                        _ => {}
+                        _ => {
+                            // Any other key disarms an in-flight delete
+                            // confirmation so the user doesn't lose their
+                            // place — matches vim's "press wrong key,
+                            // command cancels" feel.
+                            state.lock().unwrap().disarm_connection_delete();
+                        }
                     }
                     continue;
                 }

@@ -14,13 +14,13 @@ this file in `## Out of scope`, or — in a pinch — a fresh issue.
 Quick wins first, then the larger structural fixes. Audit pointed at concrete
 file:line targets; each item carries them so the work is mechanical.
 
-- **Delete confirmation in the switcher (S).** `d` in the connection switcher
-  drops the file immediately (`sqeel-core/src/state.rs:2875-2888`). Add a
-  two-step prompt: first `d` arms a pending-delete on the highlighted entry,
-  second `d` (or `Enter`) commits; any other key cancels. Show a one-line toast
-  "Delete `{name}`? d/Enter to confirm." while armed. Match vim's
-  `:bdelete!`-style "must press twice" feel rather than a modal — modal would
-  break the muscle memory of the picker.
+- ~~**Delete confirmation in the switcher (S).**~~ Done. New
+  `connection_delete_armed: Option<String>` on `AppState`. First `d` arms the
+  delete on the highlighted entry and surfaces a status hint ("Delete `{name}`?
+  d/Enter to confirm…"); second `d` (or `Enter`) commits. Esc, j/k movement,
+  opening another modal, or any unbound key disarms via
+  `disarm_connection_delete`. `confirm_connection_switch` short-circuits to the
+  commit path when armed so the muscle-memory picker flow still works.
 - ~~**Password warning on save (S).**~~ Done. New `url_has_plaintext_password`
   parses the userinfo segment of a saved URL; on a positive hit
   `save_new_connection` raises a status-bar warning pointing the user at the

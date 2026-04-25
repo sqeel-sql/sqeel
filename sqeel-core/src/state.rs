@@ -456,6 +456,11 @@ pub struct AppState {
     pub show_connection_switcher: bool,
     pub connection_switcher_cursor: usize,
     pub pending_reconnect: Option<String>,
+    /// Two-step delete arm: when `Some(name)`, the next `d`/Enter on
+    /// the same selection commits the delete. Movement, Esc, or
+    /// switching modals clears it. Drives the "Delete `{name}`? …"
+    /// confirmation in the switcher.
+    pub connection_delete_armed: Option<String>,
     // Add/edit connection dialog
     pub show_add_connection: bool,
     pub add_connection_name: String,
@@ -2675,14 +2680,17 @@ impl AppState {
     pub fn open_connection_switcher(&mut self) {
         self.show_connection_switcher = true;
         self.connection_switcher_cursor = 0;
+        self.disarm_connection_delete();
     }
 
     pub fn close_connection_switcher(&mut self) {
         self.show_connection_switcher = false;
+        self.disarm_connection_delete();
     }
 
     pub fn switcher_up(&mut self) {
         self.connection_switcher_cursor = self.connection_switcher_cursor.saturating_sub(1);
+        self.disarm_connection_delete();
     }
 
     pub fn switcher_down(&mut self) {
@@ -2690,10 +2698,18 @@ impl AppState {
         if self.connection_switcher_cursor < max {
             self.connection_switcher_cursor += 1;
         }
+        self.disarm_connection_delete();
     }
 
     /// Confirm the highlighted connection — returns its URL if one exists.
+    /// When a delete is armed for the current selection, this commits the
+    /// delete instead and returns `None` (so the caller doesn't switch).
     pub fn confirm_connection_switch(&mut self) -> Option<String> {
+        if self.connection_delete_armed.is_some() {
+            // Treat Enter-while-armed as the second confirmation step.
+            let _ = self.delete_selected_connection();
+            return None;
+        }
         let url = self
             .available_connections
             .get(self.connection_switcher_cursor)
@@ -2702,6 +2718,7 @@ impl AppState {
             self.pending_reconnect = Some(u.clone());
         }
         self.show_connection_switcher = false;
+        self.disarm_connection_delete();
         url
     }
 
@@ -2713,6 +2730,7 @@ impl AppState {
         self.add_connection_url_cursor = 0;
         self.add_connection_field = AddConnectionField::Name;
         self.edit_connection_original_name = None;
+        self.disarm_connection_delete();
     }
 
     pub fn open_edit_connection(&mut self) {
@@ -2730,11 +2748,19 @@ impl AppState {
         self.add_connection_url_cursor = self.add_connection_url.chars().count();
         self.add_connection_field = AddConnectionField::Name;
         self.edit_connection_original_name = Some(conn.name);
+        self.disarm_connection_delete();
     }
 
     pub fn close_add_connection(&mut self) {
         self.show_add_connection = false;
         self.edit_connection_original_name = None;
+    }
+
+    /// Drop any in-flight delete arming and clear its status hint.
+    pub fn disarm_connection_delete(&mut self) {
+        if self.connection_delete_armed.take().is_some() {
+            self.clear_status();
+        }
     }
 
     pub fn open_help(&mut self) {
@@ -2885,7 +2911,12 @@ impl AppState {
         Ok(())
     }
 
-    /// Remove the currently highlighted connection from disk and memory.
+    /// Two-step delete entry point. First `d` arms the delete on the
+    /// highlighted connection and surfaces a status-bar confirmation
+    /// hint ("Delete `{name}`? d/Enter to confirm."). Second `d`
+    /// (called while armed for the same name) commits the delete.
+    /// Movement / Esc / opening another modal disarms (see
+    /// `disarm_connection_delete`).
     pub fn delete_selected_connection(&mut self) -> anyhow::Result<()> {
         let Some(conn) = self
             .available_connections
@@ -2894,11 +2925,23 @@ impl AppState {
         else {
             return Ok(());
         };
-        crate::config::delete_connection(&conn.name)?;
-        self.available_connections
-            .remove(self.connection_switcher_cursor);
-        let max = self.available_connections.len().saturating_sub(1);
-        self.connection_switcher_cursor = self.connection_switcher_cursor.min(max);
+        // Already armed for this name → second `d` commits.
+        if self.connection_delete_armed.as_deref() == Some(conn.name.as_str()) {
+            crate::config::delete_connection(&conn.name)?;
+            self.available_connections
+                .remove(self.connection_switcher_cursor);
+            let max = self.available_connections.len().saturating_sub(1);
+            self.connection_switcher_cursor = self.connection_switcher_cursor.min(max);
+            self.connection_delete_armed = None;
+            self.clear_status();
+            return Ok(());
+        }
+        // Otherwise arm and prompt.
+        self.connection_delete_armed = Some(conn.name.clone());
+        self.set_status(format!(
+            "Delete `{}`? d/Enter to confirm, any other key cancels.",
+            conn.name
+        ));
         Ok(())
     }
 
@@ -4619,5 +4662,55 @@ trailing prose ignored";
         assert!(!url_has_plaintext_password(
             "mysql://user@host:5432/db?foo=bar"
         ));
+    }
+
+    #[test]
+    fn delete_selected_connection_arms_first_then_commits_second() {
+        let _dir = isolated_data_dir();
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.available_connections = vec![
+            crate::config::ConnectionConfig {
+                name: "alpha".into(),
+                url: "sqlite::memory:".into(),
+            },
+            crate::config::ConnectionConfig {
+                name: "beta".into(),
+                url: "sqlite::memory:".into(),
+            },
+        ];
+        s.connection_switcher_cursor = 0;
+        // First press arms — entry stays in the list.
+        s.delete_selected_connection().unwrap();
+        assert_eq!(s.connection_delete_armed.as_deref(), Some("alpha"));
+        assert_eq!(s.available_connections.len(), 2);
+        assert!(s.status_message.is_some());
+        // Second press commits.
+        s.delete_selected_connection().unwrap();
+        assert!(s.connection_delete_armed.is_none());
+        assert_eq!(s.available_connections.len(), 1);
+        assert_eq!(s.available_connections[0].name, "beta");
+    }
+
+    #[test]
+    fn moving_selection_disarms_pending_delete() {
+        let _dir = isolated_data_dir();
+        let state = AppState::new();
+        let mut s = state.lock().unwrap();
+        s.available_connections = vec![
+            crate::config::ConnectionConfig {
+                name: "alpha".into(),
+                url: "sqlite::memory:".into(),
+            },
+            crate::config::ConnectionConfig {
+                name: "beta".into(),
+                url: "sqlite::memory:".into(),
+            },
+        ];
+        s.delete_selected_connection().unwrap();
+        assert!(s.connection_delete_armed.is_some());
+        s.switcher_down();
+        assert!(s.connection_delete_armed.is_none());
+        assert_eq!(s.available_connections.len(), 2);
     }
 }
