@@ -213,6 +213,23 @@ impl<'a> Editor<'a> {
         self.registers.record_yank(text, linewise, target);
     }
 
+    /// Direct write to a named register slot — bypasses the unnamed
+    /// `"` and `"0` updates that `record_yank` does. Used by the
+    /// macro recorder so finishing a `q{reg}` recording doesn't
+    /// pollute the user's last yank.
+    pub(crate) fn set_named_register_text(&mut self, reg: char, text: String) {
+        if let Some(slot) = match reg {
+            'a'..='z' => Some(&mut self.registers.named[(reg as u8 - b'a') as usize]),
+            'A'..='Z' => {
+                Some(&mut self.registers.named[(reg.to_ascii_lowercase() as u8 - b'a') as usize])
+            }
+            _ => None,
+        } {
+            slot.text = text;
+            slot.linewise = false;
+        }
+    }
+
     /// Record a delete / change into `"` and the `"1`–`"9` ring.
     /// Honours the active named-register prefix.
     pub(crate) fn record_delete(&mut self, text: String, linewise: bool) {

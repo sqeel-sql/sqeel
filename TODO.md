@@ -39,11 +39,13 @@ toggle/`zR`/`zM`/`zd` chord set, and edit-side invalidation. What's left:
 
 ## Registers + macros (S–M)
 
-- **Macro storage in registers (M).** Macros currently live in a separate
-  `HashMap<char, Vec<Input>>`. Vim stores them as text inside the matching
-  register so `"ap` pastes the macro and `"ay` saves an edited macro back.
-  Decide on an `Input ↔ string` encoding (probably vim's `<C-x>` notation), wire
-  `record_*` / `read` to translate. Drop the separate map.
+- ~~**Macro storage in registers (M).**~~ Done. Added `input::encode_macro` /
+  `decode_macro` (`<Esc>`, `<C-d>`, `<lt>`, …). The `vim.macros` HashMap is gone
+  — `q{reg}` finish encodes the recorded `Input` stream and writes it to the
+  named register slot via a new `set_named_register_text` helper that bypasses
+  the unnamed / yank_zero updates. `@{reg}` reads the slot's text and decodes
+  back to `Input`s. `qA` seeds `recording_keys` from the existing register text.
+  `"ay…` followed by `@a` now replays the yanked text as keys (vim parity).
 - ~~**Nested `@b` inside `qa` recording (S).**~~ Verified — `qa@bq` captures the
   literal `@`/`b` keys; replay invokes the previously recorded macro at that
   point. Test added.

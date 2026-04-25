@@ -366,11 +366,11 @@ pub struct VimState {
     /// While `Some`, every consumed `Input` is appended to
     /// `recording_keys`.
     pub(super) recording_macro: Option<char>,
-    /// Keys recorded into the in-progress macro. Stored on
-    /// `vim.macros[reg]` when recording stops.
+    /// Keys recorded into the in-progress macro. On `q` finish, these
+    /// are encoded via [`crate::input::encode_macro`] and written to
+    /// the matching named register slot, so macros and yanks share a
+    /// single store.
     pub(super) recording_keys: Vec<crate::input::Input>,
-    /// Replayed macros' keystrokes. Indexed by register letter.
-    pub(super) macros: std::collections::HashMap<char, Vec<crate::input::Input>>,
     /// Set during `@reg` replay so the recorder doesn't capture the
     /// replayed keystrokes a second time.
     pub(super) replaying_macro: bool,
@@ -757,7 +757,8 @@ pub fn step(ed: &mut Editor<'_>, input: Input) -> bool {
     {
         let reg = ed.vim.recording_macro.take().unwrap();
         let keys = std::mem::take(&mut ed.vim.recording_keys);
-        ed.vim.macros.insert(reg.to_ascii_lowercase(), keys);
+        let text = crate::input::encode_macro(&keys);
+        ed.set_named_register_text(reg.to_ascii_lowercase(), text);
         return true;
     }
     // Search prompt eats all keys until Enter / Esc.
@@ -1679,7 +1680,15 @@ fn handle_record_macro_target(ed: &mut Editor<'_>, input: Input) -> bool {
         // lowercase recording so the new keystrokes append.
         if c.is_ascii_uppercase() {
             let lower = c.to_ascii_lowercase();
-            ed.vim.recording_keys = ed.vim.macros.get(&lower).cloned().unwrap_or_default();
+            // Seed `recording_keys` with the existing register's text
+            // decoded back to inputs, so capital-register append
+            // continues from where the previous recording left off.
+            let text = ed
+                .registers()
+                .read(lower)
+                .map(|s| s.text.clone())
+                .unwrap_or_default();
+            ed.vim.recording_keys = crate::input::decode_macro(&text);
         } else {
             ed.vim.recording_keys.clear();
         }
@@ -1703,9 +1712,13 @@ fn handle_play_macro_target(ed: &mut Editor<'_>, input: Input, count: usize) -> 
     let Some(reg) = reg else {
         return true;
     };
-    let Some(keys) = ed.vim.macros.get(&reg).cloned() else {
-        return true;
+    // Read the macro text from the named register and decode back to
+    // an Input stream. Empty / unset registers replay nothing.
+    let text = match ed.registers().read(reg) {
+        Some(slot) if !slot.text.is_empty() => slot.text.clone(),
+        _ => return true,
     };
+    let keys = crate::input::decode_macro(&text);
     ed.vim.last_macro = Some(reg);
     let times = count.max(1);
     let was_replaying = ed.vim.replaying_macro;
@@ -8082,9 +8095,11 @@ mod tests {
         let mut e = editor_with("hello");
         run_keys(&mut e, "qall<Esc>q");
         run_keys(&mut e, "qAhh<Esc>q");
-        // "a now holds the original `ll<Esc>` followed by `hh<Esc>`.
-        let recorded = e.vim.macros.get(&'a').unwrap();
-        assert!(recorded.len() >= 4);
+        // Macros + named registers share storage now: register `a`
+        // holds the encoded keystrokes from both recordings.
+        let text = e.registers().read('a').unwrap().text.clone();
+        assert!(text.contains("ll<Esc>"));
+        assert!(text.contains("hh<Esc>"));
     }
 
     #[test]
@@ -8196,18 +8211,17 @@ mod tests {
     }
 
     #[test]
-    fn yank_into_a_then_replay_a_runs_literal_text() {
-        // `"ay…` populates register `a` with text. `@a` today reads
-        // from the macro map, not the register — so replaying after a
-        // pure yank is a no-op (vim's behaviour requires the macro/
-        // register unification still listed in TODO). Lock in current
-        // behaviour so the M task that unifies them gets to flip this.
-        let mut e = editor_with("hello");
-        run_keys(&mut e, "\"ayw");
-        assert_eq!(e.registers().read('a').unwrap().text, "hello");
-        // No recorded macro under `a` — `@a` should be a no-op for now.
+    fn macro_recorded_text_round_trips_through_register() {
+        // After the macros-in-registers unification, recording into
+        // `a` writes the encoded keystroke text into register `a`'s
+        // slot. `@a` decodes back to inputs and replays.
+        let mut e = editor_with("");
+        run_keys(&mut e, "qaiX<Esc>q");
+        let text = e.registers().read('a').unwrap().text.clone();
+        assert!(text.starts_with("iX"));
+        // Replay inserts another X at the cursor.
         run_keys(&mut e, "@a");
-        assert_eq!(e.buffer().lines()[0], "hello");
+        assert_eq!(e.buffer().lines()[0], "XX");
     }
 
     #[test]
