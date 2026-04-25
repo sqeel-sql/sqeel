@@ -257,8 +257,8 @@ impl<'a> Editor<'a> {
     /// Returns the cursor's row within the visible textarea (0-based), updating
     /// the stored viewport top so subsequent calls remain accurate.
     pub fn cursor_screen_row(&mut self, height: u16) -> u16 {
-        let cursor = self.textarea.cursor().0;
-        let top = self.textarea.viewport_top_row();
+        let cursor = self.buffer.cursor().row;
+        let top = self.buffer.viewport().top_row;
         cursor.saturating_sub(top).min(height as usize - 1) as u16
     }
 
@@ -266,15 +266,14 @@ impl<'a> Editor<'a> {
     /// rect). Accounts for line-number gutter and viewport scroll. Returns
     /// `None` if the cursor is outside the visible viewport.
     pub fn cursor_screen_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        let (row, col) = self.textarea.cursor();
-        let top_row = self.textarea.viewport_top_row();
-        let top_col = self.textarea.viewport_top_col();
-        if row < top_row || col < top_col {
+        let pos = self.buffer.cursor();
+        let v = self.buffer.viewport();
+        if pos.row < v.top_row || pos.col < v.top_col {
             return None;
         }
-        let lnum_width = self.textarea.lines().len().to_string().len() as u16 + 2;
-        let dy = (row - top_row) as u16;
-        let dx = (col - top_col) as u16;
+        let lnum_width = self.buffer.row_count().to_string().len() as u16 + 2;
+        let dy = (pos.row - v.top_row) as u16;
+        let dx = (pos.col - v.top_col) as u16;
         if dy >= area.height || dx + lnum_width >= area.width {
             return None;
         }
