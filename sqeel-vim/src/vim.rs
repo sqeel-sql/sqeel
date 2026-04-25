@@ -3457,36 +3457,68 @@ fn join_line_raw(ed: &mut Editor<'_>) {
 }
 
 fn do_paste(ed: &mut Editor<'_>, before: bool, count: usize) {
+    use sqeel_buffer::{Edit, Position};
     ed.push_undo();
     for _ in 0..count {
+        ed.sync_buffer_content_from_textarea();
+        let yank = ed.textarea.yank_text();
+        if yank.is_empty() {
+            continue;
+        }
         if ed.vim.yank_linewise {
-            let content = ed.textarea.yank_text();
-            let text = content.trim_matches('\n').to_string();
-            if before {
-                ed.textarea.move_cursor(CursorMove::Head);
-                ed.mutate(|t| t.insert_str(format!("{text}\n")));
-                ed.textarea.move_cursor(CursorMove::Up);
+            // Linewise paste: insert payload as fresh row(s) above
+            // (`P`) or below (`p`) the cursor's row. Cursor lands on
+            // the first non-blank of the first pasted line.
+            let text = yank.trim_matches('\n').to_string();
+            let row = ed.buffer().cursor().row;
+            let target_row = if before {
+                ed.mutate_edit(Edit::InsertStr {
+                    at: Position::new(row, 0),
+                    text: format!("{text}\n"),
+                });
+                row
             } else {
-                ed.textarea.move_cursor(CursorMove::End);
-                ed.mutate(|t| t.insert_str(format!("\n{text}")));
-                ed.textarea.move_cursor(CursorMove::Head);
-            }
-            // Vim parks the cursor on the first non-blank of the pasted
-            // line rather than col 0, so the user's next vertical motion
-            // aims at something meaningful.
-            move_first_non_whitespace(ed);
-        } else if before {
-            // P: paste at cursor, shifting existing char to the right.
-            ed.mutate(|t| t.paste());
+                let line_chars = ed
+                    .buffer()
+                    .line(row)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
+                ed.mutate_edit(Edit::InsertStr {
+                    at: Position::new(row, line_chars),
+                    text: format!("\n{text}"),
+                });
+                row + 1
+            };
+            ed.buffer_mut().set_cursor(Position::new(target_row, 0));
+            ed.buffer_mut().move_first_non_blank();
+            ed.push_buffer_cursor_to_textarea();
         } else {
-            // p: paste *after* cursor. Advance one before inserting so the
-            // first pasted char lands after the current char.
-            ed.textarea.move_cursor(CursorMove::Forward);
-            ed.mutate(|t| t.paste());
+            // Charwise paste. `P` inserts at cursor (shifting cell
+            // right); `p` inserts after cursor (advance one cell
+            // first, clamped to the end of the line).
+            let cursor = ed.buffer().cursor();
+            let at = if before {
+                cursor
+            } else {
+                let line_chars = ed
+                    .buffer()
+                    .line(cursor.row)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
+                Position::new(cursor.row, (cursor.col + 1).min(line_chars))
+            };
+            ed.mutate_edit(Edit::InsertStr {
+                at,
+                text: yank.clone(),
+            });
+            // Vim parks the cursor on the last char of the pasted
+            // text (do_insert_str leaves it one past the end).
+            ed.buffer_mut().move_left(1);
+            ed.push_buffer_cursor_to_textarea();
         }
     }
     // Any paste re-anchors the sticky column to the new cursor position.
-    ed.vim.sticky_col = Some(ed.textarea.cursor().1);
+    ed.vim.sticky_col = Some(ed.buffer().cursor().col);
 }
 
 fn do_undo(ed: &mut Editor<'_>) {
