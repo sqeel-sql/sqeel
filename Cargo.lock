@@ -1877,7 +1877,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hjkl-buffer"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "ratatui",
  "regex",
@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "hjkl-engine"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bitflags 2.11.1",
  "crossterm",
@@ -1894,6 +1894,7 @@ dependencies = [
  "ratatui",
  "regex",
  "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

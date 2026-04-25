@@ -1,12 +1,14 @@
 mod clipboard;
 mod completion_thread;
 mod highlight_thread;
+mod host;
 mod spinner;
 mod theme;
 
 // Re-export the editor crate so existing call sites like
 // `sqeel_tui::editor::ex::ExEffect` keep compiling.
 pub use hjkl_engine as editor;
+pub use host::{FoldOp, LineRange, SqeelBufferId, SqeelHost, SqeelIntent};
 
 use clipboard::Clipboard;
 use std::io;
@@ -27,6 +29,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use highlight_thread::{HighlightResult, HighlightThread};
+use hjkl_engine::Editor;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -47,7 +50,6 @@ use sqeel_core::{
     schema::{self, SchemaItemKind, SchemaTreeItem},
     state::{AddConnectionField, Focus, KeybindingMode, ResultsCursor, ResultsPane, VimMode},
 };
-use hjkl_engine::Editor;
 use theme::ui;
 
 /// Bundle of schema-sidebar search state: query string, whether the input box has
@@ -3115,7 +3117,8 @@ async fn run_loop(
                         // engine (e.g. `gd` → GotoDefinition) and
                         // route it to `sqls`. Response lands on the
                         // `LspEvent` channel and jumps the cursor.
-                        if let Some(hjkl_engine::LspIntent::GotoDefinition) = editor.take_lsp_intent()
+                        if let Some(hjkl_engine::LspIntent::GotoDefinition) =
+                            editor.take_lsp_intent()
                             && let Some(ref client) = lsp
                         {
                             let (row, col) = editor.cursor();
