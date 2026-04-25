@@ -109,8 +109,19 @@ struct RpcMessage {
     error: Option<Value>,
 }
 
+/// Coalescing queue for `textDocument/didChange`. Holds only the
+/// latest pending payload — subsequent edits overwrite earlier ones
+/// before the dispatcher serializes + sends to the LSP. Avoids a
+/// fast-typing user piling N full-buffer payloads in front of a
+/// hover / completion request.
+struct DidChangeQueue {
+    latest: std::sync::Mutex<Option<(Uri, i32, String)>>,
+    notify: tokio::sync::Notify,
+}
+
 pub struct LspClient {
     write_tx: mpsc::Sender<String>,
+    didchange: std::sync::Arc<DidChangeQueue>,
     _child: Child,
     pub events: mpsc::Receiver<LspEvent>,
 }
@@ -138,11 +149,18 @@ impl LspClient {
         let (event_tx, event_rx) = mpsc::channel(64);
         let (write_tx, write_rx) = mpsc::channel::<String>(64);
 
+        let didchange = std::sync::Arc::new(DidChangeQueue {
+            latest: std::sync::Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        });
+
         tokio::spawn(read_loop(BufReader::new(stdout), event_tx));
         tokio::spawn(write_loop(stdin, write_rx));
+        tokio::spawn(didchange_dispatcher(didchange.clone(), write_tx.clone()));
 
         let mut client = Self {
             write_tx,
+            didchange,
             _child: child,
             events: event_rx,
         };
@@ -212,14 +230,11 @@ impl LspClient {
         version: i32,
         text: &str,
     ) -> anyhow::Result<()> {
-        self.notify(
-            "textDocument/didChange",
-            json!({
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": text }]
-            }),
-        )
-        .await
+        // Hand off to the coalescing queue so a burst of edits
+        // collapses into one notification before sqls sees it.
+        *self.didchange.latest.lock().unwrap() = Some((uri, version, text.to_string()));
+        self.didchange.notify.notify_one();
+        Ok(())
     }
 
     /// Send a completion request and return the request ID.
@@ -283,6 +298,37 @@ impl LspClient {
     pub fn writer(&self) -> LspWriter {
         LspWriter {
             tx: self.write_tx.clone(),
+            didchange: self.didchange.clone(),
+        }
+    }
+}
+
+/// Dispatcher loop for the coalesced `didChange` queue. Wakes on
+/// `notify`, drains the slot, serializes the (latest) payload and
+/// pushes the framed RPC into the shared write channel. Multiple
+/// notifications between drains are collapsed — only the most recent
+/// payload reaches the server.
+async fn didchange_dispatcher(queue: std::sync::Arc<DidChangeQueue>, tx: mpsc::Sender<String>) {
+    loop {
+        queue.notify.notified().await;
+        let payload = queue.latest.lock().unwrap().take();
+        let Some((uri, version, text)) = payload else {
+            continue;
+        };
+        let params = json!({
+            "textDocument": { "uri": uri, "version": version },
+            "contentChanges": [{ "text": text }]
+        });
+        let msg = RpcNotification {
+            jsonrpc: "2.0",
+            method: "textDocument/didChange",
+            params,
+        };
+        if let Ok(body) = serde_json::to_string(&msg) {
+            let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+            if tx.send(framed).await.is_err() {
+                return;
+            }
         }
     }
 }
@@ -295,22 +341,17 @@ impl LspClient {
 #[derive(Clone)]
 pub struct LspWriter {
     tx: mpsc::Sender<String>,
+    didchange: std::sync::Arc<DidChangeQueue>,
 }
 
 impl LspWriter {
     pub async fn change_document(&self, uri: Uri, version: i32, text: &str) -> anyhow::Result<()> {
-        let params = json!({
-            "textDocument": { "uri": uri, "version": version },
-            "contentChanges": [{ "text": text }]
-        });
-        let msg = RpcNotification {
-            jsonrpc: "2.0",
-            method: "textDocument/didChange",
-            params,
-        };
-        let body = serde_json::to_string(&msg)?;
-        let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        self.tx.send(framed).await?;
+        // Coalesce: stash the latest payload + ping the dispatcher.
+        // A queued didChange waiting in the slot gets overwritten
+        // before it ever reaches the wire, so fast-typing doesn't
+        // pile multi-MB serializations behind a hover request.
+        *self.didchange.latest.lock().unwrap() = Some((uri, version, text.to_string()));
+        self.didchange.notify.notify_one();
         Ok(())
     }
 
