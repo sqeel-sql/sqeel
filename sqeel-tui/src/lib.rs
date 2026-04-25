@@ -2857,14 +2857,32 @@ async fn run_loop(
                         }
                     }
                     // Execute query under cursor: Ctrl+Enter
+                    // Visual/VisualLine/VisualBlock first: run the
+                    // selected text instead of the statement under
+                    // cursor. Lets the user mark exactly what to run.
                     (KeyModifiers::CONTROL, KeyCode::Enter) => {
                         let content = editor.content();
-                        let cursor_byte =
-                            cursor_byte_offset(editor.buffer().lines(), editor.cursor());
-                        let stmt = statement_at_byte(&content, cursor_byte)
-                            .map(|(s, e)| content[s..e].trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| content.trim().to_string());
+                        let stmt = if let Some(sel) = visual_selection_text(&editor) {
+                            sel
+                        } else {
+                            let cursor_byte =
+                                cursor_byte_offset(editor.buffer().lines(), editor.cursor());
+                            statement_at_byte(&content, cursor_byte)
+                                .map(|(s, e)| content[s..e].trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| content.trim().to_string())
+                        };
+                        // Drop visual mode after capturing the text so
+                        // results render against a clean cursor (the
+                        // user expects Ctrl+Enter to also "commit" the
+                        // selection — like running it commits to it).
+                        if editor.vim_mode() != VimMode::Normal {
+                            editor.handle_key(crossterm::event::KeyEvent::new(
+                                KeyCode::Esc,
+                                KeyModifiers::NONE,
+                            ));
+                        }
+                        let stmt = stmt.trim().to_string();
                         let mut s = state.lock().unwrap();
                         s.dismiss_completions();
                         let dialect = s.active_dialect;
@@ -3234,6 +3252,60 @@ fn parse_error_position(msg: &str) -> Option<(usize, usize)> {
         return Some((line, col));
     }
     None
+}
+
+/// Pull the active visual-mode selection out as a runnable string.
+/// Returns `None` when the editor isn't in any Visual mode.
+///
+/// - **Visual** (charwise): exact span between anchor and cursor.
+///   First and last lines may be partial; intermediate lines are
+///   joined with `\n`.
+/// - **VisualLine**: every line in `[top, bot]`, joined with `\n`.
+/// - **VisualBlock**: collapsed to the full lines the block spans —
+///   running a column-narrow rectangle as SQL doesn't make sense, but
+///   "the lines I marked" matches user intent and matches what
+///   VisualLine would have produced.
+fn visual_selection_text(editor: &Editor) -> Option<String> {
+    let lines = editor.buffer().lines();
+    match editor.vim_mode() {
+        VimMode::Visual => {
+            let ((sr, sc), (er, ec)) = editor.char_highlight()?;
+            if sr == er {
+                let line = lines.get(sr)?;
+                Some(
+                    line.chars()
+                        .skip(sc)
+                        .take(ec.saturating_sub(sc) + 1)
+                        .collect(),
+                )
+            } else {
+                let mut out = String::new();
+                let first = lines.get(sr)?;
+                out.push_str(&first.chars().skip(sc).collect::<String>());
+                for r in (sr + 1)..er {
+                    out.push('\n');
+                    if let Some(l) = lines.get(r) {
+                        out.push_str(l);
+                    }
+                }
+                out.push('\n');
+                let last = lines.get(er)?;
+                out.push_str(&last.chars().take(ec + 1).collect::<String>());
+                Some(out)
+            }
+        }
+        VimMode::VisualLine => {
+            let (top, bot) = editor.line_highlight()?;
+            let bot = bot.min(lines.len().saturating_sub(1));
+            Some(lines[top..=bot].join("\n"))
+        }
+        VimMode::VisualBlock => {
+            let (top, bot, _, _) = editor.block_highlight()?;
+            let bot = bot.min(lines.len().saturating_sub(1));
+            Some(lines[top..=bot].join("\n"))
+        }
+        _ => None,
+    }
 }
 
 /// Convert a (row, char-col) cursor into a byte offset into `lines.join("\n")`.

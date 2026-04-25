@@ -118,14 +118,14 @@ Press `?` in normal mode to open the help overlay.
 
 ### Global
 
-| Key                | Action                          |
-| ------------------ | ------------------------------- |
-| `?`                | Open help overlay (normal mode) |
-| `Ctrl+Enter`       | Run statement under cursor      |
-| `Ctrl+Shift+Enter` | Run all statements in file      |
-| `:q`               | Quit                            |
-| `Ctrl+C`           | Cancel running query / batch    |
-| `Esc Esc`          | Dismiss all toasts              |
+| Key                | Action                                                   |
+| ------------------ | -------------------------------------------------------- |
+| `?`                | Open help overlay (normal mode)                          |
+| `Ctrl+Enter`       | Run statement under cursor (or selection in Visual mode) |
+| `Ctrl+Shift+Enter` | Run all statements in file                               |
+| `:q`               | Quit                                                     |
+| `Ctrl+C`           | Cancel running query / batch                             |
+| `Esc Esc`          | Dismiss all toasts                                       |
 
 ### Leader (default `Space` — config: `editor.leader_key`)
 
