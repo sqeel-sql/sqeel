@@ -99,15 +99,18 @@ We support some `OpTextObj` chords. Audit + fill gaps:
 - ~~**`ip` / `ap` (S).**~~ Already done — `TextObject::Paragraph` wired,
   `paragraph_text_object` walks blank-line boundaries, `ap` includes one
   trailing blank. Verified by `dap_deletes_paragraph` test.
-- **`is` / `as` (M).** Sentence — split on `.`, `?`, `!`. Even less useful for
-  SQL but standard.
+- ~~**`is` / `as` (M).**~~ Done. `TextObject::Sentence` + a flat-char walk that
+  splits on `.`/`?`/`!` followed by whitespace; consecutive terminators (`?!`)
+  collapse into one boundary. `as` extends through trailing whitespace; `is`
+  does not.
 
 ---
 
 ## Motions (S–M)
 
-- **`(` / `)` — sentence motions (M).** Same idea as `{`/`}`, but sentence
-  splitter. Defer until `is`/`as` lands.
+- ~~**`(` / `)` — sentence motions (M).**~~ Done. `Motion::SentencePrev` /
+  `SentenceNext` reuse the same boundary detection as `is`/`as`; `(` walks to
+  the previous sentence start, `)` to the next, counts compound.
 - ~~**`gM` (S).**~~ Done. Jumps to `floor(chars / 2)` of the current line.
   (Implemented per current-line midpoint, not the longest-screen-line variant —
   matches vim's documented `gM` behaviour.)

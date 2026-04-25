@@ -231,6 +231,10 @@ pub enum Motion {
     ParagraphPrev,
     /// `}` — next paragraph (following blank line, or bottom).
     ParagraphNext,
+    /// `(` — previous sentence boundary.
+    SentencePrev,
+    /// `)` — next sentence boundary.
+    SentenceNext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +249,11 @@ pub enum TextObject {
     /// content between `>` and `</`; `inner = false` covers the open
     /// tag through the close tag inclusive.
     XmlTag,
+    /// `is` / `as` — sentence: a run ending at `.`, `?`, or `!`
+    /// followed by whitespace or end-of-line. `inner = true` covers
+    /// the sentence text only; `inner = false` includes trailing
+    /// whitespace.
+    Sentence,
 }
 
 /// Classification determines how operators treat the range end.
@@ -1946,6 +1955,8 @@ fn parse_motion(input: &Input) -> Option<Motion> {
         Key::Char('L') => Some(Motion::ViewportBottom),
         Key::Char('{') => Some(Motion::ParagraphPrev),
         Key::Char('}') => Some(Motion::ParagraphNext),
+        Key::Char('(') => Some(Motion::SentencePrev),
+        Key::Char(')') => Some(Motion::SentenceNext),
         _ => None,
     }
 }
@@ -2187,6 +2198,20 @@ fn apply_motion_cursor_ctx(ed: &mut Editor<'_>, motion: &Motion, count: usize, a
         Motion::ParagraphNext => {
             ed.buffer_mut().move_paragraph_next(count);
             ed.push_buffer_cursor_to_textarea();
+        }
+        Motion::SentencePrev => {
+            for _ in 0..count.max(1) {
+                if let Some((row, col)) = sentence_boundary(ed, false) {
+                    ed.jump_cursor(row, col);
+                }
+            }
+        }
+        Motion::SentenceNext => {
+            for _ in 0..count.max(1) {
+                if let Some((row, col)) = sentence_boundary(ed, true) {
+                    ed.jump_cursor(row, col);
+                }
+            }
         }
     }
 }
@@ -2704,6 +2729,7 @@ fn handle_text_object(
         '<' | '>' => TextObject::Bracket('<'),
         'p' => TextObject::Paragraph,
         't' => TextObject::XmlTag,
+        's' => TextObject::Sentence,
         _ => return true,
     };
     apply_op_with_text_object(ed, op, obj, inner);
@@ -2732,6 +2758,7 @@ fn handle_visual_text_obj(ed: &mut Editor<'_>, input: Input, inner: bool) -> boo
         '<' | '>' => TextObject::Bracket('<'),
         'p' => TextObject::Paragraph,
         't' => TextObject::XmlTag,
+        's' => TextObject::Sentence,
         _ => return true,
     };
     let Some((start, end, kind)) = text_object_range(ed, obj, inner) else {
@@ -3689,7 +3716,227 @@ fn text_object_range(
         TextObject::XmlTag => {
             tag_text_object(ed, inner).map(|(s, e)| (s, e, MotionKind::Exclusive))
         }
+        TextObject::Sentence => {
+            sentence_text_object(ed, inner).map(|(s, e)| (s, e, MotionKind::Exclusive))
+        }
     }
+}
+
+/// `(` / `)` — walk to the next sentence boundary in `forward` direction.
+/// Returns `(row, col)` of the boundary's first non-whitespace cell, or
+/// `None` when already at the buffer's edge in that direction.
+fn sentence_boundary(ed: &Editor<'_>, forward: bool) -> Option<(usize, usize)> {
+    let lines = ed.buffer().lines();
+    if lines.is_empty() {
+        return None;
+    }
+    let pos_to_idx = |pos: (usize, usize)| -> usize {
+        let mut idx = 0;
+        for line in lines.iter().take(pos.0) {
+            idx += line.chars().count() + 1;
+        }
+        idx + pos.1
+    };
+    let idx_to_pos = |mut idx: usize| -> (usize, usize) {
+        for (r, line) in lines.iter().enumerate() {
+            let len = line.chars().count();
+            if idx <= len {
+                return (r, idx);
+            }
+            idx -= len + 1;
+        }
+        let last = lines.len().saturating_sub(1);
+        (last, lines[last].chars().count())
+    };
+    let mut chars: Vec<char> = Vec::new();
+    for (r, line) in lines.iter().enumerate() {
+        chars.extend(line.chars());
+        if r + 1 < lines.len() {
+            chars.push('\n');
+        }
+    }
+    if chars.is_empty() {
+        return None;
+    }
+    let total = chars.len();
+    let cursor_idx = pos_to_idx(ed.cursor()).min(total - 1);
+    let is_terminator = |c: char| matches!(c, '.' | '?' | '!');
+
+    if forward {
+        // Walk forward looking for a terminator run followed by
+        // whitespace; land on the first non-whitespace cell after.
+        let mut i = cursor_idx + 1;
+        while i < total {
+            if is_terminator(chars[i]) {
+                while i + 1 < total && is_terminator(chars[i + 1]) {
+                    i += 1;
+                }
+                if i + 1 >= total {
+                    return None;
+                }
+                if chars[i + 1].is_whitespace() {
+                    let mut j = i + 1;
+                    while j < total && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if j >= total {
+                        return None;
+                    }
+                    return Some(idx_to_pos(j));
+                }
+            }
+            i += 1;
+        }
+        None
+    } else {
+        // Walk backward to find the start of the current sentence (if
+        // we're already at the start, jump to the previous sentence's
+        // start instead).
+        let find_start = |from: usize| -> Option<usize> {
+            let mut start = from;
+            while start > 0 {
+                let prev = chars[start - 1];
+                if prev.is_whitespace() {
+                    let mut k = start - 1;
+                    while k > 0 && chars[k - 1].is_whitespace() {
+                        k -= 1;
+                    }
+                    if k > 0 && is_terminator(chars[k - 1]) {
+                        break;
+                    }
+                }
+                start -= 1;
+            }
+            while start < total && chars[start].is_whitespace() {
+                start += 1;
+            }
+            (start < total).then_some(start)
+        };
+        let current_start = find_start(cursor_idx)?;
+        if current_start < cursor_idx {
+            return Some(idx_to_pos(current_start));
+        }
+        // Already at the sentence start — step over the boundary into
+        // the previous sentence and find its start.
+        let mut k = current_start;
+        while k > 0 && chars[k - 1].is_whitespace() {
+            k -= 1;
+        }
+        if k == 0 {
+            return None;
+        }
+        let prev_start = find_start(k - 1)?;
+        Some(idx_to_pos(prev_start))
+    }
+}
+
+/// `is` / `as` — sentence: text up to and including the next sentence
+/// terminator (`.`, `?`, `!`). Vim treats `.`/`?`/`!` followed by
+/// whitespace (or end-of-line) as a boundary; runs of consecutive
+/// terminators stay attached to the same sentence. `as` extends to
+/// include trailing whitespace; `is` does not.
+fn sentence_text_object(ed: &Editor<'_>, inner: bool) -> Option<((usize, usize), (usize, usize))> {
+    let lines = ed.buffer().lines();
+    if lines.is_empty() {
+        return None;
+    }
+    // Flatten the buffer so a sentence can span lines (vim's behaviour).
+    // Newlines count as whitespace for boundary detection.
+    let pos_to_idx = |pos: (usize, usize)| -> usize {
+        let mut idx = 0;
+        for line in lines.iter().take(pos.0) {
+            idx += line.chars().count() + 1;
+        }
+        idx + pos.1
+    };
+    let idx_to_pos = |mut idx: usize| -> (usize, usize) {
+        for (r, line) in lines.iter().enumerate() {
+            let len = line.chars().count();
+            if idx <= len {
+                return (r, idx);
+            }
+            idx -= len + 1;
+        }
+        let last = lines.len().saturating_sub(1);
+        (last, lines[last].chars().count())
+    };
+    let mut chars: Vec<char> = Vec::new();
+    for (r, line) in lines.iter().enumerate() {
+        chars.extend(line.chars());
+        if r + 1 < lines.len() {
+            chars.push('\n');
+        }
+    }
+    if chars.is_empty() {
+        return None;
+    }
+
+    let cursor_idx = pos_to_idx(ed.cursor()).min(chars.len() - 1);
+    let is_terminator = |c: char| matches!(c, '.' | '?' | '!');
+
+    // Walk backward from cursor to find the start of the current
+    // sentence. A boundary is: whitespace immediately after a run of
+    // terminators (or start-of-buffer).
+    let mut start = cursor_idx;
+    while start > 0 {
+        let prev = chars[start - 1];
+        if prev.is_whitespace() {
+            // Check if the whitespace follows a terminator — if so,
+            // we've crossed a sentence boundary; the sentence begins
+            // at the first non-whitespace cell *after* this run.
+            let mut k = start - 1;
+            while k > 0 && chars[k - 1].is_whitespace() {
+                k -= 1;
+            }
+            if k > 0 && is_terminator(chars[k - 1]) {
+                break;
+            }
+        }
+        start -= 1;
+    }
+    // Skip leading whitespace (vim doesn't include it in the
+    // sentence body).
+    while start < chars.len() && chars[start].is_whitespace() {
+        start += 1;
+    }
+    if start >= chars.len() {
+        return None;
+    }
+
+    // Walk forward to the sentence end (last terminator before the
+    // next whitespace boundary).
+    let mut end = start;
+    while end < chars.len() {
+        if is_terminator(chars[end]) {
+            // Consume any consecutive terminators (e.g. `?!`).
+            while end + 1 < chars.len() && is_terminator(chars[end + 1]) {
+                end += 1;
+            }
+            // If followed by whitespace or end-of-buffer, that's the
+            // boundary.
+            if end + 1 >= chars.len() || chars[end + 1].is_whitespace() {
+                break;
+            }
+        }
+        end += 1;
+    }
+    // Inclusive end → exclusive end_idx.
+    let end_idx = (end + 1).min(chars.len());
+
+    let final_end = if inner {
+        end_idx
+    } else {
+        // `as`: include trailing whitespace (but stop before the next
+        // newline so we don't gobble a paragraph break — vim keeps
+        // sentences within a paragraph for the trailing-ws extension).
+        let mut e = end_idx;
+        while e < chars.len() && chars[e].is_whitespace() && chars[e] != '\n' {
+            e += 1;
+        }
+        e
+    };
+
+    Some((idx_to_pos(start), idx_to_pos(final_end)))
 }
 
 /// `it` / `at` — XML tag pair text object. Builds a flat char index of
@@ -5383,6 +5630,93 @@ mod tests {
     }
 
     // ─── Operator pipeline spot checks (non-tag text objects) ───────
+
+    #[test]
+    fn sentence_motion_close_paren_jumps_forward() {
+        let mut e = editor_with("Alpha. Beta. Gamma.");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, ")");
+        // Lands on the start of "Beta".
+        assert_eq!(e.cursor(), (0, 7));
+        run_keys(&mut e, ")");
+        assert_eq!(e.cursor(), (0, 13));
+    }
+
+    #[test]
+    fn sentence_motion_open_paren_jumps_backward() {
+        let mut e = editor_with("Alpha. Beta. Gamma.");
+        e.jump_cursor(0, 13);
+        run_keys(&mut e, "(");
+        // Cursor was at start of "Gamma" (col 13); first `(` walks
+        // back to the previous sentence's start.
+        assert_eq!(e.cursor(), (0, 7));
+        run_keys(&mut e, "(");
+        assert_eq!(e.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn sentence_motion_count() {
+        let mut e = editor_with("A. B. C. D.");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "3)");
+        // 3 forward jumps land on "D".
+        assert_eq!(e.cursor(), (0, 9));
+    }
+
+    #[test]
+    fn dis_deletes_inner_sentence() {
+        let mut e = editor_with("First one. Second one. Third one.");
+        e.jump_cursor(0, 13);
+        run_keys(&mut e, "dis");
+        // Removed "Second one." inclusive of its terminator.
+        assert_eq!(e.buffer().lines()[0], "First one.  Third one.");
+    }
+
+    #[test]
+    fn das_deletes_around_sentence_with_trailing_space() {
+        let mut e = editor_with("Alpha. Beta. Gamma.");
+        e.jump_cursor(0, 8);
+        run_keys(&mut e, "das");
+        // `as` swallows the trailing whitespace before the next
+        // sentence — exactly one space here.
+        assert_eq!(e.buffer().lines()[0], "Alpha. Gamma.");
+    }
+
+    #[test]
+    fn dis_handles_double_terminator() {
+        let mut e = editor_with("Wow!? Next.");
+        e.jump_cursor(0, 1);
+        run_keys(&mut e, "dis");
+        // Run of `!?` collapses into one boundary; sentence body
+        // including both terminators is removed.
+        assert_eq!(e.buffer().lines()[0], " Next.");
+    }
+
+    #[test]
+    fn dis_first_sentence_from_cursor_at_zero() {
+        let mut e = editor_with("Alpha. Beta.");
+        e.jump_cursor(0, 0);
+        run_keys(&mut e, "dis");
+        assert_eq!(e.buffer().lines()[0], " Beta.");
+    }
+
+    #[test]
+    fn yis_yanks_inner_sentence() {
+        let mut e = editor_with("Hello world. Bye.");
+        e.jump_cursor(0, 5);
+        run_keys(&mut e, "yis");
+        assert_eq!(e.registers().read('"').unwrap().text, "Hello world.");
+    }
+
+    #[test]
+    fn vis_visually_selects_inner_sentence() {
+        let mut e = editor_with("First. Second.");
+        e.jump_cursor(0, 1);
+        run_keys(&mut e, "vis");
+        assert_eq!(e.vim_mode(), VimMode::Visual);
+        run_keys(&mut e, "y");
+        assert_eq!(e.registers().read('"').unwrap().text, "First.");
+    }
 
     #[test]
     fn ciw_changes_inner_word() {
