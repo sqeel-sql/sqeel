@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "sqeel-buffer",
     "sqeel-core",
     "sqeel-tui",
     "sqeel-gui",
