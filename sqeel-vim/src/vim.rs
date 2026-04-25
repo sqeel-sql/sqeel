@@ -3130,15 +3130,15 @@ fn do_char_delete(ed: &mut Editor<'_>, forward: bool, count: usize) {
 /// cursor on the current line, add `delta`, leave the cursor on the last
 /// digit of the result. No-op if the line has no digits to the right.
 fn adjust_number(ed: &mut Editor<'_>, delta: i64) -> bool {
-    let (row, col) = ed.textarea.cursor();
-    let chars: Vec<char> = {
-        let lines = ed.textarea.lines();
-        if row >= lines.len() {
-            return false;
-        }
-        lines[row].chars().collect()
+    use sqeel_buffer::{Edit, MotionKind, Position};
+    ed.sync_buffer_content_from_textarea();
+    let cursor = ed.buffer().cursor();
+    let row = cursor.row;
+    let chars: Vec<char> = match ed.buffer().line(row) {
+        Some(l) => l.chars().collect(),
+        None => return false,
     };
-    let Some(digit_start) = (col..chars.len()).find(|&i| chars[i].is_ascii_digit()) else {
+    let Some(digit_start) = (cursor.col..chars.len()).find(|&i| chars[i].is_ascii_digit()) else {
         return false;
     };
     let span_start = if digit_start > 0 && chars[digit_start - 1] == '-' {
@@ -3157,14 +3157,21 @@ fn adjust_number(ed: &mut Editor<'_>, delta: i64) -> bool {
     let new_s = n.saturating_add(delta).to_string();
 
     ed.push_undo();
-    ed.textarea.move_cursor(CursorMove::Jump(row, span_start));
-    for _ in 0..(span_end - span_start) {
-        ed.mutate(|t| t.delete_next_char());
-    }
-    ed.mutate(|t| t.insert_str(&new_s));
+    let span_start_pos = Position::new(row, span_start);
+    let span_end_pos = Position::new(row, span_end);
+    ed.mutate_edit(Edit::DeleteRange {
+        start: span_start_pos,
+        end: span_end_pos,
+        kind: MotionKind::Char,
+    });
+    ed.mutate_edit(Edit::InsertStr {
+        at: span_start_pos,
+        text: new_s.clone(),
+    });
     let new_len = new_s.chars().count();
-    ed.textarea
-        .move_cursor(CursorMove::Jump(row, span_start + new_len - 1));
+    ed.buffer_mut()
+        .set_cursor(Position::new(row, span_start + new_len.saturating_sub(1)));
+    ed.push_buffer_cursor_to_textarea();
     true
 }
 
