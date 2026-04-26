@@ -53,9 +53,9 @@ jobs:
       - name: Verify tag matches Cargo.toml version
         shell: bash
         run: |
-          CARGO_VER=$(grep -m1 '^version' sqeel/Cargo.toml | cut -d'"' -f2)
+          CARGO_VER=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           if [ "v$CARGO_VER" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match sqeel/Cargo.toml version v$CARGO_VER"
+            echo "::error::tag $GITHUB_REF_NAME does not match workspace.package version v$CARGO_VER"
             exit 1
           fi
 
