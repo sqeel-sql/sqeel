@@ -12,6 +12,7 @@
 //! `intents` queue stays empty.
 
 use crate::Clipboard;
+use hjkl_engine::types::Viewport;
 use hjkl_engine::{CursorShape, Host, Pos};
 use std::time::Instant;
 
@@ -79,6 +80,11 @@ pub struct SqeelHost {
     started: Instant,
     intents: Vec<SqeelIntent>,
     cancel: bool,
+    /// Runtime viewport — relocated off `hjkl_buffer::Buffer` in
+    /// hjkl 0.0.34 (Patch C-δ.1). Host owns the (top_row, top_col,
+    /// width, height, text_width, wrap) tuple; the engine reads/writes
+    /// scroll offsets, the renderer publishes width/height per frame.
+    viewport: Viewport,
 }
 
 impl SqeelHost {
@@ -91,6 +97,15 @@ impl SqeelHost {
             started: Instant::now(),
             intents: Vec::new(),
             cancel: false,
+            // Sensible default — renderer overwrites width/height per
+            // frame from the editor pane's chunk rect.
+            viewport: Viewport {
+                top_row: 0,
+                top_col: 0,
+                width: 80,
+                height: 24,
+                ..Viewport::default()
+            },
         }
     }
 
@@ -157,6 +172,14 @@ impl Host for SqeelHost {
 
     fn emit_intent(&mut self, intent: Self::Intent) {
         self.intents.push(intent);
+    }
+
+    fn viewport(&self) -> &Viewport {
+        &self.viewport
+    }
+
+    fn viewport_mut(&mut self) -> &mut Viewport {
+        &mut self.viewport
     }
 }
 

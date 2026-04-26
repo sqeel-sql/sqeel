@@ -782,7 +782,7 @@ async fn run_loop(
         // regardless of buffer size, so no heavy-pipeline gate here.
         // The highlight thread coalesces (latest-wins) so bursts are cheap.
         const HIGHLIGHT_WINDOW_MARGIN: usize = 500;
-        let viewport_top = editor.buffer().viewport().top_row;
+        let viewport_top = editor.host().viewport().top_row;
         let viewport_height = editor.viewport_height_value() as usize;
         let viewport_scrolled = last_highlight_top == usize::MAX
             || viewport_top.abs_diff(last_highlight_top) >= HIGHLIGHT_WINDOW_MARGIN / 2;
@@ -3568,8 +3568,8 @@ fn draw(
     // in a long file.
     if state.show_completions && !state.completions.is_empty() {
         let (cur_row, cur_col) = editor.cursor();
-        let top_row = editor.buffer().viewport().top_row;
-        let top_col = editor.buffer().viewport().top_col;
+        let top_row = editor.host().viewport().top_row;
+        let top_col = editor.host().viewport().top_col;
         let screen_row = cur_row.saturating_sub(top_row);
         let screen_col = cur_col.saturating_sub(top_col);
         draw_completions(f, state, right_chunks[0], screen_row, screen_col);
@@ -4370,7 +4370,7 @@ fn draw_editor(
     let gutter_width = digits.saturating_add(2);
     let wrap_mode = editor.settings().wrap;
     {
-        let v = editor.buffer_mut().viewport_mut();
+        let v = editor.host_mut().viewport_mut();
         v.width = chunks[1].width;
         v.height = chunks[1].height;
         v.text_width = chunks[1].width.saturating_sub(gutter_width);
@@ -4426,6 +4426,7 @@ fn draw_editor(
     let selection = editor.buffer_selection();
     let view = hjkl_buffer::BufferView {
         buffer: editor.buffer(),
+        viewport: editor.host().viewport(),
         selection,
         resolver: &resolver,
         cursor_line_bg: Style::default().bg(cursor_line_bg),
