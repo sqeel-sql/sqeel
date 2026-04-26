@@ -1877,9 +1877,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hjkl-buffer"
-version = "0.0.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aac624a04a1c7bb4edffaaa5d341f04753644c92cebd642417777ad5fb31ecb0"
+version = "0.0.22"
 dependencies = [
  "ratatui",
  "regex",
@@ -1888,9 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "hjkl-editor"
-version = "0.0.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb766e96cde0258bf4dc86992d3c071eccb05adfd1bd38017a6421043ca3cd18"
+version = "0.0.22"
 dependencies = [
  "hjkl-buffer",
  "hjkl-engine",
@@ -1899,9 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "hjkl-engine"
-version = "0.0.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c0791e0299e72585e52ed3f9c69bcfc99c20846abbd981b627ceec0a4fde21c"
+version = "0.0.22"
 dependencies = [
  "bitflags 2.11.1",
  "crossterm",
@@ -6054,3 +6048,7 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[patch.unused]]
+name = "hjkl-ratatui"
+version = "0.0.22"

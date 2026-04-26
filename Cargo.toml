@@ -1,3 +1,15 @@
 [workspace]
 members = ["sqeel-core", "sqeel-tui", "sqeel-gui", "sqeel"]
 resolver = "2"
+
+# Local-dev override: point hjkl-* crates at the in-tree checkout so
+# we can iterate against unreleased changes without waiting on the
+# crates.io publish rate limit. The `version = "=0.0.X"` pins in
+# member Cargo.toml files still drive release builds — comment this
+# block out once the latest tag is published and the consumer pin
+# catches up.
+[patch.crates-io]
+hjkl-buffer = { path = "../hjkl/crates/hjkl-buffer" }
+hjkl-engine = { path = "../hjkl/crates/hjkl-engine" }
+hjkl-editor = { path = "../hjkl/crates/hjkl-editor" }
+hjkl-ratatui = { path = "../hjkl/crates/hjkl-ratatui" }
