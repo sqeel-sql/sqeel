@@ -1,5 +1,6 @@
 [workspace]
 members = ["sqeel-core", "sqeel-tui", "sqeel-gui", "sqeel"]
+default-members = ["sqeel"]
 resolver = "2"
 
 # Local-dev override: point hjkl-* crates at the in-tree checkout so
