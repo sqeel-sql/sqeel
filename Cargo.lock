@@ -3906,7 +3906,7 @@ dependencies = [
 
 [[package]]
 name = "sqeel"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3921,7 +3921,7 @@ dependencies = [
 
 [[package]]
 name = "sqeel-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bigdecimal",
@@ -3943,7 +3943,7 @@ dependencies = [
 
 [[package]]
 name = "sqeel-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -3953,7 +3953,7 @@ dependencies = [
 
 [[package]]
 name = "sqeel-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
