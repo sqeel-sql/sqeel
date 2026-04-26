@@ -3243,7 +3243,7 @@ fn diag_label(state: &AppState) -> Option<Span<'static>> {
 /// `i` is the 1-based index of the match at-or-after the cursor; 0 means no
 /// match has been navigated to yet (cursor is past the last match).
 fn search_label(editor: &Editor) -> Option<Span<'static>> {
-    let re = editor.buffer().search_pattern()?;
+    let re = editor.search_state().pattern.as_ref()?;
     let pat = re.as_str().to_string();
     let lines = editor.buffer().lines();
     let (cur_row, cur_col) = editor.cursor();
@@ -4439,6 +4439,8 @@ fn draw_editor(
             .fg(ui().editor_search_fg),
         signs: &signs,
         conceals: &[],
+        spans: editor.buffer_spans(),
+        search_pattern: editor.search_state().pattern.as_ref(),
     };
     f.render_widget(view, chunks[1]);
 
