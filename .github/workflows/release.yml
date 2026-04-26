@@ -50,8 +50,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ./.github/actions/sync-hjkl
-
       - name: Verify tag matches Cargo.toml version
         shell: bash
         run: |

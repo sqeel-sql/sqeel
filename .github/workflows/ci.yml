@@ -27,8 +27,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ./.github/actions/sync-hjkl
-
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
