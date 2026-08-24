@@ -531,9 +531,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.5"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "301b56658598e48f3648647ac6fc887be7e7108eddfa4e9b63fcf3ec58c0cadf"
+checksum = "473c7e07f409a8d772161724aa8db6a765a2532a70f9667eeb7b49d3d02fbdca"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -541,9 +541,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.5"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94a65403d1a1bd28f7dc68eb8506e8874808ee5eecb59298de588e2e1407a078"
+checksum = "7b48fea5a88e9ae728a2dcbedbfc0e730f7d60da42e1cb049a83c9fb8b789889"
 dependencies = [
  "anstream",
  "anstyle",
@@ -553,18 +553,18 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.6.8"
+version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f84a88507dbd05c695f2cb5e8558e747179134005e9893882dec964190ed89"
+checksum = "3be2ad0423bdbbb0e25bc89add796f3559706d4a95e1bc98e4d9662a957b6a19"
 dependencies = [
  "clap",
 ]
 
 [[package]]
 name = "clap_complete_nushell"
-version = "4.6.1"
+version = "4.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "933b05d5d83ff65fd7eaf5d106c792f2264908790a2642aca57429767b762ce2"
+checksum = "ffb66bc82eb9c92b1727310ae2c5868df22ae7cf46185bc5c544a4fa71955e49"
 dependencies = [
  "clap",
  "clap_complete",
@@ -590,9 +590,9 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clap_mangen"
-version = "0.3.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64f383fe92a826d3b1a3c18e0cb791bef22948931b4909f6781adea466ede5e8"
+checksum = "211d617eaa4b735c96c9e0228fcbdb5120ef623f2b8cb67ffb84c3e02dbc28a4"
 dependencies = [
  "clap",
  "roff",
@@ -1451,9 +1451,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hjkl-anvil"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b224374658339ece06aeb55d25bfc8f20bfe2064b789d3d9b3d7936b3d38867f"
+checksum = "219ac6ac42ea7521da77ffe394a6b1a809e62aab0841fe8831585d28bed3283c"
 dependencies = [
  "crossbeam-channel",
  "flate2",
@@ -1471,9 +1471,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-bonsai"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffdcc5124ba919215bf0d9368fd78a15652233cf896fb330421e34e6a3cb82c6"
+checksum = "987f5dec6ed7c78c0d50142867e73f4d397fd21ca3bab0c9a86fb2c38dbe4f3a"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1495,9 +1495,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-buffer"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f21c882b16ca061550eb522105d2297f98fda2f42854b0e5ec7a233b6e91c7eb"
+checksum = "90e1b58f8f1df988b893fab78bc6ed03e2f4f85439f75d5abdc24c91b25c9cb2"
 dependencies = [
  "regex",
  "ropey",
@@ -1507,9 +1507,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-buffer-tui"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bbfeff97e0689095e42c789584fff0426000f1e238cd579919f6531852385f5"
+checksum = "619cd863fb438f8d3c97905d34a4ee5b3b342f011a627ecfb969275c264f7166"
 dependencies = [
  "hjkl-buffer",
  "ratatui",
@@ -1519,9 +1519,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-clipboard"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "840f49071bdb876722173561c3c0c5e9a2a3140e90cdfba6f7cee6f12251db0f"
+checksum = "0e6657baea4adbc765d6125ebb51dea7cc596cfac0683520a6d538fef5f0cf99"
 dependencies = [
  "async-trait",
  "bitflags 2.13.1",
@@ -1531,9 +1531,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-config"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36b684fb2baaf4c73155a6075189112edc39dd84ceaf0b364ea9d176fb590839"
+checksum = "fb53e207b3f531ed1e7b618661ef83e1af649aaddbafacd034cbe7b2d8a1ae8c"
 dependencies = [
  "hjkl-fs",
  "hjkl-xdg",
@@ -1545,9 +1545,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-editor-tui"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13e4e573fbbf0bb6dad935cb281a8ed9f19aa03a401b2dbc5eda73e875e481a9"
+checksum = "12293588ea2614be812dfdc700490034b8745c76a7fae7e1e2b128e20cf58e88"
 dependencies = [
  "hjkl-engine",
  "hjkl-engine-tui",
@@ -1558,9 +1558,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-engine"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f78cf8c606d0faf37def7347ee775c52aeeb42e566f11f10eb372e38be96a35e"
+checksum = "833a5b0569274656973c304027ee06e044081c14c8144ab1de09a42988090083"
 dependencies = [
  "bitflags 2.13.1",
  "hjkl-buffer",
@@ -1574,9 +1574,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-engine-tui"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73030b449ac223b6e5103391db8fa5a1e0fb7b70098d71ff8a9ceda6917b1627"
+checksum = "914386861d84fe0f654f688d66d79b43d0fb0a94076b1f39b0b11eb97ef73236"
 dependencies = [
  "crossterm 0.29.0",
  "hjkl-buffer",
@@ -1586,9 +1586,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-ex"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63d54af21d178bb2ecc24e26523471abe07d54a6b233c59e4834b71ca74ee02d"
+checksum = "9d9607fd5780b67cd167a029e9d70c0c2d143fc2d57aad69d2674ed78e8387c3"
 dependencies = [
  "hjkl-buffer",
  "hjkl-engine",
@@ -1600,9 +1600,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-form"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dbc7a21f7a1d358e27ade8afcd7a2ff5c36e4e7ea1ffdf8663a399d9068b2b8"
+checksum = "e0b06049e793f3aebd47b482fa09984c815dcd32af77d042f507afb6db4208e1"
 dependencies = [
  "hjkl-buffer",
  "hjkl-engine",
@@ -1650,9 +1650,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-lsp"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bba0d9d2bdc4a614179f114fc7908e1f720c47a85d37275aa1021494b504586"
+checksum = "a1ee2b909bcea8f908147cf6e1d0bb79640528df5707f0d16de61220b326ff6a"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1665,9 +1665,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-picker"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48c2ae5ae06a9bf6ccdefb6590d806af79a304889d614149bb8c07e88ea3e0a0"
+checksum = "09fe0320180ca02150edbe5dd0b355598fbd656c44b853817b865e53d7830b3d"
 dependencies = [
  "hjkl-buffer",
  "hjkl-engine",
@@ -1679,9 +1679,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-picker-tui"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8479543a461b48f3cc82a32e17c59d96124fcfe2fca03e7ee4e70c165c5ef820"
+checksum = "2bc23828a8fb0a060c5f642cb82ef780c2649c593faab2b9504b1db2fc9179d5"
 dependencies = [
  "crossterm 0.29.0",
  "hjkl-buffer",
@@ -1694,9 +1694,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-splash"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "139596797ee6554c8600b63cedbdc7f70628889a55ee0c029444849b5cf3a38e"
+checksum = "f7c70271cb7bec43f92c87b7dbe8bdc90f10179b4af2d48ca7565523a5a38db8"
 
 [[package]]
 name = "hjkl-theme"
@@ -1711,9 +1711,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-vim"
-version = "0.41.0"
+version = "0.41.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9285eb858659e361e5a11638031a646e80b6729de30267c1d4fbdb11826a95c"
+checksum = "ffe16a083bef6ad7bec8996e6c878680c3c62383c77bd087739c084f7752eaa9"
 dependencies = [
  "hjkl-buffer",
  "hjkl-engine",
@@ -4371,9 +4371,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.26.11"
+version = "0.26.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af1c71c1c4cc0920b20d6b0f6572e7682cd07a6a2faec71067a31fa394c586df"
+checksum = "83c567a8e18ae93f20982c90370b16fd24023aeaf52f6052b96957ab253a0fec"
 dependencies = [
  "cc",
  "regex",
@@ -4545,9 +4545,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.24.0"
+version = "1.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
 dependencies = [
  "atomic",
  "getrandom 0.4.3",
