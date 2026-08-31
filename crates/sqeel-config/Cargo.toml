@@ -13,8 +13,8 @@ rust-version = "1.95"
 readme = "README.md"
 
 [dependencies]
-hjkl-config = "=0.41.0"
-hjkl-engine = "=0.41.0"
+hjkl-config = "=0.41.3"
+hjkl-engine = "=0.41.3"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 anyhow = "1"

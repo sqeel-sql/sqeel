@@ -14,10 +14,10 @@ readme = "README.md"
 
 [dependencies]
 sqeel-config = { version = "0.4", path = "../sqeel-config" }
-hjkl-engine = "=0.41.0"
-hjkl-bonsai = "=0.41.0"
-hjkl-config = "=0.41.0"
-hjkl-lsp = "=0.41.0"
+hjkl-engine = "=0.41.3"
+hjkl-bonsai = "=0.41.3"
+hjkl-config = "=0.41.3"
+hjkl-lsp = "=0.41.3"
 anyhow = "1"
 tracing = "0.1"
 dirs = "6.0.0"
